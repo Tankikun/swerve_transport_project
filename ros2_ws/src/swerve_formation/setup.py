@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'laplacian_formation_node = swerve_formation.laplacian_formation_node:main',
             'fake_swerve_simulator = swerve_formation.fake_swerve_simulator:main',
+            'serial_bridge_node = swerve_formation.serial_bridge_node:main',
         ],
     },
 )
