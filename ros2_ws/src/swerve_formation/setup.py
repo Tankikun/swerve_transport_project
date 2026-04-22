@@ -1,8 +1,4 @@
-import os
-
 from setuptools import find_packages, setup
-import os
-from glob import glob
 
 package_name = 'swerve_formation'
 
@@ -14,8 +10,6 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'),
-            glob('launch/*.py')),  # ← this is the missing line
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -33,6 +27,13 @@ setup(
             'laplacian_formation_node = swerve_formation.laplacian_formation_node:main',
             'fake_swerve_simulator = swerve_formation.fake_swerve_simulator:main',
             'serial_bridge_node = swerve_formation.serial_bridge_node:main',
+            'conveyor_base_node = swerve_formation.conveyor_base_node:main',
+            'ekf_node = swerve_formation.ekf_node:main',
+            'leader_election_node = swerve_formation.leader_election_node:main',
+            'navigation_node = swerve_formation.navigation_node:main',
+            'formation_size_node = swerve_formation.formation_size_node:main',
+            'ai_camera_node = swerve_formation.ai_camera_node:main',
+            '3d_slam_node = swerve_formation.slam_3d_node:main',
         ],
     },
 )

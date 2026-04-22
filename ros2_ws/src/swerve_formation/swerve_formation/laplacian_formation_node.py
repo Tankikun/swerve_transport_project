@@ -1,108 +1,99 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseArray, Pose
 from nav_msgs.msg import Odometry
 import numpy as np
-import math
+
 
 class LaplacianFormationController(Node):
     def __init__(self):
-        super().__init__('formation_controller')
-        
-        # --- PARAMETERS ---
+        super().__init__('laplacian_formation_node')
+
         self.declare_parameter('robot_id', 'tb3_0')
-        self.declare_parameter('neighbors', ['tb3_1']) # Who does this robot listen to?
-        self.declare_parameter('k_gain', 1.5)          # Consensus aggressiveness
-        
-        self.robot_id = self.get_parameter('robot_id').get_parameter_value().string_value
-        self.neighbors = self.get_parameter('neighbors').get_parameter_value().string_array_value
-        self.k_gain = self.get_parameter('k_gain').get_parameter_value().double_value
+        self.declare_parameter('neighbors', ['tb3_1'])
+        self.declare_parameter('k_gain', 1.5)
+        # This robot's [x, y] offset from the virtual center
+        self.declare_parameter('my_offset', [0.0, 0.5])
+        # Flat list [n0_x, n0_y, n1_x, n1_y, ...] in the same order as 'neighbors'
+        self.declare_parameter('neighbor_offsets', [0.0, -0.5])
 
-        # --- VIRTUAL STRUCTURE DEFINITION ---
-        # Define where each robot should be relative to the "Virtual Center" (0,0)
-        # Example: tb3_0 is on the Left (y=0.5), tb3_1 is on the Right (y=-0.5)
-        self.desired_offsets = {
-            'tb3_0': np.array([0.0, 0.5]),
-            'tb3_1': np.array([0.0, -0.5])
-        }
+        self.robot_id = self.get_parameter('robot_id').value
+        self.neighbors = self.get_parameter('neighbors').value
+        self.k_gain = self.get_parameter('k_gain').value
 
-        # State storage
-        self.my_pose = np.array([0.0, 0.0])
-        self.neighbor_poses = {neighbor: np.array([0.0, 0.0]) for neighbor in self.neighbors}
+        self.my_desired = np.array(self.get_parameter('my_offset').value, dtype=float)
+        nb_off = np.array(self.get_parameter('neighbor_offsets').value, dtype=float).reshape(-1, 2)
+        self.neighbor_desired = {n: nb_off[i] for i, n in enumerate(self.neighbors)}
 
-        # --- PUBLISHERS & SUBSCRIBERS ---
-        # 1. Subscribe to MY odometry
-        self.create_subscription(Odometry, f'/{self.robot_id}/odom', self.odom_callback, 10)
-        
-        # 2. Subscribe to NEIGHBORS' odometry (This leverages Zenoh's decentralized pub/sub)
+        self.my_pose = np.zeros(2)
+        self.neighbor_poses = {n: np.zeros(2) for n in self.neighbors}
+        self.virtual_vel = np.zeros(2)
+        self.virtual_angular = 0.0
+
+        # Consume EKF-fused pose — never raw /odom
+        self.create_subscription(
+            Odometry, f'/{self.robot_id}/ekf/odom', self._odom_cb, 10
+        )
         for neighbor in self.neighbors:
             self.create_subscription(
-                Odometry, 
-                f'/{neighbor}/odom', 
-                lambda msg, n=neighbor: self.neighbor_callback(msg, n), 
-                10
+                Odometry,
+                f'/{neighbor}/ekf/odom',
+                lambda msg, n=neighbor: self._neighbor_cb(msg, n),
+                10,
             )
 
-        # 3. Subscribe to the Virtual Center's commanded velocity (Teleop)
-        self.virtual_vel = np.array([0.0, 0.0])
-        self.create_subscription(Twist, '/virtual_center/cmd_vel', self.virtual_cmd_callback, 10)
+        self.create_subscription(
+            Twist, '/virtual_center/cmd_vel', self._virtual_cmd_cb, 10
+        )
 
-        # 4. Publisher for MY calculated velocity (Sent to OpenCR Swerve IK)
-        self.cmd_pub = self.create_publisher(Twist, f'/{self.robot_id}/cmd_vel', 10)
+        self._cmd_pub = self.create_publisher(Twist, f'/{self.robot_id}/cmd_vel', 10)
+        self._state_pub = self.create_publisher(PoseArray, '/formation/state', 10)
 
-        # Control Loop Timer (Runs at 20 Hz)
-        self.create_timer(0.05, self.control_loop)
-        self.get_logger().info(f"Laplacian Controller started for {self.robot_id}")
+        self.create_timer(0.05, self._control_loop)
+        self.get_logger().info(f'LaplacianFormationController ready for {self.robot_id}')
 
-    def odom_callback(self, msg):
+    def _odom_cb(self, msg: Odometry):
         self.my_pose[0] = msg.pose.pose.position.x
         self.my_pose[1] = msg.pose.pose.position.y
 
-    def neighbor_callback(self, msg, neighbor_id):
+    def _neighbor_cb(self, msg: Odometry, neighbor_id: str):
         self.neighbor_poses[neighbor_id][0] = msg.pose.pose.position.x
         self.neighbor_poses[neighbor_id][1] = msg.pose.pose.position.y
 
-    def virtual_cmd_callback(self, msg):
-        # The base velocity the whole formation should move at
+    def _virtual_cmd_cb(self, msg: Twist):
         self.virtual_vel[0] = msg.linear.x
         self.virtual_vel[1] = msg.linear.y
+        self.virtual_angular = msg.angular.z
 
-    def control_loop(self):
-        # --- THE GRAPH LAPLACIAN MATH ---
-        
-        consensus_velocity = np.array([0.0, 0.0])
-        my_desired = self.desired_offsets[self.robot_id]
-
-        # Calculate the Laplacian sum: Sum of (State Difference - Desired Difference)
+    def _control_loop(self):
+        consensus = np.zeros(2)
         for neighbor in self.neighbors:
-            neighbor_desired = self.desired_offsets[neighbor]
-            
-            # Actual distance vector between me and neighbor
             actual_diff = self.my_pose - self.neighbor_poses[neighbor]
-            
-            # Where we SHOULD be relative to each other
-            desired_diff = my_desired - neighbor_desired
-            
-            # The Error
-            error = actual_diff - desired_diff
-            
-            # Accumulate the consensus velocity correction
-            consensus_velocity -= self.k_gain * error
+            desired_diff = self.my_desired - self.neighbor_desired[neighbor]
+            consensus -= self.k_gain * (actual_diff - desired_diff)
 
-        # --- FINAL VELOCITY ---
-        # Final = Feedforward (Virtual Center Speed) + Feedback (Laplacian Correction)
-        final_vx = self.virtual_vel[0] + consensus_velocity[0]
-        final_vy = self.virtual_vel[1] + consensus_velocity[1]
-
-        # Publish to the low-level Swerve IK node
         cmd = Twist()
-        cmd.linear.x = final_vx
-        cmd.linear.y = final_vy
-        # Note: Angular Z (rotation of the virtual structure) requires a rotational
-        # transformation matrix added to the Laplacian, kept simple here for planar X/Y.
-        cmd.angular.z = 0.0 
-        
-        self.cmd_pub.publish(cmd)
+        cmd.linear.x = float(self.virtual_vel[0] + consensus[0])
+        cmd.linear.y = float(self.virtual_vel[1] + consensus[1])
+        cmd.angular.z = self.virtual_angular
+        self._cmd_pub.publish(cmd)
+
+        # Publish known formation poses (self + all neighbors) for formation_size_node
+        pa = PoseArray()
+        pa.header.stamp = self.get_clock().now().to_msg()
+        pa.header.frame_id = 'odom'
+        p0 = Pose()
+        p0.position.x, p0.position.y = float(self.my_pose[0]), float(self.my_pose[1])
+        p0.orientation.w = 1.0
+        pa.poses = [p0]
+        for n in self.neighbors:
+            p = Pose()
+            p.position.x = float(self.neighbor_poses[n][0])
+            p.position.y = float(self.neighbor_poses[n][1])
+            p.orientation.w = 1.0
+            pa.poses.append(p)
+        self._state_pub.publish(pa)
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -114,6 +105,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

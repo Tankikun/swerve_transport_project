@@ -4,7 +4,7 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -20,8 +20,6 @@ def generate_launch_description():
         DeclareLaunchArgument('k_gain',    default_value=k_gain),
         DeclareLaunchArgument('start_x',   default_value=start_x),
         DeclareLaunchArgument('start_y',   default_value=start_y),
-
-        PushRosNamespace(robot_id),
 
         # --- Node 1: Graph Laplacian Formation Controller ---
         # Subscribes to /virtual_center/cmd_vel and neighbor odom.
