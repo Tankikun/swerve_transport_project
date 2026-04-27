@@ -36,12 +36,12 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # --- Node 2: Serial Bridge ---
+        # --- Node 2: Serial Bridge (lifecycle) ---
         # Subscribes to /{robot_id}/cmd_vel (from Laplacian node above).
         # Writes "x_dot y_dot gamma_dot\n" to OpenCR over USB serial.
         Node(
             package='swerve_formation',
-            executable='serial_bridge_node',
+            executable='conveyor_base_node',
             name='serial_bridge',
             parameters=[{
                 'robot_id': robot_id,
