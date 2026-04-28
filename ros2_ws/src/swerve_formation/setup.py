@@ -33,6 +33,9 @@ setup(
             'formation_size_node = swerve_formation.formation_size_node:main',
             'ai_camera_node = swerve_formation.ai_camera_node:main',
             '3d_slam_node = swerve_formation.slam_3d_node:main',
+            # ── Simulation helpers ──────────────────────────────────────────
+            'static_leader_publisher = swerve_formation.static_leader_publisher:main',
+            'send_goal_node = swerve_formation.send_goal_node:main',
         ],
     },
 )
