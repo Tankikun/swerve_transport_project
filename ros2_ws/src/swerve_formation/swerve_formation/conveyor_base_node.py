@@ -24,6 +24,8 @@ import serial
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 import tf2_ros
 
 # ── FK constants (must match turtlebot3_conveyor.h) ──────────────────────────
@@ -114,9 +116,16 @@ class ConveyorBaseNode(Node):
         self._sub = self.create_subscription(
             Twist, f'/{robot_id}/cmd_vel', self._cmd_cb, 10
         )
+        # Serial command passthrough (used by alignment_node for odom reset)
+        self.create_subscription(
+            String, f'/{robot_id}/serial_cmd', self._serial_cmd_cb, 10
+        )
         self._odom_pub       = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
         self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self._read_timer     = self.create_timer(0.1, self._read_serial_cb)
+
+        # Reset odom service (sends 'R\n' to OpenCR)
+        self.create_service(Trigger, f'/{robot_id}/reset_odom', self._reset_odom_srv)
         self._watchdog_timer = self.create_timer(0.2, self._watchdog_cb)
 
         self._last_cmd_t = time.time()
@@ -287,6 +296,30 @@ class ConveyorBaseNode(Node):
             self.get_logger().error(f'publish_odom failed: {e}')
 
     # ── cmd_vel / watchdog ────────────────────────────────────────────────────
+
+    def _serial_cmd_cb(self, msg: String):
+        """Forward raw command characters to OpenCR (e.g. 'R' for odom reset)."""
+        if self._ser and self._ser.is_open:
+            try:
+                self._ser.write(f'{msg.data}\n'.encode('ascii'))
+            except serial.SerialException:
+                pass
+
+    def _reset_odom_srv(self, request, response):
+        """Service: send 'R\\n' to OpenCR to zero its odometry."""
+        self._odom_x = self._odom_y = self._odom_theta = 0.0
+        if self._ser and self._ser.is_open:
+            try:
+                self._ser.write(b'R\n')
+                response.success = True
+                response.message = 'Odom reset sent to OpenCR.'
+            except serial.SerialException as e:
+                response.success = False
+                response.message = str(e)
+        else:
+            response.success = False
+            response.message = 'Serial port not open.'
+        return response
 
     def _cmd_cb(self, msg: Twist):
         self._last_cmd_t = time.time()
