@@ -17,7 +17,6 @@ Lifecycle transitions:
 """
 
 import math
-import threading
 import time
 
 import rclpy
@@ -83,10 +82,9 @@ class ConveyorBaseNode(Node):
         self._watchdog_timer = None
         self._active = False
         self._last_cmd_t = 0.0
-        self._odom_pub = None
         self._reset_srv = None
-        self._stop_event: threading.Event | None = None
-        self._read_thread: threading.Thread | None = None
+        self._line_buf = ''
+        self._odom_x = self._odom_y = self._odom_theta = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle callbacks
@@ -122,7 +120,6 @@ class ConveyorBaseNode(Node):
 
         self._last_cmd_t = time.time()
 
-        self._odom_pub = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
         self._reset_srv = self.create_service(
             Trigger, f'/{robot_id}/reset_odom', self._reset_odom_cb
         )
@@ -133,31 +130,16 @@ class ConveyorBaseNode(Node):
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         self._active = True
-        self._stop_event = threading.Event()
-        self._read_thread = threading.Thread(target=self._serial_reader, daemon=True)
-        self._read_thread.start()
         self.get_logger().info('ConveyorBaseNode activated — forwarding commands to OpenCR')
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         self._active = False
-        if self._stop_event:
-            self._stop_event.set()
-        if self._read_thread:
-            self._read_thread.join(timeout=2.0)
-            self._read_thread = None
-        self._stop_event = None
         self._send(0.0, 0.0, 0.0)
         self.get_logger().info('Deactivated — motors zeroed.')
         return super().on_deactivate(state)
 
     def on_cleanup(self, state: State) -> TransitionCallbackReturn:
-        if self._stop_event:
-            self._stop_event.set()
-        if self._read_thread:
-            self._read_thread.join(timeout=2.0)
-            self._read_thread = None
-        self._stop_event = None
         self._send(0.0, 0.0, 0.0)
         self._close_serial()
         for attr, destroy in [('_sub',            self.destroy_subscription),
@@ -177,48 +159,6 @@ class ConveyorBaseNode(Node):
         self._close_serial()
         self.get_logger().info('ConveyorBaseNode shutdown.')
         return TransitionCallbackReturn.SUCCESS
-
-    # ------------------------------------------------------------------
-    # Serial reader thread
-    # ------------------------------------------------------------------
-
-    def _serial_reader(self):
-        while not self._stop_event.is_set():
-            try:
-                raw = self._ser.readline()
-            except serial.SerialException as e:
-                self.get_logger().warn(f'Serial read error: {e}')
-                continue
-            if not raw:
-                continue
-            try:
-                line = raw.decode('ascii', errors='ignore').strip()
-            except Exception:
-                continue
-            if not line.startswith('POSE'):
-                continue
-            parts = line.split()
-            if len(parts) != 7:
-                continue
-            try:
-                x, y, theta, vx, vy, wz = (float(p) for p in parts[1:])
-            except ValueError:
-                continue
-            self._publish_odom(x, y, theta, vx, vy, wz)
-
-    def _publish_odom(self, x: float, y: float, theta: float,
-                      vx: float, vy: float, wz: float):
-        msg = Odometry()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'odom'
-        msg.pose.pose.position.x = x
-        msg.pose.pose.position.y = y
-        msg.pose.pose.orientation.z = math.sin(theta / 2.0)
-        msg.pose.pose.orientation.w = math.cos(theta / 2.0)
-        msg.twist.twist.linear.x = vx
-        msg.twist.twist.linear.y = vy
-        msg.twist.twist.angular.z = wz
-        self._odom_pub.publish(msg)
 
     # ------------------------------------------------------------------
     # Reset odom service
