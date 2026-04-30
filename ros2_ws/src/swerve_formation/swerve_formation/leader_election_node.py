@@ -18,10 +18,10 @@ class LeaderElectionNode(Node):
     def __init__(self):
         super().__init__('leader_election_node')
         self.declare_parameter('robot_id', 'tb3_0')
-        # Lower priority value → higher rank (tb3_0=0 beats tb3_1=1, etc.)
-        self.declare_parameter('priority', 0)
-
         self._robot_id = self.get_parameter('robot_id').value
+
+        default_priority = int(self._robot_id.split('_')[-1]) if self._robot_id[-1].isdigit() else 0  # e.g. tb3_2 → priority 2
+        self.declare_parameter('priority', default_priority)
         self._priority = self.get_parameter('priority').value
 
         # peer_id → (priority, last_seen_time)

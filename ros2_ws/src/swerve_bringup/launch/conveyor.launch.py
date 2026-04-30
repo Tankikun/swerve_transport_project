@@ -92,4 +92,13 @@ def generate_launch_description():
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
+
+        # Pre-run alignment — leader coordinates depth-based spacing correction
+        Node(
+            package='swerve_formation',
+            executable='alignment_node',
+            name='alignment_node',
+            parameters=[{'robot_id': robot_id, 'neighbors': ['tb3_1']}],
+            output='screen',
+        ),
     ])

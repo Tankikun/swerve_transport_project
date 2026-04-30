@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'swerve_formation'
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -33,6 +36,7 @@ setup(
             'formation_size_node = swerve_formation.formation_size_node:main',
             'ai_camera_node = swerve_formation.ai_camera_node:main',
             '3d_slam_node = swerve_formation.slam_3d_node:main',
+            'alignment_node = swerve_formation.alignment_node:main',
             # ── Simulation helpers ──────────────────────────────────────────
             'static_leader_publisher = swerve_formation.static_leader_publisher:main',
             'send_goal_node = swerve_formation.send_goal_node:main',

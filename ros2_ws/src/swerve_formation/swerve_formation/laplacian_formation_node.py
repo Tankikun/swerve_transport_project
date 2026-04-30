@@ -12,6 +12,7 @@ class LaplacianFormationController(Node):
         self.declare_parameter('robot_id', 'tb3_0')
         self.declare_parameter('neighbors', ['tb3_1'])
         self.declare_parameter('k_gain', 1.5)
+        self.declare_parameter('robot_index', 0)
         # This robot's [x, y] offset from the virtual center
         self.declare_parameter('my_offset', [0.0, 0.5])
         # Flat list [n0_x, n0_y, n1_x, n1_y, ...] in the same order as 'neighbors'
@@ -45,6 +46,9 @@ class LaplacianFormationController(Node):
         self.create_subscription(
             Twist, '/virtual_center/cmd_vel', self._virtual_cmd_cb, 10
         )
+        self.create_subscription(
+            PoseArray, '/formation/offsets', self._offsets_cb, 10
+        )
 
         self._cmd_pub = self.create_publisher(Twist, f'/{self.robot_id}/cmd_vel', 10)
         self._state_pub = self.create_publisher(PoseArray, '/formation/state', 10)
@@ -64,6 +68,17 @@ class LaplacianFormationController(Node):
         self.virtual_vel[0] = msg.linear.x
         self.virtual_vel[1] = msg.linear.y
         self.virtual_angular = msg.angular.z
+
+    def _offsets_cb(self, msg: PoseArray):
+        robot_index = self.get_parameter('robot_index').value
+        if robot_index < len(msg.poses):
+            p = msg.poses[robot_index]
+            self.my_desired = np.array([p.position.x, p.position.y])
+        remaining = [msg.poses[i] for i in range(len(msg.poses)) if i != robot_index]
+        for i, n in enumerate(self.neighbors):
+            if i < len(remaining):
+                p = remaining[i]
+                self.neighbor_desired[n] = np.array([p.position.x, p.position.y])
 
     def _control_loop(self):
         consensus = np.zeros(2)
