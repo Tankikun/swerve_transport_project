@@ -33,10 +33,12 @@ class AlignmentNode(Node):
         self.declare_parameter('neighbors', ['tb3_1'])
         self.declare_parameter('alignment_speed', 0.05)
         self.declare_parameter('depth_topic', 'depth')
+        self.declare_parameter('offset_init_mode', 'manual')
 
         self._robot_id = self.get_parameter('robot_id').value
         self._neighbors = list(self.get_parameter('neighbors').value)
         self._alignment_speed = self.get_parameter('alignment_speed').value
+        self._offset_init_mode = self.get_parameter('offset_init_mode').value
 
         self._is_leader = False
         self._my_pose = np.zeros(2)
@@ -97,7 +99,15 @@ class AlignmentNode(Node):
             Trigger, f'/{self._robot_id}/trigger_alignment', self._trigger_cb
         )
 
-        self.get_logger().info(f'AlignmentNode ready for {self._robot_id}')
+        self.get_logger().info(
+            f'AlignmentNode ready for {self._robot_id} '
+            f'(offset_init_mode={self._offset_init_mode})'
+        )
+
+        if self._offset_init_mode == 'odom':
+            threading.Thread(target=self._odom_init_sequence, daemon=True).start()
+        elif self._offset_init_mode == 'camera':
+            threading.Thread(target=self._auto_camera_sequence, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Subscription callbacks
@@ -271,6 +281,64 @@ class AlignmentNode(Node):
         # Step 6 — signal completion
         self._publish_status('done')
         self.get_logger().info('Alignment sequence complete')
+
+    # ------------------------------------------------------------------
+    # Automatic initialisation paths
+    # ------------------------------------------------------------------
+
+    def _odom_init_sequence(self):
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            poses_ready = (
+                np.any(self._my_pose != 0)
+                and all(np.any(self._neighbor_poses[n] != 0) for n in self._neighbors)
+            )
+            if poses_ready:
+                break
+            time.sleep(0.5)
+        else:
+            self.get_logger().warn(
+                'Offset init (odom): timed out waiting for valid EKF poses — skipping'
+            )
+            return
+
+        positions = np.array(
+            [self._my_pose.copy()]
+            + [self._neighbor_poses[n].copy() for n in self._neighbors]
+        )
+        center = positions.mean(axis=0)
+
+        pa = PoseArray()
+        pa.header.stamp = self.get_clock().now().to_msg()
+        pa.header.frame_id = 'odom'
+        offsets = []
+        for pos in positions:
+            p = Pose()
+            offset = pos - center
+            p.position.x = float(offset[0])
+            p.position.y = float(offset[1])
+            p.orientation.w = 1.0
+            pa.poses.append(p)
+            offsets.append(offset.tolist())
+        self._offsets_pub.publish(pa)
+        self._publish_status('done')
+        self.get_logger().info(f'Offset init from odometry complete: {offsets}')
+
+    def _auto_camera_sequence(self):
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            with self._depth_lock:
+                ready = self._latest_depth is not None
+            if ready:
+                break
+            time.sleep(0.5)
+        else:
+            self.get_logger().warn(
+                'Offset init (camera): timed out waiting for depth frame — skipping'
+            )
+            return
+
+        self._run_alignment_sequence()
 
     def _publish_status(self, status: str):
         msg = String()
