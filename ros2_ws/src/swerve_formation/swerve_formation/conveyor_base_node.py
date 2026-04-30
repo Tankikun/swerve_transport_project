@@ -1,25 +1,30 @@
+import math
+import threading
 import time
 
 import rclpy
 import serial
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
+from std_srvs.srv import Trigger
 
 
 class ConveyorBaseNode(Node):
     """
     Lifecycle serial bridge: /{robot_id}/cmd_vel → OpenCR USB-CDC.
     Firmware expects "x_dot y_dot gamma_dot\n" at 115200 baud.
+    Firmware sends "POSE x y theta vx vy wz\n" lines; published as /{robot_id}/odom.
 
     Lifecycle transitions:
-      configure  — opens serial port, creates subscription + watchdog timer
-      activate   — enables command forwarding to hardware
-      deactivate — zeroes motors, disables forwarding
+      configure  — opens serial port, creates subscription + watchdog timer + odom publisher
+      activate   — enables command forwarding, starts serial reader thread
+      deactivate — zeroes motors, stops reader thread
       cleanup    — closes serial port, destroys ROS entities
       shutdown   — zeroes motors, closes serial port
     """
 
-    WATCHDOG_S = 1.0   # seconds before a missing cmd_vel triggers a zero
+    WATCHDOG_S = 1.0
 
     def __init__(self):
         super().__init__('conveyor_base_node')
@@ -32,6 +37,10 @@ class ConveyorBaseNode(Node):
         self._watchdog_timer = None
         self._active = False
         self._last_cmd_t = 0.0
+        self._odom_pub = None
+        self._reset_srv = None
+        self._stop_event: threading.Event | None = None
+        self._read_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle callbacks
@@ -54,21 +63,42 @@ class ConveyorBaseNode(Node):
         )
         self._watchdog_timer = self.create_timer(0.1, self._watchdog_cb)
         self._last_cmd_t = time.time()
+
+        self._odom_pub = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
+        self._reset_srv = self.create_service(
+            Trigger, f'/{robot_id}/reset_odom', self._reset_odom_cb
+        )
+
         self.get_logger().info(f'ConveyorBaseNode configured for {robot_id}')
         return TransitionCallbackReturn.SUCCESS
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         self._active = True
+        self._stop_event = threading.Event()
+        self._read_thread = threading.Thread(target=self._serial_reader, daemon=True)
+        self._read_thread.start()
         self.get_logger().info('ConveyorBaseNode activated — forwarding commands to OpenCR')
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
         self._active = False
+        if self._stop_event:
+            self._stop_event.set()
+        if self._read_thread:
+            self._read_thread.join(timeout=2.0)
+            self._read_thread = None
+        self._stop_event = None
         self._send(0.0, 0.0, 0.0)
         self.get_logger().info('ConveyorBaseNode deactivated — motors zeroed')
         return super().on_deactivate(state)
 
     def on_cleanup(self, state: State) -> TransitionCallbackReturn:
+        if self._stop_event:
+            self._stop_event.set()
+        if self._read_thread:
+            self._read_thread.join(timeout=2.0)
+            self._read_thread = None
+        self._stop_event = None
         self._send(0.0, 0.0, 0.0)
         self._close_serial()
         if self._sub:
@@ -85,6 +115,69 @@ class ConveyorBaseNode(Node):
         self._close_serial()
         self.get_logger().info('ConveyorBaseNode shutdown')
         return TransitionCallbackReturn.SUCCESS
+
+    # ------------------------------------------------------------------
+    # Serial reader thread
+    # ------------------------------------------------------------------
+
+    def _serial_reader(self):
+        while not self._stop_event.is_set():
+            try:
+                raw = self._ser.readline()
+            except serial.SerialException as e:
+                self.get_logger().warn(f'Serial read error: {e}')
+                continue
+            if not raw:
+                continue
+            try:
+                line = raw.decode('ascii', errors='ignore').strip()
+            except Exception:
+                continue
+            if not line.startswith('POSE'):
+                continue
+            parts = line.split()
+            if len(parts) != 7:
+                continue
+            try:
+                x, y, theta, vx, vy, wz = (float(p) for p in parts[1:])
+            except ValueError:
+                continue
+            self._publish_odom(x, y, theta, vx, vy, wz)
+
+    def _publish_odom(self, x: float, y: float, theta: float,
+                      vx: float, vy: float, wz: float):
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.orientation.z = math.sin(theta / 2.0)
+        msg.pose.pose.orientation.w = math.cos(theta / 2.0)
+        msg.twist.twist.linear.x = vx
+        msg.twist.twist.linear.y = vy
+        msg.twist.twist.angular.z = wz
+        self._odom_pub.publish(msg)
+
+    # ------------------------------------------------------------------
+    # Reset odom service
+    # ------------------------------------------------------------------
+
+    def _reset_odom_cb(self, request, response):
+        if not self._active or self._ser is None or not self._ser.is_open:
+            response.success = False
+            response.message = 'Node not active'
+            return response
+        try:
+            self._ser.write(b'R\n')
+        except serial.SerialException as e:
+            self.get_logger().warn(f'Reset odom serial write failed: {e}')
+            response.success = False
+            response.message = f'Serial error: {e}'
+            return response
+        self._publish_odom(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        response.success = True
+        response.message = 'Odometry reset'
+        return response
 
     # ------------------------------------------------------------------
     # Internal helpers
