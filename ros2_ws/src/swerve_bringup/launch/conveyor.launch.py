@@ -43,12 +43,18 @@ def launch_setup(context, *args, **kwargs):
         # Sane default — single-robot launches still work
         neighbors = ['tb3_1' if robot_id == 'tb3_0' else 'tb3_0']
 
+    # Per-robot unique node names so two robots on the same ROS network
+    # don't collide on `/laplacian_formation_node` etc., which corrupts
+    # DDS discovery (subscribers fail to match publishers and ros2 node
+    # list shows duplicates with a name-collision warning).
+    suffix = f'_{robot_id}'
+
     return [
         # Graph Laplacian formation controller
         Node(
             package='swerve_formation',
             executable='laplacian_formation_node',
-            name='laplacian_formation_node',
+            name='laplacian_formation_node' + suffix,
             parameters=[{
                 'robot_id': robot_id,
                 'k_gain': k_gain,
@@ -63,7 +69,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='conveyor_base_node',
-            name='conveyor_base_node',
+            name='conveyor_base_node' + suffix,
             parameters=[{
                 'robot_id': robot_id,
                 'usb_port': usb_port,
@@ -76,7 +82,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='ekf_node',
-            name='ekf_node',
+            name='ekf_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
@@ -85,7 +91,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='slam_3d_node',
-            name='slam_3d_node',
+            name='slam_3d_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
@@ -94,7 +100,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='leader_election_node',
-            name='leader_election_node',
+            name='leader_election_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
@@ -103,7 +109,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='navigation_node',
-            name='navigation_node',
+            name='navigation_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
@@ -112,7 +118,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='formation_size_node',
-            name='formation_size_node',
+            name='formation_size_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
@@ -121,7 +127,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='ai_camera_node',
-            name='ai_camera_node',
+            name='ai_camera_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
@@ -130,7 +136,7 @@ def launch_setup(context, *args, **kwargs):
         Node(
             package='swerve_formation',
             executable='alignment_node',
-            name='alignment_node',
+            name='alignment_node' + suffix,
             parameters=[{
                 'robot_id': robot_id,
                 'neighbors': neighbors,
