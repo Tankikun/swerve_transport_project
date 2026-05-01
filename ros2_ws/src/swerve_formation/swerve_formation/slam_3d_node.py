@@ -17,7 +17,7 @@ class SLAM3DNode(Node):
     """
 
     def __init__(self):
-        super().__init__('3d_slam_node')
+        super().__init__('slam_3d_node')
         self.declare_parameter('robot_id', 'tb3_0')
         robot_id = self.get_parameter('robot_id').value
 
@@ -25,7 +25,7 @@ class SLAM3DNode(Node):
         # 1 Hz stub publish — EKF ignores it once real SLAM comes online
         self.create_timer(1.0, self._publish_stub)
         self.get_logger().warn(
-            '3d_slam_node is in stub mode — integrate rtabmap_ros for production SLAM'
+            'slam_3d_node is in stub mode — integrate rtabmap_ros for production SLAM'
         )
 
     def _publish_stub(self):

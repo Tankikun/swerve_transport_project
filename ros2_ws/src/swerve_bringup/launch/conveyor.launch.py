@@ -51,8 +51,8 @@ def generate_launch_description():
         # SLAM (stub; replace with rtabmap_ros launch integration)
         Node(
             package='swerve_formation',
-            executable='3d_slam_node',
-            name='3d_slam_node',
+            executable='slam_3d_node',
+            name='slam_3d_node',
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
