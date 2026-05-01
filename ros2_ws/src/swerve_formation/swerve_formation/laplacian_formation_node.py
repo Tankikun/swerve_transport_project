@@ -1,45 +1,35 @@
 """
 laplacian_formation_node.py
 ---------------------------
-Decentralized Laplacian formation controller — runs on every robot.
+Pure-feedforward rigid-body formation controller, runs on every robot.
 
-Implements the formation control law from formation_path_planning.ipynb:
+Each tick this node receives the operator's twist for the (imaginary)
+virtual centre on /virtual_center/cmd_vel and produces THIS robot's
+body-frame twist using a closed-form rigid-body transform:
 
-  v_i_world = v_vc
-            + K_LEADER * (p_desired_from_vc - p_i)
-            + sum over peers j: K_PEER * (p_desired_from_peer_j - p_i)
+    v_robot_x  = vc_vx - vc_wz * my_offset.y
+    v_robot_y  = vc_vy + vc_wz * my_offset.x
+    v_robot_wz = vc_wz
 
-Where:
-  p_desired_from_vc       = vc_pos + R(vc_heading) @ own_offset
-  p_desired_from_peer_j   = peer_j_pos + R(vc_heading) @ (own_offset - peer_j_offset)
+There is NO pose feedback. We deliberately avoid pulling toward an
+EKF-derived "desired position" because the two robots have separate
+odometry frames (no SLAM, no shared world), so any cross-robot error
+term is meaningless and produces phantom commands at startup.
 
-The output is converted to BODY frame before publishing /{robot_id}/cmd_vel,
-matching the convention expected by conveyor_base_node and the OpenCR firmware.
+This means the formation can drift over time (wheel slip, latency)
+and there is no consensus correction. The instantaneous kinematics is
+correct: at any moment all robots' commanded body twists are exactly
+what a rigid body rotating around the virtual centre would dictate.
 
-Virtual Center convention
-─────────────────────────
-The "Virtual Center" (VC) is the geometric reference point of the formation.
-For a 2-robot rigid payload, VC is typically the midpoint between robots.
-
-In this implementation we treat the LEADER's pose as the VC pose (vc_odom_topic
-defaults to /tb3_0/ekf/odom). This is a simplification — the navigation_node
-plans paths from the leader's position. To use a true centroid, publish a
-custom /virtual_center/odom topic and point vc_odom_topic at it.
-
-With "leader = VC", the offsets must be set as follows for a SEPARATION gap:
-  Leader   own_offset = (0, 0)
-  Follower own_offset = (-SEPARATION, 0)
-  Both    peer_offset = the OTHER robot's own_offset
-
-Subscribes
-  {vc_odom_topic}                  Odometry — VC pose+heading
-  /virtual_center/cmd_vel          Twist    — VC velocity (from navigation_node)
-  /{robot_id}/ekf/odom             Odometry — own EKF-fused pose
-  /{peer_id}/ekf/odom              Odometry — each peer's pose
-
-Publishes
-  /{robot_id}/cmd_vel              Twist    — body-frame velocity for this robot
-  /formation/state                 PoseArray — own + neighbours, for formation_size_node
+Saturation handling
+-------------------
+A formation-wide scaling factor caps the maximum per-wheel linear
+speed across ALL robots in the formation to MAX_WHEEL_LINEAR (just
+below the firmware's 0.198 m/s clamp). When the would-be outer-wheel
+speed exceeds the cap, every robot's twist is scaled by the same
+factor — the rigid shape is preserved, the formation just moves
+slower. This is the asymmetric "outer wheel goes faster" behaviour
+needed for object transport.
 """
 
 import math
@@ -51,16 +41,15 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 
 
-def _yaw_from_quat(q) -> float:
-    return math.atan2(
-        2.0 * (q.w * q.z + q.x * q.y),
-        1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-    )
+# Worst-case wheel offset from the chassis centre. With
+# HALF_WHEELBASE = HALF_TRACK_WIDTH = 0.15 m the wheels sit at
+# sqrt(0.15**2 + 0.15**2) ≈ 0.212 m from centre.
+CHASSIS_HALF_DIAGONAL = math.sqrt(0.15 ** 2 + 0.15 ** 2)
 
-
-def _rot2d(theta: float) -> np.ndarray:
-    c, s = math.cos(theta), math.sin(theta)
-    return np.array([[c, -s], [s, c]])
+# Per-wheel linear speed cap. Firmware clamps at MAX_DRIVE_SPEED ≈
+# 0.198 m/s; we leave a small margin for rounding and any small
+# correction term added later.
+MAX_WHEEL_LINEAR = 0.18
 
 
 class LaplacianFormationController(Node):
@@ -70,171 +59,136 @@ class LaplacianFormationController(Node):
     def __init__(self):
         super().__init__('laplacian_formation_node')
 
-        # ── Parameters (backward-compatible with conveyor.launch.py) ─────────
-        self.declare_parameter('robot_id',         'tb3_0')
-        self.declare_parameter('neighbors',        ['tb3_1'])
-        self.declare_parameter('my_offset',        [0.0, 0.0])     # this robot's offset from VC
-        self.declare_parameter('neighbor_offsets', [-0.8, 0.0])    # flat [n0x, n0y, n1x, n1y, ...]
+        self.declare_parameter('robot_id', 'tb3_0')
+        self.declare_parameter('neighbors', ['tb3_1'])
+        self.declare_parameter('my_offset', [0.0, 0.0])
+        self.declare_parameter('neighbor_offsets', [0.0, 0.0])
+        self.declare_parameter('k_gain', 0.0)  # legacy, unused (no consensus)
 
-        # New parameters (notebook-style separate gains)
-        self.declare_parameter('K_leader',         5.0)            # pull toward VC
-        self.declare_parameter('K_peer',           0.5)            # pull toward peer
-        self.declare_parameter('k_gain',           1.5)            # legacy single gain (used as fallback)
-        self.declare_parameter('V_MAX',            0.18)           # m/s, just below motor limit
-        self.declare_parameter('vc_odom_topic',    '/tb3_0/ekf/odom')
-        self.declare_parameter('vc_cmd_vel_topic', '/virtual_center/cmd_vel')
+        self.robot_id  = self.get_parameter('robot_id').value
+        self.neighbors = list(self.get_parameter('neighbors').value)
 
-        self._robot_id    = self.get_parameter('robot_id').value
-        self._neighbors   = list(self.get_parameter('neighbors').value)
-        self._own_off     = np.array(self.get_parameter('my_offset').value, dtype=float)
-
-        nb_off = np.array(self.get_parameter('neighbor_offsets').value, dtype=float).reshape(-1, 2)
-        self._peer_off    = {n: nb_off[i] for i, n in enumerate(self._neighbors)}
-
-        self._K_leader    = float(self.get_parameter('K_leader').value)
-        self._K_peer      = float(self.get_parameter('K_peer').value)
-        self._V_MAX       = float(self.get_parameter('V_MAX').value)
-
-        # ── State ────────────────────────────────────────────────────────────
-        self._vc_pose: np.ndarray | None  = None    # [x, y, theta]
-        self._vc_vel  = np.zeros(2)                  # world frame
-        self._vc_omega = 0.0
-        self._own_pose: np.ndarray | None = None     # [x, y, theta]
-        self._peer_poses: dict[str, np.ndarray] = {}  # {peer_id: [x, y, theta]}
-
-        # ── Subscriptions ────────────────────────────────────────────────────
-        vc_odom_topic = self.get_parameter('vc_odom_topic').value
-        vc_vel_topic  = self.get_parameter('vc_cmd_vel_topic').value
-
-        self.create_subscription(Odometry, vc_odom_topic, self._vc_odom_cb, 10)
-        self.create_subscription(Twist,    vc_vel_topic,  self._vc_vel_cb,  10)
-        self.create_subscription(
-            Odometry, f'/{self._robot_id}/ekf/odom', self._own_pose_cb, 10
+        self.my_offset = np.array(
+            self.get_parameter('my_offset').value, dtype=float
         )
-        for peer in self._neighbors:
+        nb_off = np.array(
+            self.get_parameter('neighbor_offsets').value, dtype=float
+        ).reshape(-1, 2)
+        self.neighbor_offsets = {n: nb_off[i] for i, n in enumerate(self.neighbors)}
+
+        # Last operator command for the virtual centre. Body-frame.
+        self.virtual_vel     = np.zeros(2)
+        self.virtual_angular = 0.0
+
+        # Formation-state publisher carries last-known pose of self +
+        # neighbours so formation_size_node has something to consume.
+        # We update these from EKF if it is available, but the control
+        # law does NOT depend on them.
+        self.my_pose = np.zeros(2)
+        self.neighbor_poses = {n: np.zeros(2) for n in self.neighbors}
+
+        # Subscriptions
+        self.create_subscription(
+            Twist, '/virtual_center/cmd_vel', self._virtual_cmd_cb, 10
+        )
+        self.create_subscription(
+            Odometry, f'/{self.robot_id}/ekf/odom', self._odom_cb, 10
+        )
+        for neighbor in self.neighbors:
             self.create_subscription(
-                Odometry, f'/{peer}/ekf/odom',
-                lambda msg, p=peer: self._peer_pose_cb(msg, p), 10
+                Odometry,
+                f'/{neighbor}/ekf/odom',
+                lambda msg, n=neighbor: self._neighbor_cb(msg, n),
+                10,
             )
 
-        # ── Publishers ───────────────────────────────────────────────────────
-        self._cmd_pub   = self.create_publisher(Twist,     f'/{self._robot_id}/cmd_vel', 10)
-        self._state_pub = self.create_publisher(PoseArray, '/formation/state',           10)
-
-        # Dynamic offset updates from alignment_node
-        # poses[0]=own offset, poses[1+]=neighbor offsets (same order as neighbors param)
-        self.create_subscription(PoseArray, '/formation/offsets', self._offsets_cb, 10)
+        # Publishers
+        self._cmd_pub = self.create_publisher(
+            Twist, f'/{self.robot_id}/cmd_vel', 10
+        )
+        self._state_pub = self.create_publisher(
+            PoseArray, '/formation/state', 10
+        )
 
         self.create_timer(self.DT, self._control_loop)
 
         self.get_logger().info(
-            f'laplacian_formation_node ready: id={self._robot_id} '
-            f'own_offset={self._own_off.tolist()} '
-            f'peers={self._neighbors} '
-            f'K_leader={self._K_leader} K_peer={self._K_peer} V_MAX={self._V_MAX}'
+            f'laplacian_formation_node ready: id={self.robot_id} '
+            f'my_offset={self.my_offset.tolist()} '
+            f'neighbors={self.neighbors}'
         )
 
     # ── Subscription callbacks ────────────────────────────────────────────────
 
-    def _offsets_cb(self, msg: PoseArray):
-        """Dynamic offset update from alignment_node (overrides launch params)."""
-        if len(msg.poses) < 1:
-            return
-        self._own_off = np.array([msg.poses[0].position.x, msg.poses[0].position.y])
-        for i, nb in enumerate(self._neighbors):
-            if i + 1 < len(msg.poses):
-                self._peer_off[nb] = np.array([
-                    msg.poses[i + 1].position.x,
-                    msg.poses[i + 1].position.y,
-                ])
+    def _virtual_cmd_cb(self, msg: Twist):
+        self.virtual_vel[0]  = float(msg.linear.x)
+        self.virtual_vel[1]  = float(msg.linear.y)
+        self.virtual_angular = float(msg.angular.z)
 
-    def _vc_odom_cb(self, msg: Odometry):
-        h = _yaw_from_quat(msg.pose.pose.orientation)
-        self._vc_pose = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            h,
-        ])
+    def _odom_cb(self, msg: Odometry):
+        self.my_pose[0] = msg.pose.pose.position.x
+        self.my_pose[1] = msg.pose.pose.position.y
 
-    def _vc_vel_cb(self, msg: Twist):
-        # navigation_node publishes vc_vel in BODY frame (relative to leader).
-        # When leader heading == vc heading (rigid 2-robot formation), this
-        # equals the world-frame VC velocity.
-        self._vc_vel  = np.array([msg.linear.x, msg.linear.y])
-        self._vc_omega = float(msg.angular.z)
-
-    def _own_pose_cb(self, msg: Odometry):
-        h = _yaw_from_quat(msg.pose.pose.orientation)
-        self._own_pose = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            h,
-        ])
-
-    def _peer_pose_cb(self, msg: Odometry, peer_id: str):
-        h = _yaw_from_quat(msg.pose.pose.orientation)
-        self._peer_poses[peer_id] = np.array([
-            msg.pose.pose.position.x,
-            msg.pose.pose.position.y,
-            h,
-        ])
+    def _neighbor_cb(self, msg: Odometry, neighbor_id: str):
+        self.neighbor_poses[neighbor_id][0] = msg.pose.pose.position.x
+        self.neighbor_poses[neighbor_id][1] = msg.pose.pose.position.y
 
     # ── Control loop (20 Hz) ──────────────────────────────────────────────────
 
     def _control_loop(self):
-        if self._own_pose is None or self._vc_pose is None:
-            return
+        vc_x  = float(self.virtual_vel[0])
+        vc_y  = float(self.virtual_vel[1])
+        vc_wz = float(self.virtual_angular)
 
-        own_pos = self._own_pose[:2]
-        vc_pos  = self._vc_pose[:2]
-        vc_h    = self._vc_pose[2]
-        R       = _rot2d(vc_h)
+        # ── Formation-wide saturation scaling ──────────────────────────
+        # Compute the worst-case per-wheel linear speed across every
+        # robot in the formation (we know all offsets from launch
+        # params), then pick a single scale factor so all robots scale
+        # together. Without this, the inner robot keeps full wz while
+        # the outer robot scales down, breaking the rigid shape.
+        all_offsets = [(float(self.my_offset[0]), float(self.my_offset[1]))]
+        for n in self.neighbors:
+            nb = self.neighbor_offsets[n]
+            all_offsets.append((float(nb[0]), float(nb[1])))
 
-        # ── Leader correction term: toward own desired position from VC ──────
-        p_from_vc = vc_pos + R @ self._own_off
-        v_world   = self._vc_vel.copy()
-        v_world  += self._K_leader * (p_from_vc - own_pos)
+        max_worst = 0.0
+        for (rx_i, ry_i) in all_offsets:
+            bx = vc_x - vc_wz * ry_i
+            by = vc_y + vc_wz * rx_i
+            worst = math.hypot(bx, by) + abs(vc_wz) * CHASSIS_HALF_DIAGONAL
+            if worst > max_worst:
+                max_worst = worst
 
-        # ── Peer correction terms: toward own desired position from each peer
-        for peer_id, peer_off in self._peer_off.items():
-            if peer_id not in self._peer_poses:
-                continue
-            peer_pos    = self._peer_poses[peer_id][:2]
-            p_from_peer = peer_pos + R @ (self._own_off - peer_off)
-            v_world    += self._K_peer * (p_from_peer - own_pos)
+        if max_worst > MAX_WHEEL_LINEAR and max_worst > 1e-6:
+            scale = MAX_WHEEL_LINEAR / max_worst
+        else:
+            scale = 1.0
 
-        # ── Cap world-frame speed ────────────────────────────────────────────
-        speed = float(np.linalg.norm(v_world))
-        if speed > self._V_MAX:
-            v_world *= self._V_MAX / speed
-
-        # ── Convert world frame → body frame (holonomic robot) ───────────────
-        own_h = self._own_pose[2]
-        c, s  = math.cos(own_h), math.sin(own_h)
-        vx_body =  c * v_world[0] + s * v_world[1]
-        vy_body = -s * v_world[0] + c * v_world[1]
+        # ── Rigid-body feedforward for THIS robot ──────────────────────
+        rx, ry = float(self.my_offset[0]), float(self.my_offset[1])
+        ff_x  = (vc_x - vc_wz * ry) * scale
+        ff_y  = (vc_y + vc_wz * rx) * scale
+        ff_wz = vc_wz * scale
 
         cmd = Twist()
-        cmd.linear.x  = float(vx_body)
-        cmd.linear.y  = float(vy_body)
-        cmd.angular.z = float(self._vc_omega)
+        cmd.linear.x  = ff_x
+        cmd.linear.y  = ff_y
+        cmd.angular.z = ff_wz
         self._cmd_pub.publish(cmd)
 
-        # ── Publish formation state for formation_size_node ─────────────────
+        # ── Publish formation state for formation_size_node ────────────
         pa = PoseArray()
         pa.header.stamp    = self.get_clock().now().to_msg()
         pa.header.frame_id = 'odom'
         p0 = Pose()
-        p0.position.x = float(own_pos[0])
-        p0.position.y = float(own_pos[1])
+        p0.position.x = float(self.my_pose[0])
+        p0.position.y = float(self.my_pose[1])
         p0.orientation.w = 1.0
         pa.poses.append(p0)
-        for peer in self._neighbors:
-            if peer not in self._peer_poses:
-                continue
+        for n in self.neighbors:
             p = Pose()
-            p.position.x = float(self._peer_poses[peer][0])
-            p.position.y = float(self._peer_poses[peer][1])
+            p.position.x = float(self.neighbor_poses[n][0])
+            p.position.y = float(self.neighbor_poses[n][1])
             p.orientation.w = 1.0
             pa.poses.append(p)
         self._state_pub.publish(pa)
