@@ -31,6 +31,17 @@ class LaplacianFormationController(Node):
         self.virtual_vel = np.zeros(2)
         self.virtual_angular = 0.0
 
+        # Safety gates: do not apply the formation consensus term until
+        # we have received real pose data for ourselves AND every
+        # neighbour AND the alignment_node has published authoritative
+        # offsets via /formation/offsets. Without these gates, on
+        # startup my_pose==neighbor_poses==0 but the launch-default
+        # offsets disagree, producing a large bogus consensus term
+        # that drives the wheels at the firmware speed clamp.
+        self._my_pose_received = False
+        self._neighbor_pose_received = {n: False for n in self.neighbors}
+        self._offsets_received = False
+
         # Consume EKF-fused pose — never raw /odom
         self.create_subscription(
             Odometry, f'/{self.robot_id}/ekf/odom', self._odom_cb, 10
@@ -59,10 +70,12 @@ class LaplacianFormationController(Node):
     def _odom_cb(self, msg: Odometry):
         self.my_pose[0] = msg.pose.pose.position.x
         self.my_pose[1] = msg.pose.pose.position.y
+        self._my_pose_received = True
 
     def _neighbor_cb(self, msg: Odometry, neighbor_id: str):
         self.neighbor_poses[neighbor_id][0] = msg.pose.pose.position.x
         self.neighbor_poses[neighbor_id][1] = msg.pose.pose.position.y
+        self._neighbor_pose_received[neighbor_id] = True
 
     def _virtual_cmd_cb(self, msg: Twist):
         self.virtual_vel[0] = msg.linear.x
@@ -79,18 +92,32 @@ class LaplacianFormationController(Node):
             if i < len(remaining):
                 p = remaining[i]
                 self.neighbor_desired[n] = np.array([p.position.x, p.position.y])
+        self._offsets_received = True
 
     def _control_loop(self):
-        consensus = np.zeros(2)
-        for neighbor in self.neighbors:
-            actual_diff = self.my_pose - self.neighbor_poses[neighbor]
-            desired_diff = self.my_desired - self.neighbor_desired[neighbor]
-            consensus -= self.k_gain * (actual_diff - desired_diff)
+        all_poses_ready = (
+            self._my_pose_received
+            and all(self._neighbor_pose_received.values())
+        )
+        consensus_safe = all_poses_ready and self._offsets_received
 
         cmd = Twist()
-        cmd.linear.x = float(self.virtual_vel[0] + consensus[0])
-        cmd.linear.y = float(self.virtual_vel[1] + consensus[1])
+        # Always pass the operator's virtual_center velocity through.
+        # Only add the formation consensus correction once both real
+        # poses AND authoritative offsets are available; otherwise the
+        # initial consensus computation runs on bogus launch-default
+        # offsets and drives the wheels at the firmware speed clamp.
+        cmd.linear.x = float(self.virtual_vel[0])
+        cmd.linear.y = float(self.virtual_vel[1])
         cmd.angular.z = self.virtual_angular
+        if consensus_safe:
+            consensus = np.zeros(2)
+            for neighbor in self.neighbors:
+                actual_diff = self.my_pose - self.neighbor_poses[neighbor]
+                desired_diff = self.my_desired - self.neighbor_desired[neighbor]
+                consensus -= self.k_gain * (actual_diff - desired_diff)
+            cmd.linear.x += float(consensus[0])
+            cmd.linear.y += float(consensus[1])
         self._cmd_pub.publish(cmd)
 
         # Publish known formation poses (self + all neighbors) for formation_size_node

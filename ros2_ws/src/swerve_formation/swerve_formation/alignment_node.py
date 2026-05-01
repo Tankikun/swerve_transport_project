@@ -43,6 +43,8 @@ class AlignmentNode(Node):
         self._is_leader = False
         self._my_pose = np.zeros(2)
         self._neighbor_poses = {n: np.zeros(2) for n in self._neighbors}
+        self._my_pose_received = False
+        self._neighbor_pose_received = {n: False for n in self._neighbors}
 
         self._depth_lock = threading.Lock()
         self._latest_depth: np.ndarray | None = None
@@ -119,10 +121,12 @@ class AlignmentNode(Node):
     def _odom_cb(self, msg: Odometry):
         self._my_pose[0] = msg.pose.pose.position.x
         self._my_pose[1] = msg.pose.pose.position.y
+        self._my_pose_received = True
 
     def _neighbor_odom_cb(self, msg: Odometry, neighbor_id: str):
         self._neighbor_poses[neighbor_id][0] = msg.pose.pose.position.x
         self._neighbor_poses[neighbor_id][1] = msg.pose.pose.position.y
+        self._neighbor_pose_received[neighbor_id] = True
 
     def _depth_cb(self, msg: Image):
         if msg.encoding != '16UC1':
@@ -287,18 +291,26 @@ class AlignmentNode(Node):
     # ------------------------------------------------------------------
 
     def _odom_init_sequence(self):
-        deadline = time.time() + 10.0
+        # Wait for *all* required EKF poses to arrive at least once.
+        # Bumped to 120s to allow staggered launches across robots — the
+        # README sequence asks the operator to launch tb3_0 first, then
+        # SSH into tb3_1 and launch it; that easily exceeds the old 10s.
+        deadline = time.time() + 120.0
         while time.time() < deadline:
             poses_ready = (
-                np.any(self._my_pose != 0)
-                and all(np.any(self._neighbor_poses[n] != 0) for n in self._neighbors)
+                self._my_pose_received
+                and all(self._neighbor_pose_received[n] for n in self._neighbors)
             )
             if poses_ready:
                 break
             time.sleep(0.5)
         else:
+            missing = ([self._robot_id] if not self._my_pose_received else []) + [
+                n for n in self._neighbors if not self._neighbor_pose_received[n]
+            ]
             self.get_logger().warn(
-                'Offset init (odom): timed out waiting for valid EKF poses — skipping'
+                f'Offset init (odom): timed out waiting for EKF poses '
+                f'from {missing} — skipping'
             )
             return
 

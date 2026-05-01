@@ -1,19 +1,49 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def generate_launch_description():
-    robot_id  = LaunchConfiguration('robot_id',  default='tb3_0')
-    usb_port  = LaunchConfiguration('usb_port',  default='/dev/ttyACM0')
-    k_gain    = LaunchConfiguration('k_gain',    default='1.5')
+def _parse_xy_list(s: str):
+    """Parse 'x,y' or 'x1,y1;x2,y2;...' into a flat list [x1, y1, x2, y2, ...]."""
+    out = []
+    s = (s or '').strip()
+    if not s:
+        return out
+    for pair in s.split(';'):
+        pair = pair.strip()
+        if not pair:
+            continue
+        parts = [p.strip() for p in pair.split(',') if p.strip()]
+        out.extend(float(p) for p in parts)
+    return out
 
-    return LaunchDescription([
-        DeclareLaunchArgument('robot_id',  default_value=robot_id),
-        DeclareLaunchArgument('usb_port',  default_value=usb_port),
-        DeclareLaunchArgument('k_gain',    default_value=k_gain),
 
+def _parse_neighbors(s: str):
+    s = (s or '').strip()
+    if not s:
+        return []
+    return [n.strip() for n in s.split(',') if n.strip()]
+
+
+def launch_setup(context, *args, **kwargs):
+    robot_id          = LaunchConfiguration('robot_id').perform(context)
+    usb_port          = LaunchConfiguration('usb_port').perform(context)
+    k_gain            = float(LaunchConfiguration('k_gain').perform(context))
+    neighbors         = _parse_neighbors(LaunchConfiguration('neighbors').perform(context))
+    my_offset         = _parse_xy_list(LaunchConfiguration('my_offset').perform(context))
+    neighbor_offsets  = _parse_xy_list(LaunchConfiguration('neighbor_offsets').perform(context))
+    offset_init_mode  = LaunchConfiguration('offset_init_mode').perform(context)
+
+    if not my_offset:
+        my_offset = [0.0, 0.0]
+    if not neighbor_offsets:
+        neighbor_offsets = [0.0, 0.0] * max(1, len(neighbors))
+    if not neighbors:
+        # Sane default — single-robot launches still work
+        neighbors = ['tb3_1' if robot_id == 'tb3_0' else 'tb3_0']
+
+    return [
         # Graph Laplacian formation controller
         Node(
             package='swerve_formation',
@@ -22,6 +52,9 @@ def generate_launch_description():
             parameters=[{
                 'robot_id': robot_id,
                 'k_gain': k_gain,
+                'neighbors': neighbors,
+                'my_offset': my_offset,
+                'neighbor_offsets': neighbor_offsets,
             }],
             output='screen',
         ),
@@ -98,7 +131,24 @@ def generate_launch_description():
             package='swerve_formation',
             executable='alignment_node',
             name='alignment_node',
-            parameters=[{'robot_id': robot_id, 'neighbors': ['tb3_1']}],
+            parameters=[{
+                'robot_id': robot_id,
+                'neighbors': neighbors,
+                'offset_init_mode': offset_init_mode,
+            }],
             output='screen',
         ),
+    ]
+
+
+def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument('robot_id',         default_value='tb3_0'),
+        DeclareLaunchArgument('usb_port',         default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('k_gain',           default_value='1.5'),
+        DeclareLaunchArgument('neighbors',        default_value=''),
+        DeclareLaunchArgument('my_offset',        default_value='0.0,0.0'),
+        DeclareLaunchArgument('neighbor_offsets', default_value='0.0,0.0'),
+        DeclareLaunchArgument('offset_init_mode', default_value='manual'),
+        OpaqueFunction(function=launch_setup),
     ])
