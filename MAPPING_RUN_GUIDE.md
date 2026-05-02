@@ -145,17 +145,25 @@ export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/install/setup.bash
 
-# Watch keyframe count grow
-ros2 topic echo /rtabmap/info  | grep -E "frameId|loopId"
+# Watch keyframe count grow (note per-robot namespace prefix)
+ros2 topic echo /tb3_1/rtabmap/info  | grep -E "frameId|loopId"
 
 # OR a simpler liveness check
-ros2 topic hz /rtabmap/cloud_map
+ros2 topic hz /tb3_1/rtabmap/cloud_map
 ```
 
 If `cloud_map` is publishing > 0.5 Hz, mapping is working.
 If you see `loopId: NN` (non-zero), a loop closure fired — that's
 the good sign. By the end of a full lap you want at least 1 loop
 closure event per segment.
+
+> **Note**: rtabmap topics are now per-robot
+> (`/{robot_id}/rtabmap/...`) instead of the default global
+> `/rtabmap/...`. This is required for safe multi-robot operation —
+> see CodeRabbit review on PR #3 / namespace fix in this branch.
+> If you read older docs that mention `/rtabmap/...`, mentally
+> substitute `/tb3_1/rtabmap/...` (or whichever robot_id you're
+> running).
 
 ---
 

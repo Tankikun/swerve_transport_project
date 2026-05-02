@@ -195,24 +195,38 @@ def launch_setup(context, *args, **kwargs):
             'RGBD/LinearUpdate':          '0.01',
         }],
         remappings=[
-            ('rgb/image',       f'/{robot_id}/camera/rgb/image_raw'),
-            ('rgb/camera_info', f'/{robot_id}/camera/rgb/camera_info'),
-            ('depth/image',     f'/{robot_id}/camera/depth/image_raw'),
-            ('odom',            f'/{robot_id}/ekf/odom'),
+            ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
+            ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
+            ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
+            ('odom',              f'/{robot_id}/ekf/odom'),
+            # Per-robot scoping: rtabmap publishes localization_pose,
+            # info, mapData, cloud_map, etc. to global /rtabmap/* by
+            # default. With two robots running this launch concurrently
+            # they would collide on the same global topics — each
+            # robot's slam_pose_relay would consume the OTHER robot's
+            # pose. Remap every output we care about to a per-robot
+            # namespace.
+            ('localization_pose', f'/{robot_id}/rtabmap/localization_pose'),
+            ('info',              f'/{robot_id}/rtabmap/info'),
+            ('mapData',           f'/{robot_id}/rtabmap/mapData'),
+            ('cloud_map',         f'/{robot_id}/rtabmap/cloud_map'),
         ],
         # NO --delete_db_on_start.
     ))
 
-    # ── Pose relay: /rtabmap/localization_pose → /{robot_id}/slam/pose ───
+    # ── Pose relay: /{robot_id}/rtabmap/localization_pose → /{robot_id}/slam/pose ──
     # ekf_node subscribes to /{robot_id}/slam/pose as PoseStamped (see
     # ekf_node.py line 28). RTAB-Map publishes PoseWithCovarianceStamped.
-    # This relay strips the covariance and republishes.
+    # This relay strips the covariance and republishes. The in_topic is
+    # the per-robot remapped topic above (see CodeRabbit review on PR #3:
+    # global /rtabmap/* would let the relay consume the wrong robot's pose
+    # in a multi-robot run).
     actions.append(Node(
         package='swerve_formation',
         executable='slam_pose_relay_node',
         name='slam_pose_relay' + suffix,
         parameters=[{
-            'in_topic':  '/rtabmap/localization_pose',
+            'in_topic':  f'/{robot_id}/rtabmap/localization_pose',
             'out_topic': f'/{robot_id}/slam/pose',
         }],
         output='screen',
