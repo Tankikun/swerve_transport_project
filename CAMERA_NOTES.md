@@ -1,9 +1,10 @@
 # Camera + RTAB-Map Notes
 
 Branch: `feature/rtab-map`
-Status: Steps 1–3 + 5 of the RTAB-Map plan complete on pi2. Step 4
-(`rtabmap_ros` install) blocked on the lab apt mirror; workaround
-documented below. Step 6 (mapping run) is yours to execute.
+Status: Steps 1–3, 5, **plus** localization-launch + slam-pose relay
+complete on pi2. Step 4 (`rtabmap_ros` install) blocked on the lab
+apt mirror; workaround documented below. Step 6 (mapping run) is
+yours to execute, then localization launch closes the EKF loop.
 
 ## What works today on pi2
 
@@ -31,6 +32,15 @@ documented below. Step 6 (mapping run) is yours to execute.
 - **`rtabmap_mapping.launch.py`** — full mapping stack (camera + TF
   + conveyor_base for wheel odometry + rtabmap_slam). Will fail to
   run until rtabmap is installed (see below).
+- **`rtabmap_localization.launch.py`** — runtime stack: camera + TF
+  + conveyor_base + ekf_node + rtabmap (localization-only against an
+  existing .db) + slam_pose_relay_node. Closes the EKF feedback loop
+  documented in `TIER1_NOTES.md` (the 7° yaw drift goes away once
+  visual localization corrections start arriving).
+- **`slam_pose_relay_node`** — converts `/rtabmap/localization_pose`
+  (`PoseWithCovarianceStamped`) into `/{robot_id}/slam/pose`
+  (`PoseStamped`) which `ekf_node` already subscribes to. Covariance
+  is dropped (ekf_node uses a fixed observation noise matrix).
 
 ## Why we wrote our own camera node
 
@@ -159,19 +169,49 @@ mapping launch starts by default). Watch:
   Visualise in RViz on the laptop (set fixed frame = `map`).
 
 End the mapping run by `Ctrl+C` the launch. The .db at
-`~/maps/tb3_1_room.db` is now your map. To later run in
-localization-only mode against this .db, write a
-`rtabmap_localization.launch.py` (template will be the mapping
-launch with `Mem/IncrementalMemory: 'False'` and removing
-`--delete_db_on_start` from arguments).
+`~/maps/tb3_1_room.db` is now your map.
+
+## Step 7 — runtime localization (uses the .db you just built)
+
+Once you have a .db, switch from mapping to localization on the
+robot Pi:
+
+```bash
+ros2 launch swerve_bringup rtabmap_localization.launch.py \
+    robot_id:=tb3_1 \
+    db_path:=~/maps/tb3_1_room.db
+```
+
+This brings up the camera + TF + conveyor_base + EKF + rtabmap (in
+localization-only mode) + slam_pose_relay together. Verify from the
+laptop:
+
+```bash
+ros2 topic hz /tb3_1/slam/pose          # rises to 1-3 Hz once localized
+ros2 topic echo /tb3_1/ekf/odom         # smooth, drift-corrected pose
+ros2 run tf2_ros tf2_echo map tb3_1_base_link
+```
+
+**Initial localization can take 5–30 seconds** — RTAB-Map scans
+the entire stored map looking for a visual match to the current
+camera frame. Until it finds one, no `/rtabmap/localization_pose`
+is published and the EKF is on pure dead reckoning. Drop the robot
+in a part of the room with reasonable visual variety (avoid blank
+white walls).
+
+If localization gets confused (jumpy or mis-matches), see the
+header doc in `rtabmap_localization.launch.py` for tuning
+parameters.
 
 ## Files added in this branch
 
 ```
 ros2_ws/src/swerve_formation/swerve_formation/oak_camera_node.py
-ros2_ws/src/swerve_formation/setup.py             (registered oak_camera_node)
+ros2_ws/src/swerve_formation/swerve_formation/slam_pose_relay_node.py
+ros2_ws/src/swerve_formation/setup.py             (registered both nodes)
 ros2_ws/src/swerve_bringup/launch/oak_camera.launch.py
 ros2_ws/src/swerve_bringup/launch/rtabmap_mapping.launch.py
+ros2_ws/src/swerve_bringup/launch/rtabmap_localization.launch.py
 CAMERA_NOTES.md                                    (this file)
 ```
 
@@ -180,15 +220,19 @@ CAMERA_NOTES.md                                    (this file)
 1. **Camera mount geometry**: replace the launch-arg defaults
    (`cam_x=0.10 cam_y=0.00 cam_z=0.15`) with measured values from
    the actual OAK-D mount on tb3_1.
-2. **RTAB-Map .deb install**: do the laptop-side download workaround
-   above when next on a clean network.
+2. **RTAB-Map .deb install**: user is going to take pi2 to a
+   clean internet connection and apt install both
+   `ros-humble-depthai-ros-driver` (optional — we have our own
+   `oak_camera_node` that works without it) and
+   `ros-humble-rtabmap-ros` (required for the mapping +
+   localization launches).
 3. **Apply same pipeline on tb3_0 (pi1)** once it's online.
-4. **Localization-only launch**: write `rtabmap_localization.launch.py`
-   for after the .db is built.
-5. **Wire `/rtabmap/localization_pose` → `/{robot_id}/slam/pose`**:
-   the existing `ekf_node` already subscribes to `/slam/pose` for
-   its correction step. One launch remap + we close the EKF drift
-   loop documented in `TIER1_NOTES.md`.
+4. **Mapping run** (step 6 of the original plan): drive the robot
+   slowly through the room with `rtabmap_mapping.launch.py`
+   running, save the .db.
+5. **Verify localization**: launch `rtabmap_localization.launch.py`,
+   watch `/tb3_1/slam/pose` come alive, watch `/tb3_1/ekf/odom`
+   stop drifting.
 
 ## Network / thermal sanity checks during this session
 
