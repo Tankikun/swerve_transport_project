@@ -1,17 +1,23 @@
 /**
  * turtlebot3_conveyor.ino
  * =======================
- * 4-Wheel Swerve Drive — OpenCR firmware with IK + Commanded-Value Odometry
+ * 4-Wheel Swerve Drive — OpenCR firmware with IK + ENCODER-based Odometry
  *
  * Serial protocol (USB-CDC, 115200 baud):
  *   Receive:  "x_dot y_dot gamma_dot\n"   (floats: m/s, m/s, rad/s)
  *   Example:  "0.15 0.0 0.0\n"            → forward at 0.15 m/s
  *   Reply:    "OK d:δ0,δ1,δ2,δ3 w:ω0,ω1,ω2,ω3\n"
- *   Odom:     "POSE x y theta vx vy wz\n" (~33 Hz, world-frame pose)
+ *   Odom:     "POSE x y theta vx vy wz\n" (~3 Hz, world-frame pose)
  *   Reset:    send "R\n"                  → zeroes odometry
  *   Error:    "ERR\n"
  *
- * Odometry uses commanded IK values (g_modules) — no Dynamixel reads needed.
+ * Odometry (NEW): each motor cycle the firmware does a GroupSyncRead of
+ * Present Position (joints) and Present Velocity (wheels) from the
+ * Dynamixel bus, converts those to per-module (delta, drive_speed),
+ * and integrates body velocity from FK on the MEASURED values. If a
+ * read fails it falls back to the commanded values for that cycle so
+ * the loop still advances.
+ *
  * Watchdog: wheels stop if no command within CMD_TIMEOUT_MS.
  */
 
@@ -25,6 +31,7 @@
 Turtlebot3MotorDriver motor_driver;
 
 // IK state for 4 modules: [0=FL, 1=FR, 2=RL, 3=RR]
+// These are the COMMANDED targets — they drive the motor outputs.
 static ModuleState g_modules[4] = {{0.0f, 0.0f}, {0.0f, 0.0f},
                                     {0.0f, 0.0f}, {0.0f, 0.0f}};
 
@@ -40,39 +47,42 @@ static uint8_t s_rx_idx = 0;
 // Debug: print motor ticks for N cycles after a new command
 static int g_debug_cycles = 0;
 
-// Odometry state (dead-reckoning in world frame, integrated from commanded IK)
+// Odometry state (dead-reckoning in world frame, integrated from FK)
 static float    g_odom_x     = 0.0f;
 static float    g_odom_y     = 0.0f;
 static float    g_odom_theta = 0.0f;
 static uint32_t g_odom_prev_ms = 0;
 
+// Debug counter for encoder-read failures (for occasional reporting)
+static uint32_t g_enc_read_fail_count = 0;
+
 // POSE is sent every ODOM_DIV motor cycles (30ms × 10 = 300ms ≈ 3 Hz).
-// This keeps serial traffic and RPi CPU load low — identical to backup firmware
-// during normal motor operation, preventing brownout when wheels spin up.
+// This keeps serial traffic and RPi CPU load low.
 static const uint8_t ODOM_DIV = 10;
 static uint8_t       g_odom_div_cnt = 0;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Forward kinematics from commanded module states
-//
-// Uses g_modules[] (already computed by IK — no Dynamixel reads required).
-// MODULE_AXIS[] and MODULE_POS[] are from turtlebot3_conveyor.h.
+// Forward kinematics from a given module state (commanded OR measured).
 //
 // Least-squares FK (A^T A is diagonal for our symmetric L=W geometry):
 //   Vx  = (1/4) Σ ω_i·r·cos(θ_axis_i + δ_i)
 //   Vy  = (1/4) Σ ω_i·r·sin(θ_axis_i + δ_i)
 //   wz  = Σ(-py_i·bx_i + px_i·by_i) / Σ(px_i² + py_i²)
+//
+// Pass g_modules[] for commanded-value FK; pass an array filled from
+// the encoder reads for true closed-loop FK.
 // ──────────────────────────────────────────────────────────────────────────────
-static void fk_from_commanded(float &vx, float &vy, float &wz)
+static void fk_from_module_states(const ModuleState modules[4],
+                                  float &vx, float &vy, float &wz)
 {
   float sum_vx = 0.0f, sum_vy = 0.0f;
   float sum_wz_num = 0.0f, sum_wz_den = 0.0f;
 
   for (int i = 0; i < 4; i++) {
     float theta_axis = atan2f(MODULE_AXIS[i][1], MODULE_AXIS[i][0]);
-    float dir = theta_axis + g_modules[i].delta;
-    float bx  = g_modules[i].drive_speed * WHEEL_RADIUS * cosf(dir);
-    float by  = g_modules[i].drive_speed * WHEEL_RADIUS * sinf(dir);
+    float dir = theta_axis + modules[i].delta;
+    float bx  = modules[i].drive_speed * WHEEL_RADIUS * cosf(dir);
+    float by  = modules[i].drive_speed * WHEEL_RADIUS * sinf(dir);
     float px  = MODULE_POS[i][0];
     float py  = MODULE_POS[i][1];
 
@@ -85,6 +95,46 @@ static void fk_from_commanded(float &vx, float &vy, float &wz)
   vx = sum_vx / 4.0f;
   vy = sum_vy / 4.0f;
   wz = (sum_wz_den > 1e-6f) ? (sum_wz_num / sum_wz_den) : 0.0f;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Read encoder values from all 8 motors and convert to per-IK-module state.
+//
+// Two GroupSyncRead packets:
+//   joint_raw[0..3]  in MOTOR order [L_R, R_R, L_F, R_F]   — ticks 0..4095
+//   wheel_raw[0..3]  in MOTOR order [L_R, R_R, L_F, R_F]   — signed velocity ticks
+//
+// Then map to IK order [FL, FR, RL, RR] using the inverse of IK_TO_MOTOR.
+// IK_TO_MOTOR = {2, 3, 0, 1}, which is its own inverse, so the same
+// table maps motor index → IK index.
+//
+// Returns true on success. On false, caller should fall back to commanded.
+// ──────────────────────────────────────────────────────────────────────────────
+static bool read_measured_module_states(ModuleState measured[4])
+{
+  int32_t joint_raw[4];
+  int32_t wheel_raw[4];
+
+  if (!motor_driver.readJointPositions(joint_raw))   return false;
+  if (!motor_driver.readWheelVelocities(wheel_raw))  return false;
+
+  for (int m = 0; m < 4; m++) {
+    int ik = IK_TO_MOTOR[m];   // self-inverse permutation, ok to use both ways
+
+    // Steering tick → angle (rad), centred on STEER_CENTER (=2048).
+    float delta = ((float)(joint_raw[m] - STEER_CENTER)) / RAD_TO_DXL_POS;
+    // Clamp to the same δ ∈ [-π/2, π/2] window the IK enforces, so FK
+    // stays consistent with the IK convention even if a joint overshoots.
+    if (delta >  M_PI / 2.0f) delta =  M_PI / 2.0f;
+    if (delta < -M_PI / 2.0f) delta = -M_PI / 2.0f;
+
+    // Velocity tick → angular velocity (rad/s); already signed via int32 cast.
+    float omega = ((float)wheel_raw[m]) / RADS_TO_DXL_VEL;
+
+    measured[ik].delta       = delta;
+    measured[ik].drive_speed = omega;
+  }
+  return true;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -275,10 +325,23 @@ void loop()
     bool j_ok = motor_driver.controlJoints(joint_vals);
     bool w_ok = motor_driver.controlWheels(wheel_vals);
 
-    // ── Odometry (no Dynamixel reads — uses commanded IK values) ─────────────
-    // Always integrate at full 30ms rate for accuracy.
+    // ── Odometry from ENCODER feedback ───────────────────────────────────────
+    // GroupSyncRead present position (joints) + present velocity (wheels)
+    // from the Dynamixel bus; convert to per-module (delta, drive_speed);
+    // run FK on those measured states.
+    //
+    // If either read fails (bus glitch, motor not responding) fall back to
+    // FK on commanded values so the integrator keeps advancing instead of
+    // stalling. Increment a counter so we can warn occasionally.
     float vx, vy, wz;
-    fk_from_commanded(vx, vy, wz);
+    ModuleState measured[4];
+    bool used_encoders = read_measured_module_states(measured);
+    if (used_encoders) {
+      fk_from_module_states(measured, vx, vy, wz);
+    } else {
+      g_enc_read_fail_count++;
+      fk_from_module_states(g_modules, vx, vy, wz);
+    }
 
     uint32_t dt_ms = now - g_odom_prev_ms;
     float dt = (float)dt_ms * 0.001f;
@@ -290,8 +353,7 @@ void loop()
     while (g_odom_theta >  M_PI) g_odom_theta -= 2.0f * M_PI;
     while (g_odom_theta < -M_PI) g_odom_theta += 2.0f * M_PI;
 
-    // Send POSE only every ODOM_DIV cycles (~3 Hz) to keep serial
-    // traffic minimal — prevents RPi CPU spike / brownout on wheel spin-up.
+    // Send POSE only every ODOM_DIV cycles (~3 Hz) to keep serial traffic low.
     if (++g_odom_div_cnt >= ODOM_DIV) {
       g_odom_div_cnt = 0;
       Serial.print("POSE ");
@@ -307,6 +369,22 @@ void loop()
       Serial.print(" ");
       Serial.print(wz, 4);
       Serial.println();
+      // (Encoder vs commanded source isn't appended to the POSE line —
+      //  conveyor_base_node.py expects exactly 7 space-separated fields.
+      //  See the [WARN] line below for fallback reporting instead.)
+
+      // Occasional encoder-fail summary so a degraded bus is visible without
+      // spamming. ~3 Hz POSE rate × 10 = ~30 cycles → roughly every 3 s.
+      static uint8_t s_pose_count = 0;
+      if (++s_pose_count >= 10) {
+        s_pose_count = 0;
+        if (g_enc_read_fail_count > 0) {
+          Serial.print("[WARN] encoder reads failed ");
+          Serial.print(g_enc_read_fail_count);
+          Serial.println(" times in last ~3 s; using commanded fallback.");
+          g_enc_read_fail_count = 0;
+        }
+      }
     }
     // ─────────────────────────────────────────────────────────────────────────
 

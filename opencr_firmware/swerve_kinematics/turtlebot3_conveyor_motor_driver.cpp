@@ -7,7 +7,9 @@ Turtlebot3MotorDriver::Turtlebot3MotorDriver()
   portHandler_(nullptr),
   packetHandler_(nullptr),
   groupSyncWriteVelocity_(nullptr),
-  groupSyncWritePosition_(nullptr)
+  groupSyncWritePosition_(nullptr),
+  groupSyncReadJointPos_(nullptr),
+  groupSyncReadWheelVel_(nullptr)
 {
 }
 
@@ -82,11 +84,15 @@ bool Turtlebot3MotorDriver::init(void)
   setTorque(JOINT_L_R, true); setTorque(JOINT_R_R, true);
   setTorque(JOINT_L_F, true); setTorque(JOINT_R_F, true);
 
-  // ── Step 5: Create (or recreate) GroupSyncWrite objects ───────────────────
+  // ── Step 5: Create (or recreate) GroupSyncWrite + GroupSyncRead objects ──
   delete groupSyncWriteVelocity_;
   delete groupSyncWritePosition_;
-  groupSyncWriteVelocity_ = new dynamixel::GroupSyncWrite(portHandler_, packetHandler_, ADDR_X_GOAL_VELOCITY, LEN_X_GOAL_VELOCITY);
-  groupSyncWritePosition_ = new dynamixel::GroupSyncWrite(portHandler_, packetHandler_, ADDR_X_GOAL_POSITION, LEN_X_GOAL_POSITION);
+  delete groupSyncReadJointPos_;
+  delete groupSyncReadWheelVel_;
+  groupSyncWriteVelocity_ = new dynamixel::GroupSyncWrite(portHandler_, packetHandler_, ADDR_X_GOAL_VELOCITY,    LEN_X_GOAL_VELOCITY);
+  groupSyncWritePosition_ = new dynamixel::GroupSyncWrite(portHandler_, packetHandler_, ADDR_X_GOAL_POSITION,    LEN_X_GOAL_POSITION);
+  groupSyncReadJointPos_  = new dynamixel::GroupSyncRead (portHandler_, packetHandler_, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION);
+  groupSyncReadWheelVel_  = new dynamixel::GroupSyncRead (portHandler_, packetHandler_, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY);
 
   Serial.println("[OK] Motor driver initialized. Operating modes set.");
   return true;
@@ -147,20 +153,20 @@ bool Turtlebot3MotorDriver::readByte(uint8_t id, uint16_t addr, uint8_t &value)
 {
   uint8_t dxl_error = 0;
   int result = packetHandler_->read1ByteTxRx(portHandler_, id, addr, &value, &dxl_error);
-  
+
   if (result != COMM_SUCCESS) {
     // True communication failure (e.g., timeout, wire unplugged)
     return false;
   }
-  
+
   if (dxl_error != 0) {
     // Communication succeeded, but the motor is reporting a hardware fault!
-    Serial.print(" [DXL_ERR: "); 
-    Serial.print(dxl_error); 
+    Serial.print(" [DXL_ERR: ");
+    Serial.print(dxl_error);
     Serial.print("] ");
     return true; // We still successfully read the byte, so return true!
   }
-  
+
   return true;
 }
 
@@ -217,5 +223,91 @@ bool Turtlebot3MotorDriver::controlWheels(int32_t *value)
     return false;
   }
 
+  return true;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Encoder feedback reads (Protocol 2.0 GroupSyncRead).
+// Each call: addParam x4 → txRxPacket → getData x4 → clearParam.
+// On 1 Mbps TTL the round-trip for 4 motors is ~200–400 µs.
+// Output array index matches controlJoints / controlWheels:
+//   value[0] = L_R, value[1] = R_R, value[2] = L_F, value[3] = R_F
+// ──────────────────────────────────────────────────────────────────────────────
+
+bool Turtlebot3MotorDriver::readJointPositions(int32_t *positions_ticks)
+{
+  if (groupSyncReadJointPos_ == nullptr) return false;
+
+  // Defensive: clear any params left over from a previous failed call
+  // (e.g. a tx/rx error path that didn't reach its own clearParam()).
+  groupSyncReadJointPos_->clearParam();
+
+  bool ok = true;
+  ok &= groupSyncReadJointPos_->addParam(JOINT_L_R);
+  ok &= groupSyncReadJointPos_->addParam(JOINT_R_R);
+  ok &= groupSyncReadJointPos_->addParam(JOINT_L_F);
+  ok &= groupSyncReadJointPos_->addParam(JOINT_R_F);
+  if (!ok) { groupSyncReadJointPos_->clearParam(); return false; }
+
+  int dxl_comm_result = groupSyncReadJointPos_->txRxPacket();
+  if (dxl_comm_result != COMM_SUCCESS) {
+    groupSyncReadJointPos_->clearParam();
+    return false;
+  }
+
+  // Verify each motor responded with usable data
+  if (!groupSyncReadJointPos_->isAvailable(JOINT_L_R, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION) ||
+      !groupSyncReadJointPos_->isAvailable(JOINT_R_R, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION) ||
+      !groupSyncReadJointPos_->isAvailable(JOINT_L_F, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION) ||
+      !groupSyncReadJointPos_->isAvailable(JOINT_R_F, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION)) {
+    groupSyncReadJointPos_->clearParam();
+    return false;
+  }
+
+  // Position is unsigned 0..4095 in single-turn position mode (mode 3).
+  positions_ticks[0] = (int32_t)groupSyncReadJointPos_->getData(JOINT_L_R, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION);
+  positions_ticks[1] = (int32_t)groupSyncReadJointPos_->getData(JOINT_R_R, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION);
+  positions_ticks[2] = (int32_t)groupSyncReadJointPos_->getData(JOINT_L_F, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION);
+  positions_ticks[3] = (int32_t)groupSyncReadJointPos_->getData(JOINT_R_F, ADDR_X_PRESENT_POSITION, LEN_X_PRESENT_POSITION);
+
+  groupSyncReadJointPos_->clearParam();
+  return true;
+}
+
+bool Turtlebot3MotorDriver::readWheelVelocities(int32_t *velocities_ticks)
+{
+  if (groupSyncReadWheelVel_ == nullptr) return false;
+
+  groupSyncReadWheelVel_->clearParam();   // defensive — see readJointPositions
+
+  bool ok = true;
+  ok &= groupSyncReadWheelVel_->addParam(WHEEL_L_R);
+  ok &= groupSyncReadWheelVel_->addParam(WHEEL_R_R);
+  ok &= groupSyncReadWheelVel_->addParam(WHEEL_L_F);
+  ok &= groupSyncReadWheelVel_->addParam(WHEEL_R_F);
+  if (!ok) { groupSyncReadWheelVel_->clearParam(); return false; }
+
+  int dxl_comm_result = groupSyncReadWheelVel_->txRxPacket();
+  if (dxl_comm_result != COMM_SUCCESS) {
+    groupSyncReadWheelVel_->clearParam();
+    return false;
+  }
+
+  if (!groupSyncReadWheelVel_->isAvailable(WHEEL_L_R, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY) ||
+      !groupSyncReadWheelVel_->isAvailable(WHEEL_R_R, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY) ||
+      !groupSyncReadWheelVel_->isAvailable(WHEEL_L_F, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY) ||
+      !groupSyncReadWheelVel_->isAvailable(WHEEL_R_F, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY)) {
+    groupSyncReadWheelVel_->clearParam();
+    return false;
+  }
+
+  // Present Velocity is signed int32 (two's complement). getData returns uint32;
+  // a plain (int32_t) cast preserves the sign bit pattern.
+  velocities_ticks[0] = (int32_t)groupSyncReadWheelVel_->getData(WHEEL_L_R, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY);
+  velocities_ticks[1] = (int32_t)groupSyncReadWheelVel_->getData(WHEEL_R_R, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY);
+  velocities_ticks[2] = (int32_t)groupSyncReadWheelVel_->getData(WHEEL_L_F, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY);
+  velocities_ticks[3] = (int32_t)groupSyncReadWheelVel_->getData(WHEEL_R_F, ADDR_X_PRESENT_VELOCITY, LEN_X_PRESENT_VELOCITY);
+
+  groupSyncReadWheelVel_->clearParam();
   return true;
 }

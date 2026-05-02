@@ -8,6 +8,8 @@
 #define ADDR_X_TORQUE_ENABLE            64
 #define ADDR_X_GOAL_VELOCITY            104
 #define ADDR_X_GOAL_POSITION            116
+#define ADDR_X_PRESENT_VELOCITY         128  // signed int32, 0.229 RPM units
+#define ADDR_X_PRESENT_POSITION         132  // unsigned int32, 0..4095 in single-turn mode
 
 #define OPERATING_MODE_VELOCITY         1    // Velocity Control  → wheels
 #define OPERATING_MODE_POSITION         3    // Position Control  → joints (factory default)
@@ -33,6 +35,8 @@
 #define LEN_X_GOAL_VELOCITY             4
 #define ADDR_X_HARDWARE_ERROR           70
 #define LEN_X_GOAL_POSITION             4
+#define LEN_X_PRESENT_VELOCITY          4
+#define LEN_X_PRESENT_POSITION          4
 
 class Turtlebot3MotorDriver
 {
@@ -46,6 +50,14 @@ class Turtlebot3MotorDriver
   bool controlWheels(int32_t *value);
   bool readByte(uint8_t id, uint16_t addr, uint8_t &value);
 
+  // Encoder-based odometry reads.
+  // Both fill a 4-element array in MOTOR ORDER: [0=L_R, 1=R_R, 2=L_F, 3=R_F]
+  // — same indexing the controlJoints/controlWheels arrays use.
+  // Each call performs ONE GroupSyncRead packet (~200–400 µs on 1 Mbps bus).
+  // Returns false on bus error; the caller should fall back to commanded values.
+  bool readJointPositions(int32_t *positions_ticks);
+  bool readWheelVelocities(int32_t *velocities_ticks);
+
  private:
   uint32_t baudrate_;
   float  protocol_version_;
@@ -55,6 +67,10 @@ class Turtlebot3MotorDriver
 
   dynamixel::GroupSyncWrite *groupSyncWriteVelocity_;
   dynamixel::GroupSyncWrite *groupSyncWritePosition_;
+
+  // GroupSyncRead handles for actual encoder feedback (Protocol 2.0).
+  dynamixel::GroupSyncRead  *groupSyncReadJointPos_;
+  dynamixel::GroupSyncRead  *groupSyncReadWheelVel_;
 
   bool setOperatingMode(uint8_t id, uint8_t mode);
 };
