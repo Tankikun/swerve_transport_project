@@ -1,37 +1,119 @@
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseArray, Pose
-from nav_msgs.msg import Odometry
+"""
+laplacian_formation_node.py
+---------------------------
+Pure-feedforward rigid-body formation controller, runs on every robot.
+
+Each tick this node receives the operator's twist for the (imaginary)
+virtual centre on /virtual_center/cmd_vel and produces THIS robot's
+body-frame twist using a closed-form rigid-body transform:
+
+    v_robot_x  = vc_vx - vc_wz * my_offset.y
+    v_robot_y  = vc_vy + vc_wz * my_offset.x
+    v_robot_wz = vc_wz
+
+There is NO pose feedback. We deliberately avoid pulling toward an
+EKF-derived "desired position" because the two robots have separate
+odometry frames (no SLAM, no shared world), so any cross-robot error
+term is meaningless and produces phantom commands at startup.
+
+This means the formation can drift over time (wheel slip, latency)
+and there is no consensus correction. The instantaneous kinematics is
+correct: at any moment all robots' commanded body twists are exactly
+what a rigid body rotating around the virtual centre would dictate.
+
+Saturation handling
+-------------------
+A formation-wide scaling factor caps the maximum per-wheel linear
+speed across ALL robots in the formation to MAX_WHEEL_LINEAR (just
+below the firmware's 0.198 m/s clamp). When the would-be outer-wheel
+speed exceeds the cap, every robot's twist is scaled by the same
+factor — the rigid shape is preserved, the formation just moves
+slower. This is the asymmetric "outer wheel goes faster" behaviour
+needed for object transport.
+"""
+
+import math
+
 import numpy as np
+import rclpy
+from geometry_msgs.msg import Pose, PoseArray, Twist
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+
+
+# Worst-case wheel offset from the chassis centre. With
+# HALF_WHEELBASE = HALF_TRACK_WIDTH = 0.15 m the wheels sit at
+# sqrt(0.15**2 + 0.15**2) ≈ 0.212 m from centre.
+CHASSIS_HALF_DIAGONAL = math.sqrt(0.15 ** 2 + 0.15 ** 2)
+
+# Per-wheel linear speed cap. Firmware clamps at MAX_DRIVE_SPEED ≈
+# 0.198 m/s; we leave a small margin for rounding and any small
+# correction term added later.
+MAX_WHEEL_LINEAR = 0.18
 
 
 class LaplacianFormationController(Node):
+
+    DT = 0.05  # 20 Hz control loop
+
     def __init__(self):
         super().__init__('laplacian_formation_node')
 
         self.declare_parameter('robot_id', 'tb3_0')
         self.declare_parameter('neighbors', ['tb3_1'])
-        self.declare_parameter('k_gain', 1.5)
-        self.declare_parameter('robot_index', 0)
-        # This robot's [x, y] offset from the virtual center
-        self.declare_parameter('my_offset', [0.0, 0.5])
-        # Flat list [n0_x, n0_y, n1_x, n1_y, ...] in the same order as 'neighbors'
-        self.declare_parameter('neighbor_offsets', [0.0, -0.5])
+        self.declare_parameter('my_offset', [0.0, 0.0])
+        self.declare_parameter('neighbor_offsets', [0.0, 0.0])
+        self.declare_parameter('k_gain', 0.0)  # legacy, unused (no consensus)
 
-        self.robot_id = self.get_parameter('robot_id').value
-        self.neighbors = self.get_parameter('neighbors').value
-        self.k_gain = self.get_parameter('k_gain').value
+        self.robot_id  = self.get_parameter('robot_id').value
+        self.neighbors = list(self.get_parameter('neighbors').value)
 
-        self.my_desired = np.array(self.get_parameter('my_offset').value, dtype=float)
-        nb_off = np.array(self.get_parameter('neighbor_offsets').value, dtype=float).reshape(-1, 2)
-        self.neighbor_desired = {n: nb_off[i] for i, n in enumerate(self.neighbors)}
+        my_offset_param = np.array(
+            self.get_parameter('my_offset').value, dtype=float
+        )
+        if my_offset_param.size != 2:
+            msg = (
+                f"Invalid 'my_offset' parameter for {self.robot_id}: "
+                f'expected exactly 2 values [x, y], got '
+                f'{my_offset_param.size}: {my_offset_param.tolist()}'
+            )
+            self.get_logger().error(msg)
+            raise ValueError(msg)
+        self.my_offset = my_offset_param
 
-        self.my_pose = np.zeros(2)
-        self.neighbor_poses = {n: np.zeros(2) for n in self.neighbors}
-        self.virtual_vel = np.zeros(2)
+        neighbor_offsets_param = np.array(
+            self.get_parameter('neighbor_offsets').value, dtype=float
+        )
+        expected_neighbor_offset_values = 2 * len(self.neighbors)
+        if neighbor_offsets_param.size != expected_neighbor_offset_values:
+            msg = (
+                f"Invalid 'neighbor_offsets' parameter for {self.robot_id}: "
+                f'expected {expected_neighbor_offset_values} values '
+                f'(2 per neighbor for {len(self.neighbors)} neighbors), got '
+                f'{neighbor_offsets_param.size}: '
+                f'{neighbor_offsets_param.tolist()}'
+            )
+            self.get_logger().error(msg)
+            raise ValueError(msg)
+
+        nb_off = neighbor_offsets_param.reshape(-1, 2)
+        self.neighbor_offsets = {n: nb_off[i] for i, n in enumerate(self.neighbors)}
+
+        # Last operator command for the virtual centre. Body-frame.
+        self.virtual_vel     = np.zeros(2)
         self.virtual_angular = 0.0
 
-        # Consume EKF-fused pose — never raw /odom
+        # Formation-state publisher carries last-known pose of self +
+        # neighbours so formation_size_node has something to consume.
+        # We update these from EKF if it is available, but the control
+        # law does NOT depend on them.
+        self.my_pose = np.zeros(2)
+        self.neighbor_poses = {n: np.zeros(2) for n in self.neighbors}
+
+        # Subscriptions
+        self.create_subscription(
+            Twist, '/virtual_center/cmd_vel', self._virtual_cmd_cb, 10
+        )
         self.create_subscription(
             Odometry, f'/{self.robot_id}/ekf/odom', self._odom_cb, 10
         )
@@ -43,18 +125,28 @@ class LaplacianFormationController(Node):
                 10,
             )
 
-        self.create_subscription(
-            Twist, '/virtual_center/cmd_vel', self._virtual_cmd_cb, 10
+        # Publishers
+        self._cmd_pub = self.create_publisher(
+            Twist, f'/{self.robot_id}/cmd_vel', 10
         )
-        self.create_subscription(
-            PoseArray, '/formation/offsets', self._offsets_cb, 10
+        self._state_pub = self.create_publisher(
+            PoseArray, '/formation/state', 10
         )
 
-        self._cmd_pub = self.create_publisher(Twist, f'/{self.robot_id}/cmd_vel', 10)
-        self._state_pub = self.create_publisher(PoseArray, '/formation/state', 10)
+        self.create_timer(self.DT, self._control_loop)
 
-        self.create_timer(0.05, self._control_loop)
-        self.get_logger().info(f'LaplacianFormationController ready for {self.robot_id}')
+        self.get_logger().info(
+            f'laplacian_formation_node ready: id={self.robot_id} '
+            f'my_offset={self.my_offset.tolist()} '
+            f'neighbors={self.neighbors}'
+        )
+
+    # ── Subscription callbacks ────────────────────────────────────────────────
+
+    def _virtual_cmd_cb(self, msg: Twist):
+        self.virtual_vel[0]  = float(msg.linear.x)
+        self.virtual_vel[1]  = float(msg.linear.y)
+        self.virtual_angular = float(msg.angular.z)
 
     def _odom_cb(self, msg: Odometry):
         self.my_pose[0] = msg.pose.pose.position.x
@@ -64,43 +156,58 @@ class LaplacianFormationController(Node):
         self.neighbor_poses[neighbor_id][0] = msg.pose.pose.position.x
         self.neighbor_poses[neighbor_id][1] = msg.pose.pose.position.y
 
-    def _virtual_cmd_cb(self, msg: Twist):
-        self.virtual_vel[0] = msg.linear.x
-        self.virtual_vel[1] = msg.linear.y
-        self.virtual_angular = msg.angular.z
-
-    def _offsets_cb(self, msg: PoseArray):
-        robot_index = self.get_parameter('robot_index').value
-        if robot_index < len(msg.poses):
-            p = msg.poses[robot_index]
-            self.my_desired = np.array([p.position.x, p.position.y])
-        remaining = [msg.poses[i] for i in range(len(msg.poses)) if i != robot_index]
-        for i, n in enumerate(self.neighbors):
-            if i < len(remaining):
-                p = remaining[i]
-                self.neighbor_desired[n] = np.array([p.position.x, p.position.y])
+    # ── Control loop (20 Hz) ──────────────────────────────────────────────────
 
     def _control_loop(self):
-        consensus = np.zeros(2)
-        for neighbor in self.neighbors:
-            actual_diff = self.my_pose - self.neighbor_poses[neighbor]
-            desired_diff = self.my_desired - self.neighbor_desired[neighbor]
-            consensus -= self.k_gain * (actual_diff - desired_diff)
+        vc_x  = float(self.virtual_vel[0])
+        vc_y  = float(self.virtual_vel[1])
+        vc_wz = float(self.virtual_angular)
+
+        # ── Local saturation scaling for this robot and configured neighbors ──
+        # Compute the worst-case per-wheel linear speed across this
+        # robot plus the robots listed in `self.neighbors`, then pick a
+        # single scale factor for that set. This preserves rigid-shape
+        # scaling only if `self.neighbors` covers every robot that is
+        # expected to share the same saturation decision.
+        all_offsets = [(float(self.my_offset[0]), float(self.my_offset[1]))]
+        for n in self.neighbors:
+            nb = self.neighbor_offsets[n]
+            all_offsets.append((float(nb[0]), float(nb[1])))
+
+        max_worst = 0.0
+        for (rx_i, ry_i) in all_offsets:
+            bx = vc_x - vc_wz * ry_i
+            by = vc_y + vc_wz * rx_i
+            worst = math.hypot(bx, by) + abs(vc_wz) * CHASSIS_HALF_DIAGONAL
+            if worst > max_worst:
+                max_worst = worst
+
+        if max_worst > MAX_WHEEL_LINEAR and max_worst > 1e-6:
+            scale = MAX_WHEEL_LINEAR / max_worst
+        else:
+            scale = 1.0
+
+        # ── Rigid-body feedforward for THIS robot ──────────────────────
+        rx, ry = float(self.my_offset[0]), float(self.my_offset[1])
+        ff_x  = (vc_x - vc_wz * ry) * scale
+        ff_y  = (vc_y + vc_wz * rx) * scale
+        ff_wz = vc_wz * scale
 
         cmd = Twist()
-        cmd.linear.x = float(self.virtual_vel[0] + consensus[0])
-        cmd.linear.y = float(self.virtual_vel[1] + consensus[1])
-        cmd.angular.z = self.virtual_angular
+        cmd.linear.x  = ff_x
+        cmd.linear.y  = ff_y
+        cmd.angular.z = ff_wz
         self._cmd_pub.publish(cmd)
 
-        # Publish known formation poses (self + all neighbors) for formation_size_node
+        # ── Publish formation state for formation_size_node ────────────
         pa = PoseArray()
-        pa.header.stamp = self.get_clock().now().to_msg()
+        pa.header.stamp    = self.get_clock().now().to_msg()
         pa.header.frame_id = 'odom'
         p0 = Pose()
-        p0.position.x, p0.position.y = float(self.my_pose[0]), float(self.my_pose[1])
+        p0.position.x = float(self.my_pose[0])
+        p0.position.y = float(self.my_pose[1])
         p0.orientation.w = 1.0
-        pa.poses = [p0]
+        pa.poses.append(p0)
         for n in self.neighbors:
             p = Pose()
             p.position.x = float(self.neighbor_poses[n][0])
