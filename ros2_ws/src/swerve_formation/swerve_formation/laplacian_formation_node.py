@@ -140,12 +140,12 @@ class LaplacianFormationController(Node):
         vc_y  = float(self.virtual_vel[1])
         vc_wz = float(self.virtual_angular)
 
-        # ── Formation-wide saturation scaling ──────────────────────────
-        # Compute the worst-case per-wheel linear speed across every
-        # robot in the formation (we know all offsets from launch
-        # params), then pick a single scale factor so all robots scale
-        # together. Without this, the inner robot keeps full wz while
-        # the outer robot scales down, breaking the rigid shape.
+        # ── Local saturation scaling for this robot and configured neighbors ──
+        # Compute the worst-case per-wheel linear speed across this
+        # robot plus the robots listed in `self.neighbors`, then pick a
+        # single scale factor for that set. This preserves rigid-shape
+        # scaling only if `self.neighbors` covers every robot that is
+        # expected to share the same saturation decision.
         all_offsets = [(float(self.my_offset[0]), float(self.my_offset[1]))]
         for n in self.neighbors:
             nb = self.neighbor_offsets[n]
