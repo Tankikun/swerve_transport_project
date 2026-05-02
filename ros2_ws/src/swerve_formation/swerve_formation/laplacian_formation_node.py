@@ -68,12 +68,35 @@ class LaplacianFormationController(Node):
         self.robot_id  = self.get_parameter('robot_id').value
         self.neighbors = list(self.get_parameter('neighbors').value)
 
-        self.my_offset = np.array(
+        my_offset_param = np.array(
             self.get_parameter('my_offset').value, dtype=float
         )
-        nb_off = np.array(
+        if my_offset_param.size != 2:
+            msg = (
+                f"Invalid 'my_offset' parameter for {self.robot_id}: "
+                f'expected exactly 2 values [x, y], got '
+                f'{my_offset_param.size}: {my_offset_param.tolist()}'
+            )
+            self.get_logger().error(msg)
+            raise ValueError(msg)
+        self.my_offset = my_offset_param
+
+        neighbor_offsets_param = np.array(
             self.get_parameter('neighbor_offsets').value, dtype=float
-        ).reshape(-1, 2)
+        )
+        expected_neighbor_offset_values = 2 * len(self.neighbors)
+        if neighbor_offsets_param.size != expected_neighbor_offset_values:
+            msg = (
+                f"Invalid 'neighbor_offsets' parameter for {self.robot_id}: "
+                f'expected {expected_neighbor_offset_values} values '
+                f'(2 per neighbor for {len(self.neighbors)} neighbors), got '
+                f'{neighbor_offsets_param.size}: '
+                f'{neighbor_offsets_param.tolist()}'
+            )
+            self.get_logger().error(msg)
+            raise ValueError(msg)
+
+        nb_off = neighbor_offsets_param.reshape(-1, 2)
         self.neighbor_offsets = {n: nb_off[i] for i, n in enumerate(self.neighbors)}
 
         # Last operator command for the virtual centre. Body-frame.
