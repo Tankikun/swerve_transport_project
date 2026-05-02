@@ -87,8 +87,22 @@ class NavigationNode(Node):
         super().__init__('navigation_node')
         self.declare_parameter('robot_id', 'tb3_0')
         self.declare_parameter('goal_tolerance', self.GOAL_TOL)
-        self._robot_id  = self.get_parameter('robot_id').value
-        self._goal_tol  = float(self.get_parameter('goal_tolerance').value)
+        # holonomic_mode=True: robot does NOT rotate to face the motion
+        # direction. Required for swerve cooperative transport (formation
+        # must keep its shape while strafing). False keeps the legacy
+        # diff-drive style behaviour for single-robot mapping/exploration.
+        self.declare_parameter('holonomic_mode', False)
+        # heading_tolerance: max heading error (rad) to accept REACHED.
+        # Default π (effectively ignored — REACHED triggers on position
+        # only) so pre-existing diff-drive launches keep working. Set
+        # smaller (e.g. 0.1 rad ≈ 5.7°) when the goal heading matters
+        # — required for pure rotation goals where x=y=0 already passes
+        # the position check on entry.
+        self.declare_parameter('heading_tolerance', float('3.14159'))
+        self._robot_id        = self.get_parameter('robot_id').value
+        self._goal_tol        = float(self.get_parameter('goal_tolerance').value)
+        self._holonomic_mode  = bool(self.get_parameter('holonomic_mode').value)
+        self._heading_tol     = float(self.get_parameter('heading_tolerance').value)
 
         # State
         self._is_leader  = False
@@ -133,7 +147,9 @@ class NavigationNode(Node):
         self.create_timer(self.DT, self._control_loop)
         self.get_logger().info(
             f'navigation_node ready ({self._robot_id}) — APF + velocity ramp '
-            f'goal_tolerance={self._goal_tol:.3f} m'
+            f'goal_tolerance={self._goal_tol:.3f} m '
+            f'heading_tolerance={self._heading_tol:.3f} rad '
+            f'holonomic_mode={self._holonomic_mode}'
         )
 
     # ── Subscription callbacks ────────────────────────────────────────────────
@@ -216,7 +232,16 @@ class NavigationNode(Node):
         d_goal  = np.linalg.norm(to_goal)
 
         if d_goal < self._goal_tol:
-            return np.zeros(2), 0.0
+            # Position is already at goal — but the goal heading may not
+            # be. Still produce an omega command so pure-rotation goals
+            # work. Returning v=0 is correct (we don't want to walk away
+            # from the goal point); omega tracks goal heading.
+            heading_err = _wrap(float(self._current_wp[2]) - float(self._pose[2]))
+            omega_des = float(np.clip(
+                self.K_HEADING * heading_err,
+                -self.MAX_ANGULAR, self.MAX_ANGULAR
+            ))
+            return np.zeros(2), omega_des
 
         # ── Attractive force (conic: unit vector, constant magnitude) ─────
         f_att = self.K_ATT * to_goal / d_goal
@@ -246,11 +271,26 @@ class NavigationNode(Node):
 
         v_des = (speed / f_mag) * f_total   # world-frame velocity
 
-        # Heading: align with velocity direction when moving fast enough
-        if np.linalg.norm(v_des) > 0.05:
-            desired_heading = np.arctan2(v_des[1], v_des[0])
+        # Heading control. Two modes:
+        #
+        #   holonomic_mode = False (default — diff-drive style):
+        #     Rotate robot to face the direction of motion. Correct for
+        #     non-holonomic robots (and convenient for single-robot
+        #     exploration), but WRONG for cooperative transport: the
+        #     formation would rotate 90° to strafe a payload past an
+        #     obstacle, dropping it. This was the original behaviour.
+        #
+        #   holonomic_mode = True:
+        #     Robot keeps the explicit goal heading `_current_wp[2]`
+        #     regardless of motion direction. Pure body-frame strafe
+        #     becomes possible. Required for swerve formation transport.
+        if self._holonomic_mode:
+            desired_heading = self._current_wp[2]
         else:
-            desired_heading = self._current_wp[2]   # use goal heading when nearly stopped
+            if np.linalg.norm(v_des) > 0.05:
+                desired_heading = np.arctan2(v_des[1], v_des[0])
+            else:
+                desired_heading = self._current_wp[2]
 
         omega_des = np.clip(
             self.K_HEADING * _wrap(desired_heading - self._pose[2]),
@@ -287,9 +327,13 @@ class NavigationNode(Node):
         if not self._is_leader or self._current_wp is None:
             return
 
-        # Check if current waypoint is reached
+        # Check if current waypoint is reached. With heading_tolerance
+        # less than π, both position AND heading must be within tolerance
+        # — required for pure-rotation goals.
         pos = self._pose[:2]
-        if np.linalg.norm(self._current_wp[:2] - pos) < self._goal_tol:
+        pos_err     = float(np.linalg.norm(self._current_wp[:2] - pos))
+        heading_err = abs(_wrap(float(self._current_wp[2]) - float(self._pose[2])))
+        if pos_err < self._goal_tol and heading_err < self._heading_tol:
             if self._waypoints:
                 self._current_wp = self._waypoints.pop(0)
                 self.get_logger().info(

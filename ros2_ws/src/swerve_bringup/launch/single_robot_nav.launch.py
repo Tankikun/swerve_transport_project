@@ -50,10 +50,12 @@ from launch_ros.actions import Node
 
 
 def launch_setup(context, *args, **kwargs):
-    robot_id  = LaunchConfiguration('robot_id').perform(context)
-    usb_port  = LaunchConfiguration('usb_port').perform(context)
-    goal_tol  = float(LaunchConfiguration('goal_tolerance').perform(context))
-    suffix    = f'_{robot_id}'
+    robot_id    = LaunchConfiguration('robot_id').perform(context)
+    usb_port    = LaunchConfiguration('usb_port').perform(context)
+    goal_tol    = float(LaunchConfiguration('goal_tolerance').perform(context))
+    holonomic   = LaunchConfiguration('holonomic_mode').perform(context).lower() in ('true', '1', 'yes')
+    heading_tol = float(LaunchConfiguration('heading_tolerance').perform(context))
+    suffix      = f'_{robot_id}'
 
     return [
         # ── Serial bridge to OpenCR ──────────────────────────────────────
@@ -84,8 +86,10 @@ def launch_setup(context, *args, **kwargs):
             executable='navigation_node',
             name='navigation_node' + suffix,
             parameters=[{
-                'robot_id':       robot_id,
-                'goal_tolerance': goal_tol,
+                'robot_id':          robot_id,
+                'goal_tolerance':    goal_tol,
+                'holonomic_mode':    holonomic,
+                'heading_tolerance': heading_tol,
             }],
             output='screen',
         ),
@@ -100,13 +104,18 @@ def launch_setup(context, *args, **kwargs):
         ),
 
         # ── Bypass laplacian: relay /virtual_center/cmd_vel → /{id}/cmd_vel
-        # Single-robot, no formation math, no offsets to apply. Uses the
-        # standard topic_tools relay (already shipped with ROS Humble).
+        # Single-robot, no formation math, no offsets to apply. We use a
+        # local 10-line relay (cmd_vel_relay_node) instead of topic_tools
+        # because the lab apt mirror is unreliable and we cannot rely on
+        # ros-humble-topic-tools being present on every Pi.
         Node(
-            package='topic_tools',
-            executable='relay',
+            package='swerve_formation',
+            executable='cmd_vel_relay_node',
             name='cmd_vel_relay' + suffix,
-            arguments=['/virtual_center/cmd_vel', f'/{robot_id}/cmd_vel'],
+            parameters=[{
+                'in_topic':  '/virtual_center/cmd_vel',
+                'out_topic': f'/{robot_id}/cmd_vel',
+            }],
             output='screen',
         ),
     ]
@@ -124,5 +133,16 @@ def generate_launch_description():
             'goal_tolerance', default_value='0.15',
             description='Distance (m) within which a goal counts as REACHED. '
                         'Default 0.15 m for hardware (sim uses 0.05 m).'),
+        DeclareLaunchArgument(
+            'holonomic_mode', default_value='false',
+            description='If true, robot does NOT rotate to face the motion '
+                        'direction. Required for swerve cooperative '
+                        'transport. False keeps diff-drive style behaviour.'),
+        DeclareLaunchArgument(
+            'heading_tolerance', default_value='3.14159',
+            description='Heading tolerance (rad) for REACHED. Default π '
+                        '(effectively disabled — REACHED triggers on '
+                        'position only). Set ~0.1 (≈5.7°) when goal '
+                        'heading matters (e.g. pure rotation goals).'),
         OpaqueFunction(function=launch_setup),
     ])

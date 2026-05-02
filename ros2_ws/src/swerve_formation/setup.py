@@ -40,6 +40,7 @@ setup(
             # ── Simulation helpers ──────────────────────────────────────────
             'static_leader_publisher = swerve_formation.static_leader_publisher:main',
             'send_goal_node = swerve_formation.send_goal_node:main',
+            'cmd_vel_relay_node = swerve_formation.cmd_vel_relay_node:main',
         ],
     },
 )

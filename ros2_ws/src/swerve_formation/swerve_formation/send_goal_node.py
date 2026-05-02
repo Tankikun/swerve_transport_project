@@ -36,19 +36,41 @@ class SendGoalNode(Node):
         y     = float(self.get_parameter('y').value)
         theta = float(self.get_parameter('theta').value)
 
-        pub = self.create_publisher(Twist, '/navigation/goal', 10)
+        # Use TRANSIENT_LOCAL so a late-discovering subscriber (cross-machine
+        # FastDDS unicast can take 1-2 s) still receives the message.
+        from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+        qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        pub = self.create_publisher(Twist, '/navigation/goal', qos)
 
-        # Give navigation_node a moment to start
-        self.create_timer(0.5, lambda: self._send(pub, x, y, theta))
+        # Wait for cross-machine discovery handshake. 0.5 s was too short
+        # for laptop→Pi sends (sub_count remained 0 → message dropped).
+        # Poll for at least one matched subscriber, with a 5 s ceiling, then
+        # publish. With TRANSIENT_LOCAL above this is doubly safe.
+        self._pub = pub
+        self._x, self._y, self._theta = x, y, theta
+        self._waited = 0.0
+        self.create_timer(0.5, self._tick)
 
-    def _send(self, pub, x, y, theta):
-        msg = Twist()
-        msg.linear.x  = x
-        msg.linear.y  = y
-        msg.angular.z = theta
-        pub.publish(msg)
-        self.get_logger().info(f'Goal sent: x={x:.2f} y={y:.2f} θ={theta:.2f} rad')
-        raise SystemExit
+    def _tick(self):
+        sub_count = self._pub.get_subscription_count()
+        self._waited += 0.5
+        if sub_count > 0 or self._waited >= 5.0:
+            msg = Twist()
+            msg.linear.x  = self._x
+            msg.linear.y  = self._y
+            msg.angular.z = self._theta
+            self._pub.publish(msg)
+            self.get_logger().info(
+                f'Goal sent: x={self._x:.2f} y={self._y:.2f} '
+                f'θ={self._theta:.2f} rad  (matched_subs={sub_count}, '
+                f'waited={self._waited:.1f}s)'
+            )
+            # Linger briefly so TRANSIENT_LOCAL has time to deliver.
+            self.create_timer(0.5, lambda: (_ for _ in ()).throw(SystemExit))
 
 
 def main(args=None):
