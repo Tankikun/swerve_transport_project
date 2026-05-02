@@ -217,15 +217,28 @@ export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
 
-ros2 run turtlebot3_conveyor_bridge teleop_keyboard_node \
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
     --ros-args -r cmd_vel:=/tb3_1/cmd_vel
 ```
 
-(If your teleop node has a different name, substitute. Key
-requirement: it must publish to `/tb3_1/cmd_vel`.)
+> Uses the standard ROS `teleop_twist_keyboard` (apt package
+> `ros-humble-teleop-twist-keyboard`, pre-installed on the laptop).
+> If that command says "Package not found", install it:
+> `sudo apt install -y ros-humble-teleop-twist-keyboard`.
 
-The teleop will print key bindings. Test by tapping forward — the
-robot should move slightly.
+The teleop will print key bindings:
+```
+Moving around:    u    i    o
+                  j    k    l
+                  m    ,    .
+```
+- `i` / `,` — forward / backward
+- `j` / `l` — rotate
+- `u` / `o` / `m` / `.` — diagonals (holonomic strafe)
+- `space` or `k` — stop
+- `q` / `z` — speed up / down
+
+Test by tapping `i` — the robot should move slightly.
 
 ---
 
