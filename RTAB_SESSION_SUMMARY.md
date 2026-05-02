@@ -139,7 +139,9 @@ ros2_ws/src/swerve_bringup/launch/
     rtabmap_laptop_localization.launch.py      # split: laptop-side rtabmap (localization)
 
 CAMERA_NOTES.md             # deep-dive: depthai 3.x quirks, apt mirror workaround
-MAPPING_RUN_GUIDE.md        # operator procedure for step 6 (both paths)
+MAPPING_RUN_GUIDE.md        # top-level index pointing to per-side guides
+MAPPING_RUN_PI.md           # operator procedure — pi side (sensors)
+MAPPING_RUN_LAPTOP.md       # operator procedure — laptop side (rtabmap + teleop)
 RTAB_SESSION_SUMMARY.md     # THIS FILE
 ```
 

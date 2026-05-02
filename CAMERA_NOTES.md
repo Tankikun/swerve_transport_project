@@ -239,7 +239,9 @@ ros2_ws/src/swerve_bringup/launch/rtabmap_pi_sensors.launch.py     (split mode: 
 ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_mapping.launch.py (split mode: laptop SLAM)
 ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_localization.launch.py (split mode: laptop localization)
 CAMERA_NOTES.md                                    (this file)
-MAPPING_RUN_GUIDE.md                               (operator procedure for step 6)
+MAPPING_RUN_GUIDE.md                               (top-level index pointing to per-side guides)
+MAPPING_RUN_PI.md                                  (operator procedure — pi side)
+MAPPING_RUN_LAPTOP.md                              (operator procedure — laptop side)
 RTAB_SESSION_SUMMARY.md                            (branch progress overview)
 ```
 
