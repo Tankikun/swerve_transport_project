@@ -38,7 +38,7 @@ that they've reached the "leave this terminal alone" stage.
 export FASTRTPS_DEFAULT_PROFILES_FILE=/home/toodmuk/fastdds_peers.xml
 export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
-source ~/swerve_transport_project/install/setup.bash
+source ~/swerve_transport_project/ros2_ws/install/setup.bash
 ```
 
 Now check that the Pi's topics are visible:
