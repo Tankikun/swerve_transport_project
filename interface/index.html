@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Robot Mission Planner</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #0a0c10;
+    --panel:     #111318;
+    --border:    #1e2330;
+    --accent:    #00e5ff;
+    --accent2:   #ff3f6c;
+    --text:      #e0e6f0;
+    --muted:     #4a5268;
+    --success:   #00e5a0;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* --- Header --- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-family: 'Space Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .status-pill {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-pill .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+
+  .status-pill.connected .dot { background: var(--success); }
+  .status-pill.connected { color: var(--success); border-color: var(--success); }
+
+  /* --- Main Layout --- */
+  .workspace {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr auto;
+    gap: 1px;
+    background: var(--border);
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .panel {
+    background: var(--bg);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .panel-label {
+    position: absolute;
+    top: 12px; left: 16px;
+    font-family: 'Space Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  /* --- 3D View --- */
+  #canvas3d {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: grab;
+  }
+  #canvas3d:active { cursor: grabbing; }
+
+  /* --- 2D View --- */
+  #canvas2d {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: crosshair;
+  }
+
+  /* --- Bottom Bar --- */
+  .bottom-bar {
+    grid-column: 1 / -1;
+    background: var(--panel);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    border-top: 1px solid var(--border);
+  }
+
+  .coords {
+    display: flex;
+    gap: 20px;
+    flex: 1;
+  }
+
+  .coord-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .coord-item label {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .coord-item span {
+    font-family: 'Space Mono', monospace;
+    font-size: 16px;
+    color: var(--accent);
+    min-width: 80px;
+  }
+
+  .coord-item span.empty { color: var(--muted); }
+
+  /* Orientation slider */
+  .orient-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .orient-wrap label {
+    font-family: 'Space Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .orient-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 140px;
+    height: 2px;
+    background: var(--border);
+    outline: none;
+    border-radius: 2px;
+  }
+
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+
+  .orient-val {
+    font-family: 'Space Mono', monospace;
+    font-size: 14px;
+    color: var(--accent);
+    min-width: 48px;
+  }
+
+  /* Send button */
+  .send-btn {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 10px 28px;
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.2s;
+  }
+
+  .send-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  .send-btn:disabled {
+    border-color: var(--muted);
+    color: var(--muted);
+    cursor: not-allowed;
+  }
+
+  .send-btn.sent {
+    border-color: var(--success);
+    color: var(--success);
+  }
+
+  /* Toast */
+  .toast {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--panel);
+    border: 1px solid var(--success);
+    color: var(--success);
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    padding: 10px 20px;
+    border-radius: 2px;
+    opacity: 0;
+    transition: all 0.3s;
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  .toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* Loading overlay */
+  .loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    z-index: 50;
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .spinner {
+    width: 24px; height: 24px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9632; Robot Mission Planner</h1>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <div class="status-pill" id="statusPill">
+      <span class="dot"></span>
+      <span id="statusText">Awaiting map...</span>
+    </div>
+    <div class="status-pill" id="rosPill">
+      <span class="dot"></span>
+      <span class="ros-text">ROS Disconnected</span>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+
+  <!-- 3D View -->
+  <div class="panel" id="panel3d">
+    <div class="panel-label">3D Environment — Drag to rotate · Scroll to zoom</div>
+    <div class="loading" id="loading3d">
+      <div class="spinner"></div>
+      <span>Loading point cloud...</span>
+    </div>
+    <canvas id="canvas3d"></canvas>
+  </div>
+
+  <!-- 2D View -->
+  <div class="panel" id="panel2d">
+    <div class="panel-label">2D Top-Down — Click to set destination</div>
+    <canvas id="canvas2d"></canvas>
+  </div>
+
+  <!-- Bottom Bar -->
+  <div class="bottom-bar">
+    <div class="coords">
+      <div class="coord-item">
+        <label>X (m)</label>
+        <span id="valX" class="empty">—</span>
+      </div>
+      <div class="coord-item">
+        <label>Y (m)</label>
+        <span id="valY" class="empty">—</span>
+      </div>
+      <div class="coord-item">
+        <label>Z (m)</label>
+        <span id="valZ" class="empty">—</span>
+      </div>
+    </div>
+
+    <div class="orient-wrap">
+      <label>Orientation (Yaw)</label>
+      <div class="orient-row">
+        <input type="range" id="orientSlider" min="0" max="359" value="0">
+        <span class="orient-val" id="orientVal">0°</span>
+      </div>
+    </div>
+
+    <button class="send-btn" id="sendBtn" disabled>Send Goal</button>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Three.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- roslibjs — bridges browser to ROS 2 via rosbridge WebSocket -->
+<script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+
+<script>
+// ================================================
+// STATE
+// ================================================
+let mapData     = null;
+let goal        = null;  // { x, y, z, orientation }
+let marker3d    = null;
+let markerGroup = null;
+
+// ================================================
+// 3D SETUP
+// ================================================
+const canvas3d  = document.getElementById("canvas3d");
+const panel3d   = document.getElementById("panel3d");
+const renderer  = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x0a0c10, 1);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
+camera.position.set(0, 5, 8);
+camera.lookAt(0, 0, 0);
+
+// Orbit controls (manual — no import needed)
+let isDragging = false, prevMouse = { x: 0, y: 0 };
+let spherical  = { theta: 0.4, phi: 1.0, radius: 8 };
+
+canvas3d.addEventListener("mousedown", e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
+window.addEventListener("mouseup",    () => isDragging = false);
+window.addEventListener("mousemove",  e => {
+  if (!isDragging) return;
+  const dx = (e.clientX - prevMouse.x) * 0.005;
+  const dy = (e.clientY - prevMouse.y) * 0.005;
+  spherical.theta -= dx;
+  spherical.phi    = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi + dy));
+  prevMouse = { x: e.clientX, y: e.clientY };
+  updateCamera();
+});
+canvas3d.addEventListener("wheel", e => {
+  spherical.radius = Math.max(1, Math.min(50, spherical.radius + e.deltaY * 0.01));
+  updateCamera();
+});
+
+function updateCamera() {
+  camera.position.set(
+    spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta),
+    spherical.radius * Math.cos(spherical.phi),
+    spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta)
+  );
+  camera.lookAt(scene.position);
+}
+
+// Resize handler
+function resizeRenderers() {
+  const w = panel3d.clientWidth, h = panel3d.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  draw2D();
+}
+window.addEventListener("resize", resizeRenderers);
+
+// Animate
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+
+// ================================================
+// LOAD MAP
+// ================================================
+async function loadMap() {
+  try {
+    const res  = await fetch("/map");
+    mapData    = await res.json();
+
+    buildPointCloud();
+    offscreen = buildOffscreenGrid(mapData.metadata, mapData.grid);
+    resizeRenderers();
+    draw2D();
+
+    document.getElementById("loading3d").style.display = "none";
+    setStatus(true, `${mapData.metadata.point_count.toLocaleString()} points loaded`);
+  } catch (e) {
+    document.getElementById("loading3d").innerHTML =
+      `<span style="color:var(--accent2)">Failed to load map</span>`;
+    console.error(e);
+  }
+}
+
+function buildPointCloud() {
+  const pts    = mapData.points;
+  const cols   = mapData.colors;
+  const count  = pts.length;
+
+  const positions = new Float32Array(count * 3);
+  const colors    = new Float32Array(count * 3);
+
+  for (let i = 0; i < count; i++) {
+    positions[i*3]   = pts[i][0];
+    positions[i*3+1] = pts[i][1];
+    positions[i*3+2] = pts[i][2];
+    colors[i*3]      = cols[i][0] / 255;
+    colors[i*3+1]    = cols[i][1] / 255;
+    colors[i*3+2]    = cols[i][2] / 255;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("color",    new THREE.BufferAttribute(colors,    3));
+
+  const mat = new THREE.PointsMaterial({ size: 0.03, vertexColors: true });
+  const cloud = new THREE.Points(geo, mat);
+
+  // Center the point cloud
+  geo.computeBoundingBox();
+  const center = new THREE.Vector3();
+  geo.boundingBox.getCenter(center);
+  cloud.position.sub(center);
+
+  scene.add(cloud);
+
+  // Marker group (destination indicator)
+  markerGroup = new THREE.Group();
+  scene.add(markerGroup);
+}
+
+// ================================================
+// 2D MAP (Occupancy Grid)
+// ================================================
+const canvas2d = document.getElementById("canvas2d");
+const ctx2d    = canvas2d.getContext("2d");
+let   clickPos = null;
+let   offscreen = null;  // pre-rendered grid image
+
+// Convert grid cell to canvas pixel
+function gridToCanvas(col, row, meta, cw, ch, padding=20) {
+  const scaleX = (cw - padding*2) / meta.grid_width;
+  const scaleY = (ch - padding*2) / meta.grid_height;
+  return {
+    cx: padding + col * scaleX + scaleX * 0.5,
+    cy: padding + row * scaleY + scaleY * 0.5
+  };
+}
+
+// Convert canvas pixel to grid cell
+function canvasToGrid(cx, cy, meta, cw, ch, padding=20) {
+  const scaleX = (cw - padding*2) / meta.grid_width;
+  const scaleY = (ch - padding*2) / meta.grid_height;
+  return {
+    col: Math.floor((cx - padding) / scaleX),
+    row: Math.floor((cy - padding) / scaleY)
+  };
+}
+
+// Convert grid cell to world coords
+function gridToWorld(col, row, meta) {
+  const wx = meta.min_x + col * meta.resolution + meta.resolution * 0.5;
+  const wz = meta.min_z + row * meta.resolution + meta.resolution * 0.5;
+  return { wx, wy: meta.floor_y, wz };
+}
+
+// Pre-render the static grid onto an offscreen canvas
+function buildOffscreenGrid(meta, grid) {
+  const oc  = document.createElement("canvas");
+  oc.width  = meta.grid_width;
+  oc.height = meta.grid_height;
+  const octx = oc.getContext("2d");
+  const img  = octx.createImageData(meta.grid_width, meta.grid_height);
+
+  for (let row = 0; row < meta.grid_height; row++) {
+    for (let col = 0; col < meta.grid_width; col++) {
+      const cell = grid[row][col];
+      const idx  = (row * meta.grid_width + col) * 4;
+      if (cell === 1) {
+        // Ground — dark teal
+        img.data[idx]   = 18;
+        img.data[idx+1] = 38;
+        img.data[idx+2] = 38;
+        img.data[idx+3] = 255;
+      } else if (cell === 2) {
+        // Obstacle — bright wall color
+        img.data[idx]   = 52;
+        img.data[idx+1] = 73;
+        img.data[idx+2] = 94;
+        img.data[idx+3] = 255;
+      } else {
+        // Unknown — near black
+        img.data[idx]   = 10;
+        img.data[idx+1] = 12;
+        img.data[idx+2] = 16;
+        img.data[idx+3] = 255;
+      }
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  return oc;
+}
+
+function draw2D() {
+  const panel = document.getElementById("panel2d");
+  const cw = panel.clientWidth, ch = panel.clientHeight;
+  canvas2d.width = cw; canvas2d.height = ch;
+
+  // Background
+  ctx2d.fillStyle = "#0a0c10";
+  ctx2d.fillRect(0, 0, cw, ch);
+
+  if (!mapData || !offscreen) return;
+
+  const meta    = mapData.metadata;
+  const padding = 20;
+
+  // Draw the pre-rendered grid scaled to canvas
+  ctx2d.imageSmoothingEnabled = false;
+  ctx2d.drawImage(offscreen, padding, padding, cw - padding*2, ch - padding*2);
+
+  // Grid border
+  ctx2d.strokeStyle = "#1e2330";
+  ctx2d.lineWidth   = 1;
+  ctx2d.strokeRect(padding, padding, cw - padding*2, ch - padding*2);
+
+  // Draw destination marker
+  if (clickPos) {
+    const { cx, cy } = gridToCanvas(clickPos.col, clickPos.row, meta, cw, ch, padding);
+
+    // Pulse ring
+    ctx2d.beginPath();
+    ctx2d.arc(cx, cy, 14, 0, Math.PI * 2);
+    ctx2d.strokeStyle = "rgba(0,229,255,0.25)";
+    ctx2d.lineWidth   = 1;
+    ctx2d.stroke();
+
+    // Inner dot
+    ctx2d.beginPath();
+    ctx2d.arc(cx, cy, 5, 0, Math.PI * 2);
+    ctx2d.fillStyle = "#00e5ff";
+    ctx2d.fill();
+
+    // Direction arrow
+    const angle   = (parseFloat(document.getElementById("orientSlider").value) * Math.PI) / 180;
+    const arrowLen = 22;
+    const tx = cx + Math.sin(angle) * arrowLen;
+    const ty = cy - Math.cos(angle) * arrowLen;
+
+    ctx2d.beginPath();
+    ctx2d.moveTo(cx, cy);
+    ctx2d.lineTo(tx, ty);
+    ctx2d.strokeStyle = "#00e5ff";
+    ctx2d.lineWidth   = 2;
+    ctx2d.stroke();
+
+    // Arrowhead
+    ctx2d.beginPath();
+    ctx2d.moveTo(tx, ty);
+    ctx2d.lineTo(tx - Math.sin(angle - 0.4) * 6, ty + Math.cos(angle - 0.4) * 6);
+    ctx2d.lineTo(tx - Math.sin(angle + 0.4) * 6, ty + Math.cos(angle + 0.4) * 6);
+    ctx2d.closePath();
+    ctx2d.fillStyle = "#00e5ff";
+    ctx2d.fill();
+
+    // Coords label
+    ctx2d.fillStyle = "rgba(0,229,255,0.8)";
+    ctx2d.font      = "10px 'Space Mono', monospace";
+    ctx2d.fillText(`(${clickPos.wx.toFixed(2)}, ${clickPos.wz.toFixed(2)})`, cx + 12, cy - 8);
+  }
+}
+
+// 2D click handler — only allow clicks on ground cells
+canvas2d.addEventListener("click", e => {
+  if (!mapData) return;
+
+  const rect    = canvas2d.getBoundingClientRect();
+  const cx      = e.clientX - rect.left;
+  const cy      = e.clientY - rect.top;
+  const meta    = mapData.metadata;
+  const { col, row } = canvasToGrid(cx, cy, meta, canvas2d.width, canvas2d.height);
+
+  // Bounds check
+  if (col < 0 || col >= meta.grid_width || row < 0 || row >= meta.grid_height) return;
+
+  const cell = mapData.grid[row][col];
+
+  // Only allow clicking ground cells (1), reject obstacles (2) and unknown (0)
+  if (cell !== 1) {
+    showToast("Cannot place goal on obstacle or unknown area");
+    return;
+  }
+
+  const { wx, wy, wz } = gridToWorld(col, row, meta);
+  clickPos = { col, row, wx, wz };
+  goal     = { x: wx, y: wy, z: wz, orientation: parseFloat(document.getElementById("orientSlider").value) };
+
+  document.getElementById("valX").textContent = wx.toFixed(3);
+  document.getElementById("valX").className   = "";
+  document.getElementById("valY").textContent = wy.toFixed(3);
+  document.getElementById("valY").className   = "";
+  document.getElementById("valZ").textContent = wz.toFixed(3);
+  document.getElementById("valZ").className   = "";
+  document.getElementById("sendBtn").disabled = false;
+
+  update3DMarker(wx, wy, wz);
+  draw2D();
+});
+
+// ================================================
+// 3D MARKER
+// ================================================
+function update3DMarker(x, y, z) {
+  if (!markerGroup) return;
+  while (markerGroup.children.length) markerGroup.remove(markerGroup.children[0]);
+
+  // Center offset
+  const pts = mapData.points;
+  let sumX = 0, sumY = 0, sumZ = 0;
+  for (const p of pts) { sumX += p[0]; sumY += p[1]; sumZ += p[2]; }
+  const n = pts.length;
+  const ox = sumX/n, oy = sumY/n, oz = sumZ/n;
+
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 12, 12),
+    new THREE.MeshBasicMaterial({ color: 0x00e5ff })
+  );
+  sphere.position.set(x - ox, y - oy, z - oz);
+  markerGroup.add(sphere);
+
+  // Vertical line
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, opacity: 0.4, transparent: true });
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x - ox, y - oy - 0.5, z - oz),
+    new THREE.Vector3(x - ox, y - oy + 0.5, z - oz)
+  ]);
+  markerGroup.add(new THREE.Line(lineGeo, lineMat));
+}
+
+// ================================================
+// ORIENTATION SLIDER
+// ================================================
+document.getElementById("orientSlider").addEventListener("input", e => {
+  document.getElementById("orientVal").textContent = e.target.value + "°";
+  if (goal) goal.orientation = parseFloat(e.target.value);
+  draw2D();
+});
+
+// ================================================
+// ROSBRIDGE CONNECTION
+// ================================================
+const ROSBRIDGE_URL = "ws://localhost:9090";
+
+// Robot pose state
+let robotPose    = null;   // { x, y, z, yaw } in world coords
+let robotGroup3d = null;   // Three.js group for robot marker
+
+const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
+
+ros.on("connection", () => {
+  console.log("rosbridge connected");
+  setRosStatus(true);
+  subscribeToRobotPose();
+});
+
+ros.on("error", err => {
+  console.warn("rosbridge error:", err);
+  setRosStatus(false);
+});
+
+ros.on("close", () => {
+  console.warn("rosbridge closed");
+  setRosStatus(false);
+  // Retry connection every 3 seconds
+  setTimeout(() => ros.connect(ROSBRIDGE_URL), 3000);
+});
+
+// ================================================
+// SUBSCRIBE — Robot Pose from EKF node
+// ================================================
+function subscribeToRobotPose() {
+  const poseTopic = new ROSLIB.Topic({
+    ros,
+    name       : "/tb3_0/pose",          // matches your ekf_node output topic
+    messageType: "geometry_msgs/PoseStamped"
+  });
+
+  poseTopic.subscribe(msg => {
+    const p   = msg.pose.position;
+    const q   = msg.pose.orientation;
+
+    // Convert quaternion to yaw (rotation around Y axis in ROS = Z in Three.js)
+    const yaw = Math.atan2(
+      2 * (q.w * q.z + q.x * q.y),
+      1 - 2 * (q.y * q.y + q.z * q.z)
+    );
+
+    robotPose = { x: p.x, y: p.y, z: p.z, yaw };
+
+    update3DRobotMarker(robotPose);
+    draw2D();  // redraws 2D with updated robot position
+  });
+}
+
+// ================================================
+// PUBLISH — Goal to Navigation Node
+// ================================================
+const goalTopic = new ROSLIB.Topic({
+  ros,
+  name       : "/goal_pose",            // Nav2 standard goal topic
+  messageType: "geometry_msgs/PoseStamped"
+});
+
+function publishGoalToROS(goal) {
+  // Convert orientation degrees to quaternion (yaw only)
+  const yawRad = (goal.orientation * Math.PI) / 180;
+  const qz     = Math.sin(yawRad / 2);
+  const qw     = Math.cos(yawRad / 2);
+
+  const msg = new ROSLIB.Message({
+    header: {
+      frame_id: "map",
+      stamp   : { secs: 0, nsecs: 0 }
+    },
+    pose: {
+      position   : { x: goal.x, y: goal.y, z: goal.z },
+      orientation: { x: 0, y: 0, z: qz, w: qw }
+    }
+  });
+
+  goalTopic.publish(msg);
+  console.log("Goal published to ROS:", goal);
+}
+
+// ================================================
+// SEND GOAL (publishes to ROS directly)
+// ================================================
+document.getElementById("sendBtn").addEventListener("click", () => {
+  if (!goal) return;
+
+  const btn = document.getElementById("sendBtn");
+  btn.disabled    = true;
+  btn.textContent = "Sending...";
+
+  try {
+    publishGoalToROS(goal);
+    btn.textContent = "Sent ✓";
+    btn.classList.add("sent");
+    showToast(`Goal → X:${goal.x.toFixed(2)} Z:${goal.z.toFixed(2)} θ:${goal.orientation}°`);
+    setTimeout(() => {
+      btn.textContent = "Send Goal";
+      btn.classList.remove("sent");
+      btn.disabled = false;
+    }, 2500);
+  } catch (e) {
+    btn.textContent = "Failed";
+    btn.style.borderColor = "var(--accent2)";
+    btn.style.color       = "var(--accent2)";
+    setTimeout(() => { btn.textContent = "Send Goal"; btn.style = ""; btn.disabled = false; }, 2000);
+  }
+});
+
+// ================================================
+// 3D ROBOT MARKER (green = robot, cyan = goal)
+// ================================================
+function update3DRobotMarker(pose) {
+  if (!markerGroup) return;
+
+  // Lazy init robot group
+  if (!robotGroup3d) {
+    robotGroup3d = new THREE.Group();
+    scene.add(robotGroup3d);
+  }
+  while (robotGroup3d.children.length) robotGroup3d.remove(robotGroup3d.children[0]);
+
+  const pts = mapData.points;
+  let sumX = 0, sumY = 0, sumZ = 0;
+  for (const p of pts) { sumX += p[0]; sumY += p[1]; sumZ += p[2]; }
+  const n = pts.length;
+  const ox = sumX/n, oy = sumY/n, oz = sumZ/n;
+
+  // Robot body sphere
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.1, 12, 12),
+    new THREE.MeshBasicMaterial({ color: 0x00e5a0 })
+  );
+  sphere.position.set(pose.x - ox, pose.y - oy, pose.z - oz);
+  robotGroup3d.add(sphere);
+
+  // Direction arrow (heading)
+  const arrowLen = 0.4;
+  const arrowGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(pose.x - ox, pose.y - oy, pose.z - oz),
+    new THREE.Vector3(
+      pose.x - ox + Math.sin(pose.yaw) * arrowLen,
+      pose.y - oy,
+      pose.z - oz + Math.cos(pose.yaw) * arrowLen
+    )
+  ]);
+  robotGroup3d.add(new THREE.Line(arrowGeo,
+    new THREE.LineBasicMaterial({ color: 0x00e5a0, linewidth: 2 })));
+}
+
+// ================================================
+// 2D ROBOT MARKER (drawn in draw2D)
+// ================================================
+// Patch draw2D to also draw robot position
+const _draw2D_original = draw2D;
+draw2D = function() {
+  _draw2D_original();
+  if (!mapData || !robotPose) return;
+
+  const meta    = mapData.metadata;
+  const cw      = canvas2d.width, ch = canvas2d.height;
+  const padding = 20;
+
+  // Convert robot world pos to grid cell
+  const col = Math.floor((robotPose.x - meta.min_x) / meta.resolution);
+  const row = Math.floor((robotPose.z - meta.min_z) / meta.resolution);
+  const { cx, cy } = gridToCanvas(col, row, meta, cw, ch, padding);
+
+  // Robot circle
+  ctx2d.beginPath();
+  ctx2d.arc(cx, cy, 7, 0, Math.PI * 2);
+  ctx2d.fillStyle   = "#00e5a0";
+  ctx2d.fill();
+  ctx2d.strokeStyle = "#0a0c10";
+  ctx2d.lineWidth   = 2;
+  ctx2d.stroke();
+
+  // Heading arrow
+  const arrowLen = 18;
+  const tx = cx + Math.sin(robotPose.yaw) * arrowLen;
+  const ty = cy - Math.cos(robotPose.yaw) * arrowLen;
+  ctx2d.beginPath();
+  ctx2d.moveTo(cx, cy);
+  ctx2d.lineTo(tx, ty);
+  ctx2d.strokeStyle = "#00e5a0";
+  ctx2d.lineWidth   = 2;
+  ctx2d.stroke();
+
+  // Label
+  ctx2d.fillStyle = "rgba(0,229,160,0.8)";
+  ctx2d.font      = "9px 'Space Mono', monospace";
+  ctx2d.fillText("ROBOT", cx + 10, cy - 10);
+};
+
+// ================================================
+// HELPERS
+// ================================================
+function setStatus(connected, text) {
+  const pill = document.getElementById("statusPill");
+  document.getElementById("statusText").textContent = text;
+  pill.className = "status-pill" + (connected ? " connected" : "");
+}
+
+function setRosStatus(connected) {
+  const pill = document.getElementById("rosPill");
+  pill.className    = "status-pill" + (connected ? " connected" : "");
+  pill.querySelector(".ros-text").textContent = connected ? "ROS Connected" : "ROS Disconnected";
+}
+
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3000);
+}
+
+// ================================================
+// INIT
+// ================================================
+window.addEventListener("load", () => {
+  resizeRenderers();
+  loadMap();
+  // rosbridge connects automatically via ros.on("connection")
+});
+</script>
+</body>
+</html>
