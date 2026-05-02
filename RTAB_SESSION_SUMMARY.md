@@ -20,8 +20,10 @@ detail see `CAMERA_NOTES.md`.
 | 2. Verify camera publishes ROS topics        | ✅ verified on pi2 (oak_camera_node) |
 | 3. Camera→base_link static TF                | ✅ in `oak_camera.launch.py` |
 | 4. Install `rtabmap-ros`                     | ✅ done by Earth (apt install) |
-| 5. Mapping launch file                       | ✅ `rtabmap_mapping.launch.py` |
-| 5b. Localization launch + slam pose relay    | ✅ `rtabmap_localization.launch.py` + `slam_pose_relay_node` |
+| 5. Mapping launch (all-on-pi)                | ✅ `rtabmap_mapping.launch.py` |
+| 5a. Localization launch + slam pose relay    | ✅ `rtabmap_localization.launch.py` + `slam_pose_relay_node` |
+| 5b. Per-robot namespacing of rtabmap topics  | ✅ both launches remap localization_pose / info / cloud_map / mapData to `/{robot_id}/rtabmap/*` (CodeRabbit on PR #3) |
+| 5c. Split-execution launches (pi=sensors, laptop=SLAM) | ✅ `rtabmap_pi_sensors.launch.py` + `rtabmap_laptop_mapping.launch.py` + `rtabmap_laptop_localization.launch.py` |
 | **6. Mapping run (drive room with teleop)**  | ⏭ **next — operator does this** |
 | 7. Localization run + EKF loop closure       | ⏭ after step 6 |
 
@@ -94,8 +96,27 @@ Confirmed Earth's apt installs landed cleanly:
 
 ### Documentation produced this session
 - `MAPPING_RUN_GUIDE.md` — operator-facing run procedure for step 6
-  (terminal layouts, driving rules, troubleshooting).
+  (terminal layouts, driving rules, troubleshooting). Now covers
+  both the SPLIT (recommended) and ALL-ON-PI (fallback) paths.
 - `RTAB_SESSION_SUMMARY.md` — this file.
+
+### Follow-up changes after the initial push (Tan + CodeRabbit feedback)
+
+- **Per-robot namespacing of rtabmap topics**. CodeRabbit caught
+  that rtabmap publishes `localization_pose`, `info`, `cloud_map`,
+  `mapData` to GLOBAL topic names by default — meaning two robots
+  running localization concurrently would consume each other's
+  poses. Added explicit remappings in both
+  `rtabmap_mapping.launch.py` and `rtabmap_localization.launch.py`
+  to scope every output to `/{robot_id}/rtabmap/*`. The
+  `slam_pose_relay`'s `in_topic` was updated to match.
+- **Split-execution architecture**. Tan + the team raised the
+  thermal concern of running rtabmap_slam on the Pi 4 (visual
+  feature extraction + graph optimisation under sustained mapping
+  pushes the Pi to 70-80 °C). Added three new launches that split
+  the work: pi runs sensors only, laptop runs rtabmap_slam. The
+  all-on-pi launches remain as a fallback. See `MAPPING_RUN_GUIDE.md`
+  Path (A) vs Path (B).
 
 ---
 
@@ -110,12 +131,15 @@ ros2_ws/src/swerve_formation/setup.py
     # registered both new console_script entry points
 
 ros2_ws/src/swerve_bringup/launch/
-    oak_camera.launch.py              # camera + base_link↔optical TF
-    rtabmap_mapping.launch.py         # mapping mode: builds .db
-    rtabmap_localization.launch.py    # localization mode: closes EKF loop
+    oak_camera.launch.py                       # camera + base_link↔optical TF
+    rtabmap_mapping.launch.py                  # all-on-pi: mapping
+    rtabmap_localization.launch.py             # all-on-pi: localization (closes EKF loop)
+    rtabmap_pi_sensors.launch.py               # split: pi-side sensors only
+    rtabmap_laptop_mapping.launch.py           # split: laptop-side rtabmap (mapping)
+    rtabmap_laptop_localization.launch.py      # split: laptop-side rtabmap (localization)
 
 CAMERA_NOTES.md             # deep-dive: depthai 3.x quirks, apt mirror workaround
-MAPPING_RUN_GUIDE.md        # operator procedure for step 6
+MAPPING_RUN_GUIDE.md        # operator procedure for step 6 (both paths)
 RTAB_SESSION_SUMMARY.md     # THIS FILE
 ```
 
