@@ -215,6 +215,25 @@ the entire stored map looking for a visual match to what the camera
 sees right now. Drop the robot in a part of the room with reasonable
 visual variety — avoid blank walls.
 
+### Multi-robot — every robot must load the SAME .db
+
+When both robots are running and you intend to use the laplacian
+consensus correction (`enable_consensus:=true` in
+`laplacian_formation_node`), every robot's localization launch
+MUST point `db_path` at the SAME database file. If robot A loads
+`room_v1.db` and robot B loads `room_v2.db`, their `map` frames
+are unrelated and any inter-robot pose feedback produces nonsense
+(silently — neither robot will detect the inconsistency).
+
+To distribute the .db you built on this laptop to the other robot:
+```bash
+rsync ~/maps/tb3_1_room.db pi1@192.168.1.101:~/maps/room.db
+# then point pi1's localization launch at ~/maps/room.db
+```
+
+Easiest convention: rename the file (e.g. `room.db`) and use that
+same path everywhere, instead of robot-id-suffixed paths.
+
 ---
 
 ## Troubleshooting

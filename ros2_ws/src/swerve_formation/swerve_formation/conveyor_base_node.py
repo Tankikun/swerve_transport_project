@@ -39,6 +39,18 @@ _DXL_VEL_TO_RADS = 0.229 * (2.0 * math.pi) / 60.0
 _STEER_CENTER    = 2048
 
 
+# NOTE — Legacy firmware-rollback safety net.
+# This function and `ConveyorBaseNode._handle_odom_legacy` below are
+# only exercised when the OpenCR firmware sends pre-2024 "ODOM j:... w:..."
+# lines. The current firmware emits "POSE x y theta vx vy wz" and is
+# handled by `_handle_pose`, which makes this code dead in normal
+# operation. Kept so we can roll the firmware back without losing odometry.
+# TODO: if firmware rollback is no longer a concern, remove this function
+# AND `ConveyorBaseNode._handle_odom_legacy` below AND its near-duplicate
+# at `turtlebot3_conveyor_bridge/serial_bridge_node.py::fk_body_velocity`
+# (line ~37) and the matching ODOM parser in the same file (line ~160) —
+# the two should be deleted together to keep the bridge and base-node FK
+# logic in lock-step.
 def _fk_body_velocity(joint_rads, wheel_rads):
     """FK from old ODOM-format firmware: joint angles + wheel speeds → body vel."""
     joint_ticks = [int(v / _DXL_POS_TO_RAD) + _STEER_CENTER for v in joint_rads]
@@ -176,9 +188,15 @@ class ConveyorBaseNode(Node):
             response.success = False
             response.message = f'Serial error: {e}'
             return response
-        self._publish_odom(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        # Do NOT publish a synthetic (0, 0, 0) Odometry here. With multi-robot
+        # operation, every robot publishing zero at the same time would make
+        # downstream consumers (laplacian, navigation) momentarily think every
+        # robot is at the same point. The next real `POSE …` line from
+        # firmware (handled in `_handle_pose`) will propagate the reset
+        # naturally; the legacy `ODOM_RESET` line, if firmware sends one,
+        # zeros our local integration state in `_read_serial_cb`.
         response.success = True
-        response.message = 'Odometry reset'
+        response.message = 'Odometry reset command sent to firmware'
         return response
 
     # ── Serial reading ────────────────────────────────────────────────────────
@@ -224,6 +242,13 @@ class ConveyorBaseNode(Node):
             return
         self._publish_odom(x, y, theta, vx, vy, wz)
 
+    # NOTE — Legacy firmware-rollback safety net.
+    # Only invoked when the OpenCR firmware sends pre-2024 "ODOM j:... w:..."
+    # lines. Current firmware uses "POSE …" handled by `_handle_pose`, so
+    # this is dead in normal operation. See the TODO above
+    # `_fk_body_velocity` at module top — the two functions and the
+    # near-duplicate in `turtlebot3_conveyor_bridge/serial_bridge_node.py`
+    # should be removed together if firmware rollback is no longer needed.
     def _handle_odom_legacy(self, line: str):
         """Old firmware fallback: 'ODOM j:... w:...' — integrate on RPi side."""
         try:

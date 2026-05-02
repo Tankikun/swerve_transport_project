@@ -1,7 +1,8 @@
 """
 laplacian_formation_node.py
 ---------------------------
-Pure-feedforward rigid-body formation controller, runs on every robot.
+Rigid-body formation controller with optional Laplacian consensus
+correction. Runs on every robot.
 
 Each tick this node receives the operator's twist for the (imaginary)
 virtual centre on /virtual_center/cmd_vel and produces THIS robot's
@@ -11,15 +12,49 @@ body-frame twist using a closed-form rigid-body transform:
     v_robot_y  = vc_vy + vc_wz * my_offset.x
     v_robot_wz = vc_wz
 
-There is NO pose feedback. We deliberately avoid pulling toward an
-EKF-derived "desired position" because the two robots have separate
-odometry frames (no SLAM, no shared world), so any cross-robot error
-term is meaningless and produces phantom commands at startup.
+This is the **feedforward** layer. By itself it produces an exactly
+rigid-body motion at any instant — no inter-robot pose feedback is
+required to track the virtual centre's commanded twist.
 
-This means the formation can drift over time (wheel slip, latency)
-and there is no consensus correction. The instantaneous kinematics is
-correct: at any moment all robots' commanded body twists are exactly
-what a rigid body rotating around the virtual centre would dictate.
+Pose feedback (consensus correction)
+------------------------------------
+RTAB-Map runs in localisation-only mode on the robots
+(`rtabmap_localization.launch.py` /
+`rtabmap_laptop_localization.launch.py`) and feeds visual poses into
+each robot's `ekf_node` via `slam_pose_relay_node`, so a shared
+world frame IS now available — provided every robot loaded the same
+.db (see those launch files' headers).
+
+Even so, this controller's pose-feedback term is **OFF by default**
+(`enable_consensus=False`). Reasons:
+
+  1. Global re-localisation in RTAB-Map can take 5-30 s on startup.
+     During that window the EKF is on pure dead-reckoning and a
+     consensus term would amplify the wheel-only drift into phantom
+     formation-correction commands.
+  2. We have not yet hardware-validated shared-map operation
+     (multiple robots localising against an identical .db). Until
+     that's confirmed, treating each robot's pose as an absolute
+     world-frame value is risky.
+
+Once shared-map operation is validated, set `enable_consensus:=true`
+on the launch line. The control law then becomes (per neighbour):
+
+    desired_world = R(formation_theta) @ (my_offset - neighbour_offset)
+    actual_world  = my_pose - neighbour_pose
+    error         = actual_world - desired_world
+    correction   -= k_gain * error                     # accumulated
+
+    ff += correction        (added before saturation scale)
+
+`formation_theta` is the circular mean of every robot's yaw — i.e.
+the orientation of the formation in the world frame — so the
+desired offset rotates with the formation as it turns.
+
+Readiness gating ensures the correction only fires once every robot
+has published at least one pose AND the most recent pose for each
+neighbour is < 1 s old. If any neighbour goes stale the controller
+falls back to pure feedforward and warns at most once per 5 s.
 
 Saturation handling
 -------------------
@@ -29,10 +64,12 @@ below the firmware's 0.198 m/s clamp). When the would-be outer-wheel
 speed exceeds the cap, every robot's twist is scaled by the same
 factor — the rigid shape is preserved, the formation just moves
 slower. This is the asymmetric "outer wheel goes faster" behaviour
-needed for object transport.
+needed for object transport. The consensus correction (when active)
+is added BEFORE this scale so it shares the same speed envelope.
 """
 
 import math
+import time
 
 import numpy as np
 import rclpy
@@ -51,6 +88,26 @@ CHASSIS_HALF_DIAGONAL = math.sqrt(0.15 ** 2 + 0.15 ** 2)
 # correction term added later.
 MAX_WHEEL_LINEAR = 0.18
 
+# How long without an EKF pose update we tolerate before falling back
+# to pure feedforward and warning. Matches the "all updated within 1 s"
+# requirement in the consensus spec.
+POSE_STALE_S = 1.0
+
+
+def _yaw_from_quat(q) -> float:
+    """Standard ROS quaternion → yaw."""
+    return math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+    )
+
+
+def _circular_mean(angles) -> float:
+    """Mean of yaw angles, robust across the ±π wrap."""
+    sx = sum(math.sin(a) for a in angles)
+    cx = sum(math.cos(a) for a in angles)
+    return math.atan2(sx, cx)
+
 
 class LaplacianFormationController(Node):
 
@@ -63,10 +120,20 @@ class LaplacianFormationController(Node):
         self.declare_parameter('neighbors', ['tb3_1'])
         self.declare_parameter('my_offset', [0.0, 0.0])
         self.declare_parameter('neighbor_offsets', [0.0, 0.0])
-        self.declare_parameter('k_gain', 0.0)  # legacy, unused (no consensus)
+        # Consensus correction gain (Laplacian formulation). Active only
+        # when `enable_consensus` is True. Default 0.1 is small enough to
+        # produce gentle corrections (cm-scale positional error → mm/s
+        # velocity contribution); raise carefully — an aggressive gain
+        # combined with a noisy SLAM pose will jitter the formation.
+        self.declare_parameter('k_gain', 0.1)
+        # Master switch for the pose-feedback term. Off by default — see
+        # the module docstring for rationale.
+        self.declare_parameter('enable_consensus', False)
 
         self.robot_id  = self.get_parameter('robot_id').value
         self.neighbors = list(self.get_parameter('neighbors').value)
+        self.k_gain    = float(self.get_parameter('k_gain').value)
+        self.enable_consensus = bool(self.get_parameter('enable_consensus').value)
 
         my_offset_param = np.array(
             self.get_parameter('my_offset').value, dtype=float
@@ -103,12 +170,19 @@ class LaplacianFormationController(Node):
         self.virtual_vel     = np.zeros(2)
         self.virtual_angular = 0.0
 
-        # Formation-state publisher carries last-known pose of self +
-        # neighbours so formation_size_node has something to consume.
-        # We update these from EKF if it is available, but the control
-        # law does NOT depend on them.
-        self.my_pose = np.zeros(2)
-        self.neighbor_poses = {n: np.zeros(2) for n in self.neighbors}
+        # Last-known EKF pose of self + neighbours. Three components:
+        # [x, y, theta], world frame (`map` once SLAM is up; `odom` until
+        # then). Always published in /formation/state for
+        # formation_size_node. Only consumed by the control law when
+        # `enable_consensus` is True (see _control_loop).
+        self.my_pose = np.zeros(3)
+        self.neighbor_poses = {n: np.zeros(3) for n in self.neighbors}
+
+        # Per-pose update timestamps used by the consensus readiness gate.
+        # `None` means "never received" — distinct from "received with
+        # value (0,0,0) at startup".
+        self._my_pose_t: float | None = None
+        self._neighbor_pose_t: dict[str, float] = {}
 
         # Subscriptions
         self.create_subscription(
@@ -138,7 +212,9 @@ class LaplacianFormationController(Node):
         self.get_logger().info(
             f'laplacian_formation_node ready: id={self.robot_id} '
             f'my_offset={self.my_offset.tolist()} '
-            f'neighbors={self.neighbors}'
+            f'neighbors={self.neighbors} '
+            f'enable_consensus={self.enable_consensus} '
+            f'k_gain={self.k_gain:.3f}'
         )
 
     # ── Subscription callbacks ────────────────────────────────────────────────
@@ -151,10 +227,55 @@ class LaplacianFormationController(Node):
     def _odom_cb(self, msg: Odometry):
         self.my_pose[0] = msg.pose.pose.position.x
         self.my_pose[1] = msg.pose.pose.position.y
+        self.my_pose[2] = _yaw_from_quat(msg.pose.pose.orientation)
+        self._my_pose_t = time.time()
 
     def _neighbor_cb(self, msg: Odometry, neighbor_id: str):
         self.neighbor_poses[neighbor_id][0] = msg.pose.pose.position.x
         self.neighbor_poses[neighbor_id][1] = msg.pose.pose.position.y
+        self.neighbor_poses[neighbor_id][2] = _yaw_from_quat(msg.pose.pose.orientation)
+        self._neighbor_pose_t[neighbor_id] = time.time()
+
+    # ── Consensus readiness gate ──────────────────────────────────────────────
+
+    def _consensus_ready(self) -> bool:
+        """
+        Returns True iff every pose required for the consensus correction
+        has been received and is fresh. Logs a (throttled) warning the
+        first time a neighbour's pose is found stale.
+
+        - "Received": _my_pose_t / _neighbor_pose_t entry is not None.
+          Distinct from value (0,0,0) which is a legitimate startup pose.
+        - "Fresh":    last update is within POSE_STALE_S seconds.
+
+        Startup absence (no entry at all) is silent — that's normal in
+        the seconds before the first EKF message arrives. Only an
+        already-seen-then-vanished neighbour produces the warning.
+        """
+        if self._my_pose_t is None:
+            return False
+        now = time.time()
+        if (now - self._my_pose_t) > POSE_STALE_S:
+            self.get_logger().warn(
+                f'[consensus] my own pose is stale '
+                f'({now - self._my_pose_t:.1f}s) — falling back to pure '
+                f'feedforward.',
+                throttle_duration_sec=5.0,
+            )
+            return False
+        for n in self.neighbors:
+            t = self._neighbor_pose_t.get(n)
+            if t is None:
+                # never received → still in startup, silent
+                return False
+            if (now - t) > POSE_STALE_S:
+                self.get_logger().warn(
+                    f'[consensus] neighbour {n} pose stale '
+                    f'({now - t:.1f}s) — falling back to pure feedforward.',
+                    throttle_duration_sec=5.0,
+                )
+                return False
+        return True
 
     # ── Control loop (20 Hz) ──────────────────────────────────────────────────
 
@@ -169,6 +290,12 @@ class LaplacianFormationController(Node):
         # single scale factor for that set. This preserves rigid-shape
         # scaling only if `self.neighbors` covers every robot that is
         # expected to share the same saturation decision.
+        # NOTE: this estimate uses only the rigid-body command; it does
+        # NOT account for the consensus correction added below. With
+        # k_gain=0.1 the correction is mm/s and the bound is fine; for
+        # large k_gain, the post-scale velocity could exceed
+        # MAX_WHEEL_LINEAR by a small margin (still inside firmware's
+        # 0.198 m/s clamp).
         all_offsets = [(float(self.my_offset[0]), float(self.my_offset[1]))]
         for n in self.neighbors:
             nb = self.neighbor_offsets[n]
@@ -187,11 +314,42 @@ class LaplacianFormationController(Node):
         else:
             scale = 1.0
 
-        # ── Rigid-body feedforward for THIS robot ──────────────────────
+        # ── Rigid-body feedforward (raw, pre-scale) ──────────────────
         rx, ry = float(self.my_offset[0]), float(self.my_offset[1])
-        ff_x  = (vc_x - vc_wz * ry) * scale
-        ff_y  = (vc_y + vc_wz * rx) * scale
-        ff_wz = vc_wz * scale
+        ff_x_raw = vc_x - vc_wz * ry
+        ff_y_raw = vc_y + vc_wz * rx
+
+        # ── Consensus correction (optional, opt-in) ───────────────────
+        # Standard Laplacian formulation, lifted into the formation
+        # frame:
+        #   desired_world = R(formation_theta) · (my_offset - neighbor_offset)
+        #   actual_world  = my_pose - neighbor_pose
+        #   correction   -= k_gain · sum_n (actual_world - desired_world)
+        # `formation_theta` is the circular mean of every robot's yaw,
+        # so the desired offset rotates with the formation as it turns.
+        # See module docstring for why this is OFF by default.
+        if self.enable_consensus and self._consensus_ready():
+            yaws = [float(self.my_pose[2])] + [
+                float(self.neighbor_poses[n][2]) for n in self.neighbors
+            ]
+            formation_theta = _circular_mean(yaws)
+            c, s = math.cos(formation_theta), math.sin(formation_theta)
+            R = np.array([[c, -s], [s, c]])
+
+            correction = np.zeros(2)
+            my_xy = self.my_pose[:2]
+            for n in self.neighbors:
+                desired_world = R @ (self.my_offset - self.neighbor_offsets[n])
+                actual_world  = my_xy - self.neighbor_poses[n][:2]
+                correction   -= self.k_gain * (actual_world - desired_world)
+
+            ff_x_raw += float(correction[0])
+            ff_y_raw += float(correction[1])
+
+        # ── Apply formation-wide saturation scale ────────────────────
+        ff_x  = ff_x_raw * scale
+        ff_y  = ff_y_raw * scale
+        ff_wz = vc_wz * scale   # angular component is never modified by consensus
 
         cmd = Twist()
         cmd.linear.x  = ff_x

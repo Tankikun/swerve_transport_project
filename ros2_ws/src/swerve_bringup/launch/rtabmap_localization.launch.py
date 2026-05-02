@@ -47,6 +47,21 @@ Database file:
   ~/maps/{robot_id}_room.db  by default (override with db_path arg)
   This file MUST exist — rtabmap will refuse to start otherwise.
 
+Shared-map requirement (multi-robot):
+  For inter-robot pose-feedback control to work — i.e. for
+  laplacian_formation_node's optional consensus correction
+  (`enable_consensus:=true`) to be meaningful — every robot MUST
+  load the SAME .db file. The map produced by one mapping run
+  defines the world frame; if robot A loads `room_v1.db` and robot
+  B loads `room_v2.db`, the two robots' map frames are arbitrary
+  rotations/translations of each other, and any consensus term
+  comparing their poses produces nonsense (silently — neither
+  robot will detect the inconsistency).
+  Distribute the same .db to every robot before runtime, e.g.:
+    scp ~/maps/room.db pi1@192.168.1.101:~/maps/
+    scp ~/maps/room.db pi2@192.168.1.102:~/maps/
+  Or rsync from the mapping machine.
+
 Initial pose:
   RTAB-Map's localization-only mode starts in "global re-localization"
   mode: it scans through the database trying to match the current

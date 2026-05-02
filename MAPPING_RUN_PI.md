@@ -160,6 +160,27 @@ In ALL-ON-PI mode the laptop only runs teleop and topic monitoring
 
 ---
 
+## Multi-robot — every robot must load the SAME .db
+
+When tb3_0 and tb3_1 both run their localization launches and you
+want to use the laplacian consensus correction
+(`enable_consensus:=true`), both Pis MUST point `db_path` at the
+SAME database file. Different .db files mean different `map`
+frames, and any inter-robot pose feedback would silently produce
+garbage. Distribute the .db to every Pi before runtime, e.g.:
+
+```bash
+# from the laptop (where the mapping run produced the .db):
+rsync ~/maps/tb3_1_room.db pi1@192.168.1.101:~/maps/room.db
+rsync ~/maps/tb3_1_room.db pi2@192.168.1.102:~/maps/room.db
+# then both Pis launch with db_path:=~/maps/room.db
+```
+
+Easiest convention: drop the per-robot suffix (use plain `room.db`)
+so the same path works on every machine.
+
+---
+
 ## Troubleshooting
 
 ### `pipeline running` never appears

@@ -46,6 +46,18 @@ Verification (in another laptop terminal):
 
   ros2 topic hz /tb3_1/slam/pose      # 1-3 Hz once localised
   ros2 topic echo /tb3_1/ekf/odom     # smooth, drift-corrected
+
+Shared-map requirement (multi-robot):
+  When both robots run their own copy of this launch concurrently
+  and you intend to use the laplacian consensus correction
+  (`enable_consensus:=true` on laplacian_formation_node), every
+  robot's launch MUST point `db_path` at the SAME .db file.
+  Different .db files mean different `map` frames, which silently
+  breaks any inter-robot pose-feedback control. Distribute the same
+  .db to every machine that runs a localization launch (the laptop
+  in split mode; the Pi in all-on-pi mode), e.g.:
+    rsync ~/maps/room.db pi1@192.168.1.101:~/maps/
+    rsync ~/maps/room.db pi2@192.168.1.102:~/maps/
 """
 
 import os
