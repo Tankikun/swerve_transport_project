@@ -129,6 +129,9 @@ def launch_setup(context, *args, **kwargs):
         launch_arguments={
             'robot_id':   robot_id,
             'fps':        fps,
+            'cam_x':      LaunchConfiguration('cam_x'),
+            'cam_y':      LaunchConfiguration('cam_y'),
+            'cam_z':      LaunchConfiguration('cam_z'),
             'rgb_size':   '640x400',
             'depth_size': '640x400',
         }.items(),
@@ -195,7 +198,7 @@ def launch_setup(context, *args, **kwargs):
             ('rgb/image',       f'/{robot_id}/camera/rgb/image_raw'),
             ('rgb/camera_info', f'/{robot_id}/camera/rgb/camera_info'),
             ('depth/image',     f'/{robot_id}/camera/depth/image_raw'),
-            ('odom',            f'/{robot_id}/odom'),
+            ('odom',            f'/{robot_id}/ekf/odom'),
         ],
         # NO --delete_db_on_start.
     ))
@@ -233,6 +236,15 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'fps', default_value='15',
             description='Camera FPS.'),
+        DeclareLaunchArgument(
+            'cam_x', default_value='0.10',
+            description='Camera optical frame X offset from base_link [m].'),
+        DeclareLaunchArgument(
+            'cam_y', default_value='0.00',
+            description='Camera Y offset from base_link [m].'),
+        DeclareLaunchArgument(
+            'cam_z', default_value='0.15',
+            description='Camera Z offset from base_link [m].'),
         DeclareLaunchArgument(
             'enable_base', default_value='true',
             description='Start conveyor_base_node. Set false if odometry '
