@@ -143,7 +143,7 @@ def launch_setup(context, *args, **kwargs):
             ('rgb/image',       f'/{robot_id}/camera/rgb/image_raw'),
             ('rgb/camera_info', f'/{robot_id}/camera/rgb/camera_info'),
             ('depth/image',     f'/{robot_id}/camera/depth/image_raw'),
-            ('odom',            f'/{robot_id}/odom'),
+            ('odom',            f'/{robot_id}/ekf/odom'),
         ],
         arguments=['--delete_db_on_start'],   # comment out to APPEND to existing db
     ))
