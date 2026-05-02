@@ -59,19 +59,67 @@ Expected (4–5 topics):
 
 If you see only `/parameter_events` and `/rosout`, discovery is broken.
 Most common cause: the laptop's IP in the FastDDS peers file is stale.
-Patch with the current IP:
+
+**Step 1 — find your real LAN IP** (the one on the eth interface
+connected to the robot router):
 
 ```bash
-LAN_IP=$(ip -4 addr show | awk '/inet 192\.168\.1\./{print $2}' | cut -d/ -f1)
-echo "current LAN IP = $LAN_IP"
-sed -i "s/192\.168\.1\.[0-9]\+\(<\)/$LAN_IP\1/g" ~/fastdds_peers.xml
-ssh pi2@192.168.1.102 "sed -i \"s/192\\.168\\.1\\.114/$LAN_IP/g\" ~/fastdds_peers.xml"
+ip -4 addr show | grep '192.168.1.'
+```
+
+You may see more than one entry (a stale DHCP lease can persist on
+a second interface). Pick the one on the active eth interface — the
+one that pings pi2 successfully:
+```bash
+ping -c 1 192.168.1.102      # confirms the LAN is up
+```
+
+Note the IP — call it **NEW_IP** (e.g. `192.168.1.114`).
+
+**Step 2 — find the OLD IP** that's currently in your peers file:
+
+```bash
+grep -oE 'address>192\.168\.1\.[0-9]+' ~/fastdds_peers.xml | grep -v '\.101\|\.102' | sort -u
+```
+
+This shows every laptop-side IP currently in the file (excludes the
+robot IPs `.101` and `.102` which must NOT change). Call it **OLD_IP**.
+
+**Step 3 — patch ONLY the laptop entries** (do NOT touch `.101` /
+`.102`):
+
+```bash
+sed -i "s/192\.168\.1\.OLD/192.168.1.NEW/g" ~/fastdds_peers.xml
+ssh pi2@192.168.1.102 "sed -i 's/192\\.168\\.1\\.OLD/192.168.1.NEW/g' ~/fastdds_peers.xml"
+```
+
+Replace `OLD` and `NEW` with the IPs you found. **Do this manually**
+— do not script `LAN_IP=$(... | head -1)` and substitute, because if
+the file already has the right IP for the laptop and a stale value
+elsewhere, an over-broad regex can wipe out the pi entries.
+
+**Step 4 — verify the file still has all four lines for the
+robots**:
+
+```bash
+grep -E '192\.168\.1\.(101|102)' ~/fastdds_peers.xml
+```
+
+Should print 4 lines (pi1 × 2 ports, pi2 × 2 ports). If any are
+missing, restore from `git show feature/laplacian-consensus:~/fastdds_peers.xml`
+or copy the canonical version from CAMERA_NOTES.md / MAPPING_RUN
+guides.
+
+**Step 5 — restart**:
+
+```bash
 ros2 daemon stop ; sleep 1
 ros2 topic list | grep tb3_1
 ```
 
-(The Pi sensor launch may need a restart after patching its peers
-file — see `MAPPING_RUN_PI.md`.)
+If the Pi sensor launch was already running, you also need to
+restart it on pi2 so it re-reads the peers file (Ctrl+C and
+re-launch — see `MAPPING_RUN_PI.md`).
 
 Then check the rates are healthy:
 
