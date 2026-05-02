@@ -75,8 +75,7 @@ def launch_setup(context, *args, **kwargs):
 
     # Expand ~ in db_path
     db_path = os.path.expanduser(db_path)
-    os.makedirs(os.path.dirname(db_path) or '/tmp', exist_ok=True)
-
+    os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
     actions = []
 
     # ── Camera (oak_camera.launch.py) ────────────────────────────────────
