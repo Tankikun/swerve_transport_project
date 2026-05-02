@@ -72,7 +72,9 @@ class NavigationNode(Node):
     # ── Heading control ───────────────────────────────────────────────────────
     K_HEADING = 3.0    # gain for aligning heading with velocity direction
 
-    # ── Goal tolerance ────────────────────────────────────────────────────────
+    # ── Goal tolerance (default; overridable via ROS parameter `goal_tolerance`)
+    # Sim default 0.05 m is fine; on real hardware bump to ~0.15 m to absorb
+    # wheel slip and EKF drift (otherwise REACHED never fires).
     GOAL_TOL = 0.05    # m
 
     # ── Default formation safety margin (overridden by /formation/footprint_radius)
@@ -84,7 +86,9 @@ class NavigationNode(Node):
     def __init__(self):
         super().__init__('navigation_node')
         self.declare_parameter('robot_id', 'tb3_0')
-        self._robot_id = self.get_parameter('robot_id').value
+        self.declare_parameter('goal_tolerance', self.GOAL_TOL)
+        self._robot_id  = self.get_parameter('robot_id').value
+        self._goal_tol  = float(self.get_parameter('goal_tolerance').value)
 
         # State
         self._is_leader  = False
@@ -128,7 +132,8 @@ class NavigationNode(Node):
 
         self.create_timer(self.DT, self._control_loop)
         self.get_logger().info(
-            f'navigation_node ready ({self._robot_id}) — APF + velocity ramp'
+            f'navigation_node ready ({self._robot_id}) — APF + velocity ramp '
+            f'goal_tolerance={self._goal_tol:.3f} m'
         )
 
     # ── Subscription callbacks ────────────────────────────────────────────────
@@ -210,7 +215,7 @@ class NavigationNode(Node):
         to_goal = goal - pos
         d_goal  = np.linalg.norm(to_goal)
 
-        if d_goal < self.GOAL_TOL:
+        if d_goal < self._goal_tol:
             return np.zeros(2), 0.0
 
         # ── Attractive force (conic: unit vector, constant magnitude) ─────
@@ -284,7 +289,7 @@ class NavigationNode(Node):
 
         # Check if current waypoint is reached
         pos = self._pose[:2]
-        if np.linalg.norm(self._current_wp[:2] - pos) < self.GOAL_TOL:
+        if np.linalg.norm(self._current_wp[:2] - pos) < self._goal_tol:
             if self._waypoints:
                 self._current_wp = self._waypoints.pop(0)
                 self.get_logger().info(
