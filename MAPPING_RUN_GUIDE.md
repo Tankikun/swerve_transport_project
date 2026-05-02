@@ -10,6 +10,26 @@ will use to know where the robot is.
 > this guide errors with "package not found", come back to
 > `CAMERA_NOTES.md` and re-run the inventory script.
 
+## Two architectures — pick one before starting
+
+**(A) SPLIT — recommended for mapping** (lower thermal load, faster
+inspection of result, pi stays cool):
+- pi2 runs `rtabmap_pi_sensors.launch.py` (camera + TF + odom + EKF)
+- laptop runs `rtabmap_laptop_mapping.launch.py` (rtabmap_slam only)
+- The `.db` ends up on the **laptop** at `~/maps/tb3_1_room.db`.
+- Network bandwidth: ~5–10 MB/s of image data over WiFi/LAN.
+
+**(B) ALL-ON-PI — fallback** (everything on pi2; one terminal but
+heats the Pi):
+- pi2 runs `rtabmap_mapping.launch.py` (camera + TF + odom + EKF +
+  rtabmap_slam)
+- The `.db` lives on pi2.
+- Watch `vcgencmd measure_temp` — if it climbs past 75 °C, stop and
+  switch to (A).
+
+The rest of this guide shows both paths. Read the (A) section first
+unless you have a reason to keep everything on the Pi.
+
 ---
 
 ## Before you start
@@ -47,59 +67,94 @@ end, drive back.
 
 ---
 
-## Terminal 1 — Launch the mapping stack on pi2
+## Path (A) SPLIT — Terminal 1 (pi2 sensors)
 
 ```bash
-# Connect to pi2
 ssh pi2@192.168.1.102
-
-# Network env so the laptop can see pi2's topics
 export FASTRTPS_DEFAULT_PROFILES_FILE=/home/pi2/fastdds_peers.xml
 export ROS_DOMAIN_ID=30
-
-# ROS env
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 
-# Make sure the maps directory exists
+ros2 launch swerve_bringup rtabmap_pi_sensors.launch.py \
+    robot_id:=tb3_1 \
+    cam_x:=0.128  cam_y:=0.000  cam_z:=-0.0175
+```
+
+This brings up only the camera + TF + odom + EKF on pi2. Pi 4 thermal
+stays around 60 °C with no rtabmap CPU load.
+
+## Path (A) SPLIT — Terminal 2 (laptop rtabmap)
+
+In a NEW terminal on the laptop:
+
+```bash
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/toodmuk/fastdds_peers.xml
+export ROS_DOMAIN_ID=30
+source /opt/ros/humble/setup.bash
+source ~/swerve_transport_project/install/setup.bash
 mkdir -p ~/maps
 
-# Launch the mapping stack (default mount offsets)
-ros2 launch swerve_bringup rtabmap_mapping.launch.py \
+# Quick pre-flight (verify pi2 topics are visible from laptop)
+ros2 topic hz /tb3_1/camera/rgb/image_raw    # > 1 Hz expected
+ros2 topic hz /tb3_1/ekf/odom                # > 5 Hz expected
+
+ros2 launch swerve_bringup rtabmap_laptop_mapping.launch.py \
     robot_id:=tb3_1 \
     db_path:=~/maps/tb3_1_room.db
 ```
 
-**With custom mount offsets** (if you measured):
+The .db ends up at `~/maps/tb3_1_room.db` on the **laptop**.
+
+---
+
+## Path (B) ALL-ON-PI — Terminal 1 (everything on pi2)
+
 ```bash
+ssh pi2@192.168.1.102
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/pi2/fastdds_peers.xml
+export ROS_DOMAIN_ID=30
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+mkdir -p ~/maps
+
 ros2 launch swerve_bringup rtabmap_mapping.launch.py \
     robot_id:=tb3_1 \
     db_path:=~/maps/tb3_1_room.db \
-    cam_x:=0.12  cam_y:=0.00  cam_z:=0.20
+    cam_x:=0.128  cam_y:=0.000  cam_z:=-0.0175
 ```
 
-### What you should see in the log
+The .db ends up on **pi2**. Pi 4 thermal can climb 70-80 °C — keep
+an eye on `vcgencmd measure_temp` and abort if you see throttling.
 
-Look for these lines (in roughly this order):
+### What you should see in the logs
 
+**Path (A) Pi terminal:**
 ```
 [oak_camera_node-1] ... oak_camera_node ready (tb3_1) — depthai=3.5.0
 [oak_camera_node-1] ... pipeline running. device=OAK-D-LITE
 [static_transform_publisher-2] ... Spinning until stopped - publishing transform
 [conveyor_base_node-1] ... Serial /dev/ttyACM0 @ 115200 opened.
 [conveyor_base_node-1] ... ConveyorBaseNode activated
-[rtabmap-3] ... rtabmap started
+[ekf_node-3] ... EKF node ready for tb3_1
 ```
 
-**Wait until `rtabmap started` appears before driving.** If it never
-appears, see the troubleshooting section.
+**Path (A) laptop terminal:**
+```
+[rtabmap-1] ... rtabmap started
+```
 
-**Leave Terminal 1 running and visible** — RTAB-Map prints status
-updates as it adds keyframes. You want to glance at it while driving.
+**Path (B) single Pi terminal:** all of the above lines together.
+
+**Wait until `rtabmap started` appears (laptop in (A), pi in (B))
+before driving.** If it never appears, see troubleshooting.
+
+**Leave the rtabmap terminal visible** — it prints status updates as
+keyframes are added. You want to glance at it while driving.
 
 ---
 
-## Terminal 2 — Teleop (on the laptop)
+## Teleop terminal (on the laptop, both paths)
 
 You have an existing teleop from previous testing. On the laptop:
 
@@ -170,13 +225,15 @@ closure event per segment.
 ## Ending the mapping run
 
 1. Drive the robot back to a position near the start.
-2. Stop teleop (Ctrl+C in Terminal 2).
-3. Stop the mapping launch (Ctrl+C in Terminal 1).
-4. Wait ~5 seconds — RTAB-Map flushes and saves the database.
-5. Verify the .db is on disk:
-   ```bash
-   ssh pi2@192.168.1.102 'ls -lh ~/maps/'
-   ```
+2. Stop teleop (Ctrl+C in the teleop terminal).
+3. Stop the rtabmap launch (Ctrl+C in the rtabmap terminal —
+   laptop for path A, pi for path B).
+4. Stop the pi sensors launch (path A only — Ctrl+C in the pi
+   sensors terminal).
+5. Wait ~5 seconds — RTAB-Map flushes and saves the database.
+6. Verify the .db is on disk:
+   - **Path (A)**: `ls -lh ~/maps/` on the **laptop**
+   - **Path (B)**: `ssh pi2@192.168.1.102 'ls -lh ~/maps/'`
    Expect a file like `tb3_1_room.db` of 10–200 MB.
 6. (Optional, on a desktop) Inspect the map visually:
    ```bash
@@ -195,7 +252,22 @@ closure event per segment.
 ## After mapping — switch to localization
 
 Once you're happy with the .db, the runtime launch closes the EKF
-loop and gives the formation drift-free pose:
+loop and gives the formation drift-free pose. Same SPLIT vs ALL-ON-PI
+choice applies.
+
+### Path (A) SPLIT localization
+
+If you mapped with path (A), the .db is already on the laptop.
+Just keep `rtabmap_pi_sensors.launch.py` running on pi2 (or restart
+it), then on the laptop:
+
+```bash
+ros2 launch swerve_bringup rtabmap_laptop_localization.launch.py \
+    robot_id:=tb3_1 \
+    db_path:=~/maps/tb3_1_room.db
+```
+
+### Path (B) ALL-ON-PI localization
 
 ```bash
 ssh pi2@192.168.1.102
@@ -209,7 +281,13 @@ ros2 launch swerve_bringup rtabmap_localization.launch.py \
     db_path:=~/maps/tb3_1_room.db
 ```
 
-Verify from the laptop:
+The .db must be on pi2 for path B — copy from the laptop if needed:
+```bash
+scp ~/maps/tb3_1_room.db pi2@192.168.1.102:~/maps/
+```
+
+### Verifying localization (either path)
+
 ```bash
 ros2 topic hz /tb3_1/slam/pose      # 1–3 Hz once localized
 ros2 topic echo /tb3_1/ekf/odom     # smooth, drift-corrected
