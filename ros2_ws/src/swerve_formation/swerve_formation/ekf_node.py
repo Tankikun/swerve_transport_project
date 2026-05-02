@@ -16,6 +16,11 @@ class EKFNode(Node):
         super().__init__('ekf_node')
         self.declare_parameter('robot_id', 'tb3_0')
         robot_id = self.get_parameter('robot_id').value
+        # Per-robot TF frame ids — must match what conveyor_base_node and the
+        # static_transform_publisher in oak_camera.launch.py use, otherwise
+        # rtabmap can't connect odom → base_link → camera_optical.
+        self._odom_frame_id = f'{robot_id}_odom'
+        self._base_frame_id = f'{robot_id}_base_link'
 
         self._mu = np.zeros(3)           # [x, y, theta]
         self._sigma = np.eye(3) * 0.1
@@ -78,7 +83,8 @@ class EKFNode(Node):
     def _publish(self):
         out = Odometry()
         out.header.stamp = self.get_clock().now().to_msg()
-        out.header.frame_id = 'odom'
+        out.header.frame_id = self._odom_frame_id
+        out.child_frame_id  = self._base_frame_id
         out.pose.pose.position.x = float(self._mu[0])
         out.pose.pose.position.y = float(self._mu[1])
         out.pose.pose.orientation.z = float(np.sin(self._mu[2] / 2.0))

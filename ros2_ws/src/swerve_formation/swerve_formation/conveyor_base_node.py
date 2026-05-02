@@ -95,6 +95,13 @@ class ConveyorBaseNode(Node):
         self._active = False
         self._last_cmd_t = 0.0
         self._reset_srv = None
+        # Per-robot frame IDs for the published Odometry msg + odom→base_link
+        # TF. Set in on_configure once we know the robot_id parameter. Using
+        # robot-prefixed frames lets multiple robots coexist in the same TF
+        # tree without colliding (otherwise both would publish to plain
+        # `odom`/`base_link` and rtabmap couldn't tell them apart).
+        self._odom_frame_id = 'odom'
+        self._base_frame_id = 'base_link'
         self._line_buf = ''
         self._odom_x = self._odom_y = self._odom_theta = 0.0
 
@@ -106,6 +113,9 @@ class ConveyorBaseNode(Node):
         robot_id  = self.get_parameter('robot_id').value
         usb_port  = self.get_parameter('usb_port').value
         baud_rate = self.get_parameter('baud_rate').value
+        # Stamp the per-robot TF / Odometry frame IDs.
+        self._odom_frame_id = f'{robot_id}_odom'
+        self._base_frame_id = f'{robot_id}_base_link'
 
         try:
             self._ser = serial.Serial(
@@ -290,8 +300,8 @@ class ConveyorBaseNode(Node):
             # Standard nav_msgs/Odometry
             odom = Odometry()
             odom.header.stamp       = now
-            odom.header.frame_id    = 'odom'
-            odom.child_frame_id     = 'base_link'
+            odom.header.frame_id    = self._odom_frame_id
+            odom.child_frame_id     = self._base_frame_id
             odom.pose.pose.position.x    = x
             odom.pose.pose.position.y    = y
             odom.pose.pose.position.z    = 0.0
@@ -322,8 +332,8 @@ class ConveyorBaseNode(Node):
             # TF: odom → base_link
             tf = TransformStamped()
             tf.header.stamp       = now
-            tf.header.frame_id    = 'odom'
-            tf.child_frame_id     = 'base_link'
+            tf.header.frame_id    = self._odom_frame_id
+            tf.child_frame_id     = self._base_frame_id
             tf.transform.translation.x = x
             tf.transform.translation.y = y
             tf.transform.translation.z = 0.0
