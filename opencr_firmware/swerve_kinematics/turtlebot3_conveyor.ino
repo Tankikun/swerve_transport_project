@@ -18,17 +18,40 @@
  * read fails it falls back to the commanded values for that cycle so
  * the loop still advances.
  *
+ * IMU (NEW): the OpenCR's onboard MPU-9250 is read every motor cycle
+ * via the cIMU library. A separate "IMU" line is emitted every
+ * IMU_DIV motor cycles (~10 Hz) carrying body-frame acceleration,
+ * body-frame angular velocity, and the filtered yaw angle. The Pi
+ * can fuse this with wheel odometry in the EKF for a more stable
+ * heading estimate.
+ *
+ * Serial protocol additions:
+ *   Send:  "IMU ax ay az gx gy gz yaw\n"
+ *          ax,ay,az  body linear acceleration [m/s²]
+ *          gx,gy,gz  body angular velocity    [rad/s]
+ *          yaw       filtered yaw angle        [rad]
+ *
  * Watchdog: wheels stop if no command within CMD_TIMEOUT_MS.
  */
 
 #include "turtlebot3_conveyor.h"
 #include "turtlebot3_conveyor_motor_driver.h"
+#include <IMU.h>
+
+// MPU-9250 default full-scale ranges:
+//   Accel ±2 g    →   16384 LSB / g
+//   Gyro  ±250 dps→     131 LSB / (deg/s)
+// If you change these in the IMU library, update the conversions below.
+static const float ACC_LSB_TO_MS2  = (1.0f / 16384.0f) * 9.80665f;
+static const float GYRO_LSB_TO_RAD = (1.0f / 131.0f)   * (M_PI / 180.0f);
+static const float DEG_TO_RAD      = M_PI / 180.0f;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Globals
 // ──────────────────────────────────────────────────────────────────────────────
 
 Turtlebot3MotorDriver motor_driver;
+cIMU imu;
 
 // IK state for 4 modules: [0=FL, 1=FR, 2=RL, 3=RR]
 // These are the COMMANDED targets — they drive the motor outputs.
@@ -60,6 +83,12 @@ static uint32_t g_enc_read_fail_count = 0;
 // This keeps serial traffic and RPi CPU load low.
 static const uint8_t ODOM_DIV = 10;
 static uint8_t       g_odom_div_cnt = 0;
+
+// IMU line is sent every IMU_DIV motor cycles (30ms × 3 = 90ms ≈ 11 Hz),
+// faster than POSE so it's actually useful as a high-rate angular-rate
+// source for downstream EKF fusion.
+static const uint8_t IMU_DIV = 3;
+static uint8_t       g_imu_div_cnt = 0;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Forward kinematics from a given module state (commanded OR measured).
@@ -263,6 +292,13 @@ void setup()
   motor_driver.init();
   init_module_axes();
 
+  // ── IMU (MPU-9250 onboard the OpenCR) ────────────────────────────────────
+  // begin() spins up SPI, configures sensor ranges and starts the
+  // Madgwick attitude filter. Reasonably fast — couple hundred ms.
+  Serial.println("Initializing onboard IMU (MPU-9250)...");
+  imu.begin();
+  Serial.println("IMU ready.");
+
   // Homing
   Serial.println("Homing all joints to center (tick=2048)...");
   int32_t home_joints[4] = {STEER_CENTER, STEER_CENTER, STEER_CENTER, STEER_CENTER};
@@ -319,6 +355,11 @@ void loop()
 
   // Motor cycle: 30 ms
   if ((now - prev_motor_time) >= 30) {
+    // Update the IMU once per motor cycle (~33 Hz), so the Madgwick
+    // attitude filter sees a stable sample rate. The send to serial
+    // is gated separately by IMU_DIV below.
+    imu.update();
+
     int32_t joint_vals[4], wheel_vals[4];
     ik_to_dynamixel(g_modules, joint_vals, wheel_vals);
 
@@ -385,6 +426,35 @@ void loop()
           g_enc_read_fail_count = 0;
         }
       }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── IMU send (every IMU_DIV motor cycles, ~11 Hz) ────────────────────────
+    // Format: "IMU ax ay az gx gy gz yaw\n"
+    //   ax,ay,az  body linear acceleration [m/s²]
+    //   gx,gy,gz  body angular velocity    [rad/s]
+    //   yaw       Madgwick-filtered yaw    [rad]
+    if (++g_imu_div_cnt >= IMU_DIV) {
+      g_imu_div_cnt = 0;
+      // accData / gyroData are int16 raw LSB values.
+      // angle[2] is filtered yaw in DEGREES (cIMU library convention).
+      float ax = (float)imu.accData[0]  * ACC_LSB_TO_MS2;
+      float ay = (float)imu.accData[1]  * ACC_LSB_TO_MS2;
+      float az = (float)imu.accData[2]  * ACC_LSB_TO_MS2;
+      float gx = (float)imu.gyroData[0] * GYRO_LSB_TO_RAD;
+      float gy = (float)imu.gyroData[1] * GYRO_LSB_TO_RAD;
+      float gz = (float)imu.gyroData[2] * GYRO_LSB_TO_RAD;
+      float yaw = imu.angle[2] * DEG_TO_RAD;
+
+      Serial.print("IMU ");
+      Serial.print(ax, 4);  Serial.print(" ");
+      Serial.print(ay, 4);  Serial.print(" ");
+      Serial.print(az, 4);  Serial.print(" ");
+      Serial.print(gx, 4);  Serial.print(" ");
+      Serial.print(gy, 4);  Serial.print(" ");
+      Serial.print(gz, 4);  Serial.print(" ");
+      Serial.print(yaw, 4);
+      Serial.println();
     }
     // ─────────────────────────────────────────────────────────────────────────
 
