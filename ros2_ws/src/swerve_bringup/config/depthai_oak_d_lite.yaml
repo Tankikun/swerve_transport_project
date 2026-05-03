@@ -18,7 +18,7 @@
     # ===== RGB camera =====
     rgb:
       i_resolution: "720P"             # 1280x720 native
-      i_fps: 24.0                      # comfortably above 5 Hz RTAB-Map rate
+      i_fps: 15.0                      # comfortably above 5 Hz RTAB-Map rate
       i_interleaved: false             # planar output, what ROS expects
       i_max_q_size: 10                 # output queue depth
       i_low_bandwidth: false           # MJPEG compression off; we want raw
@@ -45,7 +45,7 @@
       i_stereo_conf_threshold: 230     # confidence threshold; lower = more depths kept
       i_max_q_size: 10
       i_resolution: "400P"             # 640x400 stereo native; matches OAK-D Lite
-      i_fps: 24.0                      # match RGB rate
+      i_fps: 15.0                      # match RGB rate
       i_board_socket_id: 2             # CAM_C (right mono) on OAK-D Lite
       i_left_socket_id: 1              # CAM_B (left mono) on OAK-D Lite
       i_height: 400
