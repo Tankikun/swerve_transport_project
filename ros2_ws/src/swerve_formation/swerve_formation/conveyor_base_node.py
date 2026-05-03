@@ -137,7 +137,13 @@ class ConveyorBaseNode(Node):
         )
         self._odom_pub       = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
         self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
-        self._read_timer     = self.create_timer(0.1, self._read_serial_cb)
+        # Read serial at 50 Hz (was 10 Hz). Firmware now emits POSE at
+        # 33 Hz (ODOM_DIV=1, see turtlebot3_conveyor.ino), and EKF +
+        # navigation + RTAB-Map all benefit from fresher pose timestamps:
+        # the Odometry msg's stamp is set to "when Pi processed the line",
+        # so faster polling → smaller stamp lag → cleaner downstream sync.
+        # 50 Hz keeps serial buffer drained within 20 ms even at peak rate.
+        self._read_timer     = self.create_timer(0.02, self._read_serial_cb)
         self._watchdog_timer = self.create_timer(0.2, self._watchdog_cb)
 
         self._last_cmd_t = time.time()
