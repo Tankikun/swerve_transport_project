@@ -58,7 +58,7 @@ work between pi2 (sensors) and the laptop (rtabmap_slam):
 
 The all-on-pi launches are kept as a fallback for single-machine
 development or when the LAN is too lossy for split mode. See
-`MAPPING_RUN_GUIDE.md` for the full operating procedure of both
+`MAPPING_RUN_LAPTOP.md` for the full operating procedure of both
 architectures.
 - **`slam_pose_relay_node`** — converts `/rtabmap/localization_pose`
   (`PoseWithCovarianceStamped`) into `/{robot_id}/slam/pose`
@@ -239,9 +239,7 @@ ros2_ws/src/swerve_bringup/launch/rtabmap_pi_sensors.launch.py     (split mode: 
 ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_mapping.launch.py (split mode: laptop SLAM)
 ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_localization.launch.py (split mode: laptop localization)
 CAMERA_NOTES.md                                    (this file)
-MAPPING_RUN_GUIDE.md                               (top-level index pointing to per-side guides)
-MAPPING_RUN_PI.md                                  (operator procedure — pi side)
-MAPPING_RUN_LAPTOP.md                              (operator procedure — laptop side)
+MAPPING_RUN_LAPTOP.md                              (operator procedure — laptop drives the whole flow over SSH)
 RTAB_SESSION_SUMMARY.md                            (branch progress overview)
 ```
 

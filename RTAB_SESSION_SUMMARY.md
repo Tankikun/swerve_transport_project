@@ -7,7 +7,7 @@ drifting (root-cause of the 7° rotation drift documented in
 `TIER1_NOTES.md`).
 
 This file is the human-readable progress record. For end-to-end
-operating procedure see `MAPPING_RUN_GUIDE.md`. For deep technical
+operating procedure see `MAPPING_RUN_LAPTOP.md`. For deep technical
 detail see `CAMERA_NOTES.md`.
 
 ---
@@ -68,7 +68,7 @@ commits on top of the previous push:
   wheel) to `/{robot_id}/ekf/odom` (EKF-fused). In mapping mode this
   is harmless. In localization mode it creates a feedback loop
   (rtabmap → ekf → rtabmap); see Troubleshooting in
-  `MAPPING_RUN_GUIDE.md` for the rollback if jumps appear.
+  `MAPPING_RUN_LAPTOP.md` for the rollback if jumps appear.
 
 ### Inventory pi2
 Confirmed Earth's apt installs landed cleanly:
@@ -95,7 +95,7 @@ Confirmed Earth's apt installs landed cleanly:
   via `ros2 launch ... --show-args`).
 
 ### Documentation produced this session
-- `MAPPING_RUN_GUIDE.md` — operator-facing run procedure for step 6
+- `MAPPING_RUN_LAPTOP.md` — operator-facing run procedure for step 6
   (terminal layouts, driving rules, troubleshooting). Now covers
   both the SPLIT (recommended) and ALL-ON-PI (fallback) paths.
 - `RTAB_SESSION_SUMMARY.md` — this file.
@@ -115,7 +115,7 @@ Confirmed Earth's apt installs landed cleanly:
   feature extraction + graph optimisation under sustained mapping
   pushes the Pi to 70-80 °C). Added three new launches that split
   the work: pi runs sensors only, laptop runs rtabmap_slam. The
-  all-on-pi launches remain as a fallback. See `MAPPING_RUN_GUIDE.md`
+  all-on-pi launches remain as a fallback. See `MAPPING_RUN_LAPTOP.md`
   Path (A) vs Path (B).
 
 ---
@@ -139,9 +139,7 @@ ros2_ws/src/swerve_bringup/launch/
     rtabmap_laptop_localization.launch.py      # split: laptop-side rtabmap (localization)
 
 CAMERA_NOTES.md             # deep-dive: depthai 3.x quirks, apt mirror workaround
-MAPPING_RUN_GUIDE.md        # top-level index pointing to per-side guides
-MAPPING_RUN_PI.md           # operator procedure — pi side (sensors)
-MAPPING_RUN_LAPTOP.md       # operator procedure — laptop side (rtabmap + teleop)
+MAPPING_RUN_LAPTOP.md       # operator procedure (laptop drives the whole flow over SSH)
 RTAB_SESSION_SUMMARY.md     # THIS FILE
 ```
 
@@ -155,7 +153,7 @@ Then re-launches with `rtabmap_localization.launch.py` to verify the
 robot localizes itself in the saved map and `/tb3_1/ekf/odom`
 becomes drift-corrected.
 
-Exact commands and driving rules are in `MAPPING_RUN_GUIDE.md`.
+Exact commands and driving rules are in `MAPPING_RUN_LAPTOP.md`.
 
 After that, the same procedure repeated on pi1 (tb3_0) once Earth
 applies the apt installs there. Both robots will then localize against
@@ -172,6 +170,6 @@ have been used for mapping the same room).
   preference: keep defaults harmless and require an explicit pass.
 - The `/ekf/odom` feedback loop in localization mode is unproven —
   watch first localization run for jumpy poses; if seen, revert that
-  remap (see Troubleshooting in `MAPPING_RUN_GUIDE.md`).
+  remap (see Troubleshooting in `MAPPING_RUN_LAPTOP.md`).
 - Localization launch has not yet been hardware-tested. Step 6 is
   the gate.
