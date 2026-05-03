@@ -32,11 +32,34 @@ yours to execute, then localization launch closes the EKF loop.
 - **`rtabmap_mapping.launch.py`** — full mapping stack (camera + TF
   + conveyor_base for wheel odometry + rtabmap_slam). Will fail to
   run until rtabmap is installed (see below).
-- **`rtabmap_localization.launch.py`** — runtime stack: camera + TF
-  + conveyor_base + ekf_node + rtabmap (localization-only against an
-  existing .db) + slam_pose_relay_node. Closes the EKF feedback loop
-  documented in `TIER1_NOTES.md` (the 7° yaw drift goes away once
-  visual localization corrections start arriving).
+- **`rtabmap_localization.launch.py`** — all-on-pi runtime stack:
+  camera + TF + conveyor_base + ekf_node + rtabmap (localization-only
+  against an existing .db) + slam_pose_relay_node. Closes the EKF
+  feedback loop documented in `TIER1_NOTES.md` (the 7° yaw drift goes
+  away once visual localization corrections start arriving).
+
+### Split-execution variants (recommended — runs rtabmap on the laptop)
+
+To avoid pushing the Pi 4 into thermal-throttle territory under
+sustained mapping/localization, three additional launches split the
+work between pi2 (sensors) and the laptop (rtabmap_slam):
+
+- **`rtabmap_pi_sensors.launch.py`** (runs on pi2) — camera + TF +
+  conveyor_base + ekf_node only. No rtabmap. Streams the topics
+  rtabmap needs over the network.
+- **`rtabmap_laptop_mapping.launch.py`** (runs on laptop) — just
+  rtabmap_slam in mapping mode. Subscribes to pi2's namespaced
+  camera + odom topics. The .db ends up on the laptop, where it can
+  be inspected with `rtabmap-databaseViewer` directly.
+- **`rtabmap_laptop_localization.launch.py`** (runs on laptop) —
+  rtabmap_slam in localization-only mode + slam_pose_relay_node.
+  Closes the EKF feedback loop across the network. Adds ~50–100 ms
+  of pose latency vs all-on-pi but keeps the Pi at ~60 °C.
+
+The all-on-pi launches are kept as a fallback for single-machine
+development or when the LAN is too lossy for split mode. See
+`MAPPING_RUN_LAPTOP.md` for the full operating procedure of both
+architectures.
 - **`slam_pose_relay_node`** — converts `/rtabmap/localization_pose`
   (`PoseWithCovarianceStamped`) into `/{robot_id}/slam/pose`
   (`PoseStamped`) which `ekf_node` already subscribes to. Covariance
@@ -210,9 +233,14 @@ ros2_ws/src/swerve_formation/swerve_formation/oak_camera_node.py
 ros2_ws/src/swerve_formation/swerve_formation/slam_pose_relay_node.py
 ros2_ws/src/swerve_formation/setup.py             (registered both nodes)
 ros2_ws/src/swerve_bringup/launch/oak_camera.launch.py
-ros2_ws/src/swerve_bringup/launch/rtabmap_mapping.launch.py
-ros2_ws/src/swerve_bringup/launch/rtabmap_localization.launch.py
+ros2_ws/src/swerve_bringup/launch/rtabmap_mapping.launch.py        (all-on-pi mapping)
+ros2_ws/src/swerve_bringup/launch/rtabmap_localization.launch.py   (all-on-pi localization)
+ros2_ws/src/swerve_bringup/launch/rtabmap_pi_sensors.launch.py     (split mode: pi sensors)
+ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_mapping.launch.py (split mode: laptop SLAM)
+ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_localization.launch.py (split mode: laptop localization)
 CAMERA_NOTES.md                                    (this file)
+MAPPING_RUN_LAPTOP.md                              (operator procedure — laptop drives the whole flow over SSH)
+RTAB_SESSION_SUMMARY.md                            (branch progress overview)
 ```
 
 ## Open issues for next session

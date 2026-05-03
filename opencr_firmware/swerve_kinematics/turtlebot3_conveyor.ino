@@ -7,7 +7,7 @@
  *   Receive:  "x_dot y_dot gamma_dot\n"   (floats: m/s, m/s, rad/s)
  *   Example:  "0.15 0.0 0.0\n"            → forward at 0.15 m/s
  *   Reply:    "OK d:δ0,δ1,δ2,δ3 w:ω0,ω1,ω2,ω3\n"
- *   Odom:     "POSE x y theta vx vy wz\n" (~3 Hz, world-frame pose)
+ *   Odom:     "POSE x y theta vx vy wz\n" (~33 Hz, world-frame pose)
  *   Reset:    send "R\n"                  → zeroes odometry
  *   Error:    "ERR\n"
  *
@@ -81,9 +81,15 @@ static uint32_t g_odom_prev_ms = 0;
 // Debug counter for encoder-read failures (for occasional reporting)
 static uint32_t g_enc_read_fail_count = 0;
 
-// POSE is sent every ODOM_DIV motor cycles (30ms × 10 = 300ms ≈ 3 Hz).
-// This keeps serial traffic and RPi CPU load low.
-static const uint8_t ODOM_DIV = 10;
+// POSE is sent every ODOM_DIV motor cycles. Motor cycle is 30 ms,
+// so ODOM_DIV = 1 gives 33 Hz POSE rate (the previous 10 → 3 Hz was
+// too slow for the EKF prediction step and for RTAB-Map's motion
+// hint between camera frames).
+//
+// Bandwidth check: ~54 bytes per POSE line × 33 Hz ≈ 1.8 kB/s.
+// 115200 baud → ~11.5 kB/s budget. We sit at ~16 % of serial bandwidth
+// even with IMU emission too — plenty of headroom.
+static const uint8_t ODOM_DIV = 1;
 static uint8_t       g_odom_div_cnt = 0;
 
 // IMU line is sent every IMU_DIV motor cycles (30ms × 3 = 90ms ≈ 11 Hz),
@@ -396,7 +402,7 @@ void loop()
     while (g_odom_theta >  M_PI) g_odom_theta -= 2.0f * M_PI;
     while (g_odom_theta < -M_PI) g_odom_theta += 2.0f * M_PI;
 
-    // Send POSE only every ODOM_DIV cycles (~3 Hz) to keep serial traffic low.
+    // Send POSE every ODOM_DIV cycles (now 33 Hz with ODOM_DIV=1).
     if (++g_odom_div_cnt >= ODOM_DIV) {
       g_odom_div_cnt = 0;
       Serial.print("POSE ");

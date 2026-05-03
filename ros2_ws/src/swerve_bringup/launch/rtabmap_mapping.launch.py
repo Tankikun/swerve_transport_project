@@ -140,10 +140,17 @@ def launch_setup(context, *args, **kwargs):
             'RGBD/LinearUpdate':          '0.01',
         }],
         remappings=[
-            ('rgb/image',       f'/{robot_id}/camera/rgb/image_raw'),
-            ('rgb/camera_info', f'/{robot_id}/camera/rgb/camera_info'),
-            ('depth/image',     f'/{robot_id}/camera/depth/image_raw'),
-            ('odom',            f'/{robot_id}/ekf/odom'),
+            ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
+            ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
+            ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
+            ('odom',              f'/{robot_id}/ekf/odom'),
+            # Per-robot scoping (mirrors rtabmap_localization.launch.py).
+            # Even in mapping mode, namespacing keeps logs / cloud_map /
+            # info clean if a second robot ever runs concurrently.
+            ('localization_pose', f'/{robot_id}/rtabmap/localization_pose'),
+            ('info',              f'/{robot_id}/rtabmap/info'),
+            ('mapData',           f'/{robot_id}/rtabmap/mapData'),
+            ('cloud_map',         f'/{robot_id}/rtabmap/cloud_map'),
         ],
         arguments=['--delete_db_on_start'],   # comment out to APPEND to existing db
     ))
