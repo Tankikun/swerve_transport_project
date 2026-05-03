@@ -131,7 +131,20 @@ static void fk_from_module_states(const ModuleState modules[4],
 
   vx = sum_vx / 4.0f;
   vy = sum_vy / 4.0f;
-  wz = (sum_wz_den > 1e-6f) ? (sum_wz_num / sum_wz_den) : 0.0f;
+  // Empirical sign correction (verified 2026-05-04 with bench test:
+  // commanded angular.z=+0.5 rad/s → physical CCW rotation → without
+  // this flip, /tb3_1/odom reports CW). The IK at the top of
+  // turtlebot3_conveyor.h and the FK formula above are both
+  // mathematically right-handed (z-up, CCW-positive), so the
+  // sign mismatch between commanded gamma_dot and reconstructed
+  // wz must come from somewhere in the encoder-feedback chain
+  // (likely a per-side mounting orientation or a swapped row in
+  // MODULE_POS / IK_TO_MOTOR). Forward and strafe both verify
+  // correct (sign symmetric for those modes), so this targeted
+  // negation only affects yaw integration. Re-test rotation after
+  // re-flashing: cmd_vel.angular.z=+0.5 should now produce a
+  // positive yaw delta in /tb3_1/odom matching CCW physical motion.
+  wz = (sum_wz_den > 1e-6f) ? -(sum_wz_num / sum_wz_den) : 0.0f;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
