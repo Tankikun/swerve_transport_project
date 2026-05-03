@@ -99,7 +99,16 @@ def launch_setup(context, *args, **kwargs):
                 'subscribe_scan':      False,
                 'subscribe_scan_cloud': False,
                 'approx_sync':         True,
-                'queue_size':          30,
+                # Critical: keep BOTH queues tiny so old frames get
+                # dropped instead of accumulating. With sync_queue_size=30
+                # (the previous default), the rtabmap log showed steady
+                # delay=18.5s — frames were 18 seconds old by the time
+                # rtabmap processed them, which made the odom prediction
+                # too stale for visual matches to register and the
+                # `map → odom` TF correction trailed reality. Tiny queues
+                # mean rtabmap always works on near-current frames.
+                'topic_queue_size':    1,
+                'sync_queue_size':     2,
                 'database_path':       db_path,
                 # Localization-only.
                 'Mem/IncrementalMemory':    'False',
@@ -107,6 +116,20 @@ def launch_setup(context, *args, **kwargs):
                 'RGBD/OptimizeFromGraphEnd': 'True',
                 'RGBD/AngularUpdate':         '0.01',
                 'RGBD/LinearUpdate':          '0.01',
+                # Tuning cherry-picked from feature/config-rtab (Tan).
+                # See rtabmap_localization.launch.py for per-param
+                # rationale; this is the same block applied to the
+                # laptop-side rtabmap node so split-mode benefits too.
+                'Reg/Force3DoF':              'true',
+                'Vis/EstimationType':         '1',
+                'Vis/MinInliers':             '15',
+                'Kp/DetectorStrategy':        '6',
+                'Kp/MaxFeatures':             '400',
+                'Mem/ImagePreDecimation':     '2',
+                'Mem/DepthDecimation':        '2',
+                'Rtabmap/DetectionRate':      '5.0',
+                'RGBD/ProximityBySpace':      'false',
+                'RGBD/ProximityByTime':       'false',
             }],
             remappings=[
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),

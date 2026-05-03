@@ -127,17 +127,45 @@ def launch_setup(context, *args, **kwargs):
             'subscribe_scan':      False,
             'subscribe_scan_cloud': False,
             'approx_sync':         True,
-            'queue_size':          30,
+            # Sync settings — see rtabmap_localization.launch.py for
+            # rationale. The deprecated `queue_size: 30` is replaced
+            # with the explicit topic_queue_size / sync_queue_size
+            # names that rtabmap actually wants.
+            'approx_sync_max_interval': 0.5,
+            'topic_queue_size':    5,
+            'sync_queue_size':     10,
             'database_path':       db_path,
             # Mapping mode (NOT localization-only)
             'Mem/IncrementalMemory': 'True',
             # Save database on exit
             'Mem/InitWMWithAllNodes': 'False',
-            # Loop-closure tuning — defaults are reasonable; tighten
-            # later if false positives in feature-poor rooms.
             'RGBD/OptimizeFromGraphEnd': 'True',
-            'RGBD/AngularUpdate':         '0.01',
-            'RGBD/LinearUpdate':          '0.01',
+            # Tuning cherry-picked from feature/config-rtab (Tan); same
+            # mapping-mode profile as rtabmap_laptop_mapping.launch.py
+            # (which has the full per-param rationale comments). Pi 4
+            # runs hotter under this load; if you see thermal warnings,
+            # use the laptop-side mapping launch instead.
+            'RGBD/LinearUpdate':          '0.1',
+            'RGBD/AngularUpdate':         '0.1',
+            'Reg/Force3DoF':              'true',
+            'Vis/EstimationType':         '1',
+            'Vis/MinInliers':             '20',
+            'Kp/DetectorStrategy':        '6',
+            'Kp/MaxFeatures':             '800',
+            'Mem/ImagePreDecimation':     '1',
+            'Mem/DepthDecimation':        '1',
+            'Rtabmap/DetectionRate':      '1.0',
+            'Rtabmap/LoopThr':            '0.11',
+            'Mem/STMSize':                '30',
+            'Mem/RehearsalSimilarity':    '0.6',
+            'RGBD/ProximityBySpace':      'true',
+            'RGBD/ProximityByTime':       'true',
+            'RGBD/ProximityMaxGraphDepth': '50',
+            'Optimizer/Strategy':         '1',
+            'Optimizer/Iterations':       '20',
+            'Optimizer/Robust':           'true',
+            'Rtabmap/PublishStats':       'true',
+            'Rtabmap/PublishLastSignature': 'true',
         }],
         remappings=[
             ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),

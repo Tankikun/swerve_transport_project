@@ -18,8 +18,7 @@ SSH where needed. You never need to physically touch the Pi.
 | T3 | Native laptop — runs teleop |
 | T4 | Native laptop — (optional) monitoring |
 
-> **Two failures cost the previous session a lot of time. Both are
-> fixed by following this guide:**
+> **Failures from previous sessions, all fixed by following this guide:**
 >
 > 1. **Pi clock drift.** `systemd-timesyncd` on the Pi quietly
 >    rolled the clock back ~14 h every few minutes (couldn't reach
@@ -32,6 +31,27 @@ SSH where needed. You never need to physically touch the Pi.
 >    A test where you just sat the robot down and watched the log
 >    will produce a `.db` of the right size with zero usable links.
 >    Step 9 pre-flights this; Step 12 verifies the result.
+> 3. **OAK-D Lite USB wedge.** The OAK can fall back into bootloader
+>    mode (`lsusb` shows `03e7:f63b` instead of `03e7:2485`) under
+>    sustained `kill -9` cycles or USB-2 power-marginal cables. The
+>    `oak_camera_node` log will say `pipeline running` but no frames
+>    will be published. Step 3 includes a `lsusb` pre-flight; the
+>    troubleshooting section covers the recovery (USB-3 cable, USB
+>    reset via sysfs, or physical replug).
+>
+> **What's in the launch tuning, since you're going to ask:** the
+> mapping launches now include a parameter block cherry-picked from
+> `feature/config-rtab` (Tan's branch). Highlights: `Reg/Force3DoF`
+> (planar swerve constraint), `Kp/DetectorStrategy=6` (GFTT+ORB,
+> rotation-robust for swerve), `Kp/MaxFeatures=800` (denser map),
+> `RGBD/{Linear,Angular}Update=0.1` (~10 cm / 6° keyframe density),
+> `Vis/MinInliers=20` (strict — false loop closures permanently
+> corrupt the .db, so we'd rather miss a real one than accept a
+> bad one), `Optimizer/{Strategy=1,Robust=true}` (g2o with robust
+> kernel). Sync filter uses `topic_queue_size=5`, `sync_queue_size=10`,
+> `approx_sync_max_interval=0.5` instead of the deprecated
+> `queue_size=30`. See per-param comments in
+> `ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_mapping.launch.py`.
 
 ---
 
@@ -163,7 +183,28 @@ Open Terminal 1 on the laptop and SSH into pi2:
 ssh pi2@192.168.1.102
 ```
 
-Once you see `pi2@ubuntu:~$`, paste:
+**Before launching anything, verify the OAK-D is on the USB bus and
+in runtime mode** (this single check prevents the silent
+"pipeline running but zero frames" wedge):
+
+```bash
+lsusb | grep 03e7
+```
+
+You want `Bus … Device …: ID 03e7:2485 Intel Movidius MyriadX`.
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `03e7:2485` | OAK is healthy, runtime firmware loaded | Continue |
+| `03e7:f63b` | OAK is stuck in bootloader | See the OAK USB section in Troubleshooting (USB sysfs reset, or physical unplug-replug) |
+| nothing | OAK is not on the bus at all | Cable issue. Re-seat the USB-C cable on the OAK side until it clicks. Prefer a Pi 4 **blue (USB-3)** port and a known-good data cable. Charge-only USB-C cables won't enumerate. |
+
+If the OAK still won't enumerate after a known-good cable in a
+USB-3 port, full power-cycle the Pi (`sudo poweroff`, unplug power
+for 10 s, re-power) — that resets the USB controller hardware
+state. A `reboot` is not enough.
+
+Once `lsusb` shows `2485`, paste:
 
 ```bash
 export FASTRTPS_DEFAULT_PROFILES_FILE=/home/pi2/fastdds_peers.xml
@@ -535,9 +576,59 @@ always pointless — RTAB-Map needs motion to link keyframes.
 ### Map looks fragmented / no loop closures
 - Drive slower next time
 - Re-map with a tighter physical loop close
-- Edit `rtabmap_laptop_mapping.launch.py` and lower
-  `RGBD/AngularUpdate` and `RGBD/LinearUpdate` to `0.005`
-  (more keyframes captured per unit motion)
+- The launch defaults to `RGBD/{Linear,Angular}Update=0.1` (a
+  keyframe every ~10 cm / ~6°). For a small or feature-poor room
+  you can lower these in
+  `ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_mapping.launch.py`
+  to `0.05` (every 5 cm / 3°) for a denser map. Don't go below
+  `0.02` — keyframe explosion makes loop-closure checks O(N²)
+  slow and bloats the .db without improving localization.
+- If you went below `Vis/MinInliers=15` to "force" loop closures,
+  put it back to `20`. Bad loop closures during mapping are the
+  worst failure mode — they fold the room in on itself in the
+  graph and can't be undone without re-mapping from scratch.
+
+### OAK-D Lite is stuck in bootloader (`lsusb` shows `03e7:f63b`)
+Symptoms: `oak_camera_node` log says `pipeline running. device=OAK-D-LITE`
+but `ros2 topic hz /tb3_1/camera/rgb/image_raw` is silent and the
+oak_camera_node process is pegged at ~100% CPU. The OAK chip enumerated,
+depthai loaded firmware, but the runtime image silently fell back to
+bootloader without depthai noticing.
+
+In order of escalation:
+
+1. **Software USB reset** (no physical access required). On pi2:
+   ```bash
+   sudo bash -c 'for d in /sys/bus/usb/devices/*; do
+     if [ -f $d/idVendor ] && [ $(cat $d/idVendor) = 03e7 ]; then
+       echo 0 > $d/authorized; sleep 2; echo 1 > $d/authorized;
+     fi; done'
+   sleep 5 ; lsusb | grep 03e7
+   ```
+   If `lsusb` now shows `2485`, restart the sensor launch (T1) and
+   continue.
+
+2. **Graceful kill before retrying.** `kill -9` on `oak_camera_node`
+   leaves the OAK USB in a wedged state because depthai's destructor
+   never runs. Always prefer `pkill -TERM`, give it 5–6 s, and only
+   fall back to `-9` for stragglers. The `oak_camera_node.py` poll
+   loop now includes a `time.sleep(0.001)` between `tryGet()` calls
+   so the depthai USB worker thread can run; if you see CPU pegged
+   at 100 % the `.pyc` cache is stale — `rm` it under
+   `~/ros2_ws/build/swerve_formation/swerve_formation/__pycache__/`.
+
+3. **Physical replug** into a Pi 4 **blue (USB-3) port** with a
+   known-good USB-C **data** cable (charge-only cables enumerate
+   nothing). Wait 10 s after replug for enumeration.
+
+4. **Cold power-cycle the Pi.** `sudo poweroff`, unplug power for
+   10 s, re-power. Resets the Pi's USB controller hardware. A
+   `reboot` is not enough. After the Pi comes back up, re-do
+   Step 2 (clock sync) before launching.
+
+5. **Powered USB hub** between Pi and OAK. Pi 4 USB ports are
+   undervolted under combined motor + Wi-Fi load; the OAK will
+   intermittently brown-out. A self-powered hub fixes it.
 
 ### Localization keeps "jumping" after a few seconds
 The `/ekf/odom` remap creates a small feedback loop (rtabmap →

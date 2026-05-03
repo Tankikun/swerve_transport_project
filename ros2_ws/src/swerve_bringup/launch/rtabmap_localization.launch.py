@@ -196,7 +196,14 @@ def launch_setup(context, *args, **kwargs):
             'subscribe_scan':      False,
             'subscribe_scan_cloud': False,
             'approx_sync':         True,
-            'queue_size':          30,
+            # Allow up to 0.5s spread between rgb / depth / camera_info
+            # stamps before approx_sync rejects a tuple. At fps=5 the
+            # frame interval is 0.2s, so 0.5s is comfortably permissive.
+            # Default (~50 ms) is too tight at low fps and silently
+            # drops every frame → "Did not receive data" forever.
+            'approx_sync_max_interval': 0.5,
+            'topic_queue_size':    5,
+            'sync_queue_size':     10,
             'database_path':       db_path,
             # Localization-only: do NOT add new keyframes, just match.
             'Mem/IncrementalMemory':    'False',
@@ -208,6 +215,41 @@ def launch_setup(context, *args, **kwargs):
             # Localization update rate (only fires after match — fine).
             'RGBD/AngularUpdate':         '0.01',
             'RGBD/LinearUpdate':          '0.01',
+            # ── Tuning cherry-picked from feature/config-rtab (Tan) ──
+            # Robot is planar swerve on flat ground — constrain the
+            # 6-DoF pose search to 3-DoF (x, y, yaw). Massive accuracy +
+            # match-rate improvement; without this RTAB-Map tries to
+            # explain odometry noise with pitch/roll and rejects half
+            # the candidate matches.
+            'Reg/Force3DoF':              'true',
+            # PnP estimation (standard for RGB-D), with a more
+            # permissive inlier count than the default (20) so borderline
+            # global re-localization candidates accept instead of
+            # silently dropping. The .db has 137 keyframes so we'd
+            # rather take a noisy match and let subsequent frames
+            # tighten it than wait forever for a perfect match.
+            'Vis/EstimationType':         '1',
+            'Vis/MinInliers':             '15',
+            # GFTT + ORB feature combo — more rotation-robust than the
+            # default detector. Matters for swerve which can spin in
+            # place: ORB descriptors handle large viewpoint rotation
+            # better than the default SURF-substitute.
+            'Kp/DetectorStrategy':        '6',
+            'Kp/MaxFeatures':             '400',
+            # Halve image dimensions before feature extraction. On Pi 4
+            # this drops processing time from ~170 ms to ~50 ms per
+            # frame, lets us actually hit DetectionRate. Loses some
+            # match precision in the very far field which is fine
+            # indoors.
+            'Mem/ImagePreDecimation':     '2',
+            'Mem/DepthDecimation':        '2',
+            # Try matching at 5 Hz instead of the default 1 Hz. With
+            # decimation above the Pi can keep up.
+            'Rtabmap/DetectionRate':      '5.0',
+            # Skip expensive proximity-graph checks — useful during
+            # mapping, redundant in localization-only.
+            'RGBD/ProximityBySpace':      'false',
+            'RGBD/ProximityByTime':       'false',
         }],
         remappings=[
             ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),

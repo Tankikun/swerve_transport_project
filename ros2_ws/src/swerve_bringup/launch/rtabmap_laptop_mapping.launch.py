@@ -90,14 +90,60 @@ def launch_setup(context, *args, **kwargs):
                 'subscribe_scan':      False,
                 'subscribe_scan_cloud': False,
                 'approx_sync':         True,
-                'queue_size':          30,
+                # Same sync settings as the localization launches — see
+                # rtabmap_localization.launch.py for rationale. The
+                # `queue_size: 30` we used to set is the deprecated alias
+                # of `sync_queue_size`; rtabmap warns about it on every
+                # startup. Use the explicit names instead.
+                'approx_sync_max_interval': 0.5,
+                'topic_queue_size':    5,
+                'sync_queue_size':     10,
                 'database_path':       db_path,
                 # Mapping mode: build new keyframes
                 'Mem/IncrementalMemory':    'True',
                 'Mem/InitWMWithAllNodes':   'False',
                 'RGBD/OptimizeFromGraphEnd': 'True',
-                'RGBD/AngularUpdate':         '0.01',
-                'RGBD/LinearUpdate':          '0.01',
+                # Tuning cherry-picked from feature/config-rtab (Tan).
+                # MAPPING differs from localization in three places:
+                #   - MaxFeatures higher (800 vs 400) — denser map
+                #   - MinInliers stricter (20 vs 15) — only confident
+                #     loop closures get added to the graph; a wrong
+                #     loop closure during mapping permanently corrupts
+                #     the .db, whereas in localization a missed match
+                #     just delays the next attempt
+                #   - DetectionRate slower (1 Hz vs 5 Hz) — mapping
+                #     doesn't need fast pose updates, and the slower
+                #     rate gives the loop-closure detector more time
+                #     per candidate
+                #   - No image decimation — laptop has the CPU; full
+                #     resolution gives the .db sharper features for
+                #     future localization
+                # Keyframe density is the most important mapping knob:
+                # 0.1 m / ~6° puts a new node every ~10 cm of travel.
+                # That's the right density for indoor swerve mapping —
+                # too dense bloats the .db and slows loop closure;
+                # too sparse leaves gaps where localization fails.
+                'RGBD/LinearUpdate':          '0.1',
+                'RGBD/AngularUpdate':         '0.1',
+                'Reg/Force3DoF':              'true',
+                'Vis/EstimationType':         '1',
+                'Vis/MinInliers':             '20',
+                'Kp/DetectorStrategy':        '6',
+                'Kp/MaxFeatures':             '800',
+                'Mem/ImagePreDecimation':     '1',
+                'Mem/DepthDecimation':        '1',
+                'Rtabmap/DetectionRate':      '1.0',
+                'Rtabmap/LoopThr':            '0.11',
+                'Mem/STMSize':                '30',
+                'Mem/RehearsalSimilarity':    '0.6',
+                'RGBD/ProximityBySpace':      'true',
+                'RGBD/ProximityByTime':       'true',
+                'RGBD/ProximityMaxGraphDepth': '50',
+                'Optimizer/Strategy':         '1',
+                'Optimizer/Iterations':       '20',
+                'Optimizer/Robust':           'true',
+                'Rtabmap/PublishStats':       'true',
+                'Rtabmap/PublishLastSignature': 'true',
             }],
             remappings=[
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
