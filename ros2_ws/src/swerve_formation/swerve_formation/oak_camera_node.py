@@ -38,6 +38,7 @@ Tunable via ROS parameters:
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 
 import depthai as dai
@@ -255,6 +256,15 @@ class OakCameraNode(Node):
                     f'rgb_K diag={rgb_K[0,0]:.1f},{rgb_K[1,1]:.1f}'
                 )
 
+                # Sleep between tryGet polls. Without it the loop pegs a
+                # full CPU core hammering tryGet() and starves the depthai
+                # USB transport thread (which needs the GIL to deliver
+                # frames). Symptom on Pi 4: oak_camera_node says
+                # "pipeline running" but never publishes a single frame,
+                # at any fps. 1 ms keeps poll latency well under any
+                # realistic frame interval (≥33 ms at 30 fps) while
+                # dropping CPU from ~100 % to a few percent.
+                poll_sleep = 0.001
                 while not self._stop_evt.is_set() and pipeline.isRunning():
                     rgb_frame = rgb_q.tryGet()
                     if rgb_frame is not None:
@@ -268,6 +278,7 @@ class OakCameraNode(Node):
                             self._publish_depth(dpt_frame, dpt_K)
                         except Exception as e:
                             self.get_logger().warning(f'depth publish error: {e}')
+                    time.sleep(poll_sleep)
         except Exception as e:
             self.get_logger().error(f'pipeline failed: {e}')
 
