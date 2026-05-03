@@ -450,33 +450,13 @@ What to look for:
 
 ---
 
-## 15. (Later) Switch to runtime localization
+## 15. Next step — runtime localization
 
-Once you have a `.db` you're happy with, switch to localization
-mode. Same 4-terminal layout.
-
-T1 (still SSH'd to pi2): the sensor launch from Step 3 also serves
-localization. Restart it if you stopped it.
-
-T2 (after Step 12 stopped the mapping launch):
-```bash
-ros2 launch swerve_bringup rtabmap_laptop_localization.launch.py \
-    robot_id:=tb3_1 \
-    db_path:=~/maps/tb3_1_room.db
-```
-
-Verify in T4:
-```bash
-ros2 topic hz /tb3_1/slam/pose      # 1–3 Hz once localized
-ros2 topic echo /tb3_1/ekf/odom     # smooth, drift-corrected
-```
-
-**Initial localization takes 5–30 s** while RTAB-Map scans the
-map for a visual match. Place the robot inside the area you
-mapped. The strongest "it's working" check: pick the robot up
-and put it back down 30 cm away — the EKF pose should snap
-within a few seconds (only SLAM can do that — wheel-only EKF
-can't see a teleport).
+Mapping is done. Now you have a `.db` you can use for runtime
+localization. Follow `LOCALIZATION_RUN_LAPTOP.md` — separate guide
+because the procedure has its own verification flow ("how do I
+know the robot is actually localized?") that doesn't belong in a
+mapping document.
 
 ---
 
