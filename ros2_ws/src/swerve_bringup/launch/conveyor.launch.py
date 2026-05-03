@@ -1,7 +1,9 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
-from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 def _parse_xy_list(s: str):
@@ -34,6 +36,11 @@ def launch_setup(context, *args, **kwargs):
     my_offset         = _parse_xy_list(LaunchConfiguration('my_offset').perform(context))
     neighbor_offsets  = _parse_xy_list(LaunchConfiguration('neighbor_offsets').perform(context))
     offset_init_mode  = LaunchConfiguration('offset_init_mode').perform(context)
+    db_path           = LaunchConfiguration('db_path').perform(context)
+    fps               = LaunchConfiguration('fps').perform(context)
+    cam_x             = LaunchConfiguration('cam_x').perform(context)
+    cam_y             = LaunchConfiguration('cam_y').perform(context)
+    cam_z             = LaunchConfiguration('cam_z').perform(context)
 
     if not my_offset:
         my_offset = [0.0, 0.0]
@@ -87,13 +94,23 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # SLAM (stub; replace with rtabmap_ros launch integration)
-        Node(
-            package='swerve_formation',
-            executable='slam_3d_node',
-            name='slam_3d_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
-            output='screen',
+        # Camera + RTAB-Map localization (base and EKF already started above)
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution([
+                FindPackageShare('swerve_bringup'), 'launch',
+                'rtabmap_localization.launch.py',
+            ])),
+            launch_arguments={
+                'robot_id':    robot_id,
+                'usb_port':    usb_port,
+                'db_path':     db_path,
+                'fps':         fps,
+                'cam_x':       cam_x,
+                'cam_y':       cam_y,
+                'cam_z':       cam_z,
+                'enable_base': 'false',
+                'enable_ekf':  'false',
+            }.items(),
         ),
 
         # Leader election — bully algorithm, scales to 3+ robots
@@ -123,15 +140,6 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # OAK-D Lite camera pipeline (degrades gracefully without hardware)
-        Node(
-            package='swerve_formation',
-            executable='ai_camera_node',
-            name='ai_camera_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
-            output='screen',
-        ),
-
         # Pre-run alignment — leader coordinates depth-based spacing correction
         Node(
             package='swerve_formation',
@@ -156,5 +164,12 @@ def generate_launch_description():
         DeclareLaunchArgument('my_offset',        default_value='0.0,0.0'),
         DeclareLaunchArgument('neighbor_offsets', default_value='0.0,0.0'),
         DeclareLaunchArgument('offset_init_mode', default_value='manual'),
+        DeclareLaunchArgument('db_path',          default_value='~/maps/room.db',
+                              description='RTAB-Map database built by rtabmap_mapping.launch.py.'),
+        DeclareLaunchArgument('fps',              default_value='15',
+                              description='Camera FPS passed to oak_camera.launch.py.'),
+        DeclareLaunchArgument('cam_x',            default_value='0.10'),
+        DeclareLaunchArgument('cam_y',            default_value='0.00'),
+        DeclareLaunchArgument('cam_z',            default_value='0.15'),
         OpaqueFunction(function=launch_setup),
     ])
