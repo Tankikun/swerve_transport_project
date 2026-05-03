@@ -53,11 +53,41 @@ ROS_DOMAIN_ID=30
 ROBOT_ID=tb3_1
 ```
 
-`PEERS` should contain your laptop's current LAN IP (the one you
-get when the LAN cable is plugged into the robot router) plus
-`192.168.1.101` and `192.168.1.102` for the two robots. If
-`ros2 topic list` later shows nothing from `tb3_1`, see
-"Discovery troubleshooting" at the bottom.
+`PEERS` (`~/fastdds_peers.xml`) MUST contain THREE classes of
+addresses in `<initialPeersList>`:
+
+1. **`127.0.0.1`** (loopback) — required so two laptop processes
+   (rtabmap + the daemon, or rtabmap + a monitoring `ros2 topic`
+   call) can discover each other. WITHOUT this, rtabmap runs but
+   its output topics (`/tb3_1/rtabmap/info`, `cloud_map`,
+   `localization_pose`, `mapData`) never appear in the laptop's
+   `ros2 topic list`. The mapping itself still works; you just
+   can't monitor live.
+2. `192.168.1.101` (pi1) and `192.168.1.102` (pi2) — so the laptop
+   discovers the robots' nodes.
+3. The laptop's own current LAN IP — must appear in
+   `<metatrafficUnicastLocatorList>` and `<defaultUnicastLocatorList>`,
+   so the robots send discovery replies back to the laptop.
+
+A correct laptop peers file looks like:
+```xml
+<initialPeersList>
+  <locator><udpv4><address>127.0.0.1</address>      <port>14910</port></udpv4></locator>
+  <locator><udpv4><address>127.0.0.1</address>      <port>14912</port></udpv4></locator>
+  <locator><udpv4><address>192.168.1.101</address>  <port>14910</port></udpv4></locator>
+  <locator><udpv4><address>192.168.1.101</address>  <port>14912</port></udpv4></locator>
+  <locator><udpv4><address>192.168.1.102</address>  <port>14910</port></udpv4></locator>
+  <locator><udpv4><address>192.168.1.102</address>  <port>14912</port></udpv4></locator>
+</initialPeersList>
+<metatrafficUnicastLocatorList>
+  <locator><udpv4><address>192.168.1.114</address></udpv4></locator>
+</metatrafficUnicastLocatorList>
+<defaultUnicastLocatorList>
+  <locator><udpv4><address>192.168.1.114</address></udpv4></locator>
+</defaultUnicastLocatorList>
+```
+(Replace `192.168.1.114` with your laptop's actual LAN IP — see
+"Discovery troubleshooting" if you need to find it.)
 
 ---
 
@@ -498,6 +528,17 @@ if old processes pre-date a code update. Restart T1's launch.
 Same as the extrapolation issue — Pi clock slipped. Re-do Step 2,
 then restart T1 (Step 3) so the sensor processes pick up the new
 clock, then restart T2 (Step 8).
+
+### rtabmap is processing (log shows `rtabmap (NN): …`) but `/tb3_1/rtabmap/*` topics don't appear in `ros2 topic list`
+The laptop's `~/fastdds_peers.xml` doesn't include `127.0.0.1`
+in `<initialPeersList>`. Without it, two laptop processes
+(rtabmap + the cli daemon) can't discover each other via UDP
+unicast — they only send discovery to the Pis. Mapping itself
+still works (the camera frames flow Pi→laptop→rtabmap fine via
+the Pi-routed peering), you just can't see rtabmap's outputs
+locally. See the loopback line in the example peers file at the
+top of this guide. After fixing, restart the rtabmap launch
+(Step 8) and the daemon (`ros2 daemon stop ; sleep 2 ; ros2 daemon start`).
 
 ### `rtabmap started` never appears in T2
 - Check T1 — is the Pi sensor launch still running and showing
