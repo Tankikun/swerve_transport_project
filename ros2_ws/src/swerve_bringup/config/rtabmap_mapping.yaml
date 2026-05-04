@@ -56,7 +56,7 @@
     Optimizer/Robust: "true"          # robust kernel for outlier resistance
     
     # Database settings
-    Mem/STMSize: "30"
+    Mem/STMSize: "10"
     Db/TargetVersion: ""              # use latest DB format
     
     # Stats and debug
