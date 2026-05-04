@@ -17,9 +17,10 @@ app = Flask(__name__, static_folder=".")
 CORS(app)
 
 # --- Global state ---
-map_data    = None
-latest_goal = None
-goal_callbacks = []  # functions to call when a new goal is received
+map_data       = None
+overlay_data   = None       # optional second map for visual A/B (e.g. Scaniverse .obj)
+latest_goal    = None
+goal_callbacks = []         # functions to call when a new goal is received
 
 
 # --- Routes ---
@@ -32,10 +33,21 @@ def index():
 
 @app.route("/map")
 def get_map():
-    """Serve the point cloud JSON to the browser"""
+    """Serve the primary point cloud JSON to the browser."""
     if map_data is None:
         return jsonify({"error": "Map not loaded"}), 500
     return jsonify(map_data)
+
+
+@app.route("/map_overlay")
+def get_map_overlay():
+    """Serve a second map as an overlay for visual A/B comparison.
+
+    Returns 204 if no overlay was loaded, so the frontend can branch.
+    """
+    if overlay_data is None:
+        return ("", 204)
+    return jsonify(overlay_data)
 
 
 @app.route("/goal", methods=["POST"])
@@ -90,12 +102,29 @@ def register_goal_callback(fn):
     goal_callbacks.append(fn)
 
 
+# Catch-all static-file route — lets the browser fetch the mesh's .obj /
+# .mtl / .jpg trio (or any other file in this folder) directly. Defined
+# LAST so it doesn't shadow the specific routes above.
+@app.route("/<path:filename>")
+def static_files(filename):
+    return send_from_directory(".", filename)
+
+
 def load_map(path):
     global map_data
     print(f"Loading map: {path}")
     with open(path, "r") as f:
         map_data = json.load(f)
     print(f"Map loaded: {map_data['metadata']['point_count']} points")
+
+
+def load_overlay(path):
+    """Optional second map served on /map_overlay for visual A/B."""
+    global overlay_data
+    print(f"Loading overlay map: {path}")
+    with open(path, "r") as f:
+        overlay_data = json.load(f)
+    print(f"Overlay loaded: {overlay_data['metadata']['point_count']} points")
 
 
 def run(host="0.0.0.0", port=5002):
@@ -106,9 +135,14 @@ def run(host="0.0.0.0", port=5002):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Map visualization server")
-    parser.add_argument("--map",  default="map.json", help="Path to preprocessed map JSON")
-    parser.add_argument("--port", type=int, default=5002, help="Port to serve on")
+    parser.add_argument("--map",     default="map.json",
+                        help="Primary map JSON")
+    parser.add_argument("--overlay", default=None,
+                        help="Optional second map JSON to overlay (for A/B accuracy check)")
+    parser.add_argument("--port",    type=int, default=5002, help="Port to serve on")
     args = parser.parse_args()
 
     load_map(args.map)
+    if args.overlay:
+        load_overlay(args.overlay)
     run(port=args.port)
