@@ -144,7 +144,7 @@ static void fk_from_module_states(const ModuleState modules[4],
   // negation only affects yaw integration. Re-test rotation after
   // re-flashing: cmd_vel.angular.z=+0.5 should now produce a
   // positive yaw delta in /tb3_1/odom matching CCW physical motion.
-  wz = (sum_wz_den > 1e-6f) ? -(sum_wz_num / sum_wz_den) : 0.0f;
+  wz = (sum_wz_den > 1e-6f) ? (sum_wz_num / sum_wz_den) : 0.0f;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
