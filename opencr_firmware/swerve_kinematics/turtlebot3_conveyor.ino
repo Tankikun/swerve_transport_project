@@ -43,7 +43,7 @@
 //   Gyro  ±250 dps→     131 LSB / (deg/s)
 // If you change these in the IMU library, update the conversions below.
 static const float ACC_LSB_TO_MS2  = (1.0f / 16384.0f) * 9.80665f;
-static const float GYRO_LSB_TO_RAD = (1.0f / 131.0f)   * (M_PI / 180.0f);
+static const float GYRO_LSB_TO_RAD = (1.0f / 16.4f) * (M_PI / 180.0f);
 // NOTE: OpenCR's wiring_constants.h already defines DEG_TO_RAD as a macro,
 // so we use a local name (DEG2RAD) to avoid the collision.
 static const float DEG2RAD         = M_PI / 180.0f;
