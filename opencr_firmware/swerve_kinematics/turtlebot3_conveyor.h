@@ -35,8 +35,8 @@
 // W = half the distance between left and right wheel centres
 // r = drive wheel radius
 // ============================================================
-#define HALF_WHEELBASE    0.1225f   // L (metres)
-#define HALF_TRACK_WIDTH  0.1225f   // W (metres)
+#define HALF_WHEELBASE    0.1275f   // L (metres)
+#define HALF_TRACK_WIDTH  0.1275f   // W (metres)
 #define WHEEL_RADIUS      0.03325f  // r (metres)
 
 // ============================================================
