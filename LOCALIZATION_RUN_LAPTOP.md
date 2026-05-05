@@ -121,16 +121,17 @@ Expected — exactly **6 topics**:
 
 If empty, see [Troubleshooting → Discovery](#discovery).
 
-Then launch rtabmap in localization mode (note the `-r odom:=...` override — it stops a feedback loop; see [Why the override](#why-the-override) if curious):
+Then launch rtabmap in localization mode:
 
 ```bash
 ros2 launch swerve_bringup rtabmap_laptop_localization.launch.py \
     robot_id:=tb3_1 \
-    db_path:=~/maps/tb3_1_room.db \
-    --ros-args -r odom:=/tb3_1/odom
+    db_path:=~/maps/tb3_1_room.db
 ```
 
 > **Use `~`, not `$HOME`**, for `db_path` — `os.path.expanduser` only expands `~` when it's the first character of the path.
+
+> **About the odom feedback loop**: the launch defaults to `odom:=/tb3_1/ekf/odom`, which is technically a feedback loop (RTAB-Map's correction → ekf_node → ekf/odom → RTAB-Map's prior). In practice it works fine for verification — the loop gain is small. If you see jumpy poses (loop closures jumping the robot meters at a time), see [Why the override](#why-the-override) for the proper fix. For now, just run the command as written.
 
 Wait for `RTAB-Map started` (or `Initialization complete!`). RTAB-Map then enters "global re-localization" mode — silently scanning the `.db` for a match. **This phase takes 5–30 s during which `/slam/pose` publishes nothing.** Once it finds the first match, you'll see `Localization succeeded` lines and `/slam/pose` starts ticking.
 
@@ -205,13 +206,13 @@ In this order (commands stop first, sensor last so you can still see motion if n
 
 ## Why the override
 
-`--ros-args -r odom:=/tb3_1/odom` tells RTAB-Map to read RAW wheel odometry as its prior — NOT the EKF output. Otherwise:
+The launch file remaps RTAB-Map's `odom` input to `/tb3_1/ekf/odom`. That's a feedback loop — RTAB-Map publishes corrections that feed `ekf_node`, which publishes `ekf/odom`, which feeds back into RTAB-Map's odometry prior:
 
 ```
 RTAB-Map (correction) → ekf_node → /tb3_1/ekf/odom → RTAB-Map (input) → ...   FEEDBACK LOOP
 ```
 
-The launch file's default remap (`odom:=/tb3_1/ekf/odom`) creates exactly that loop. The override breaks it. Per `CLAUDE.md`, the canonical pose flow is:
+The canonical pose flow per `CLAUDE.md` should be:
 
 ```
 /odom (raw) → ekf_node ← /slam/pose (RTAB correction via slam_pose_relay)
@@ -219,7 +220,22 @@ The launch file's default remap (`odom:=/tb3_1/ekf/odom`) creates exactly that l
             /ekf/odom  (authoritative — what Nav2 + laplacian read)
 ```
 
-`slam_pose_relay_node` is not optional — it converts RTAB's `PoseWithCovarianceStamped` to the `PoseStamped` that `ekf_node` subscribes to.
+In practice the loop gain is small and the default works fine for verification. **If you see jumpy poses** (loop closures jumping the robot meters at a time), edit `ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_localization.launch.py` and change the line:
+```python
+('odom', f'/{robot_id}/ekf/odom'),
+```
+to:
+```python
+('odom', f'/{robot_id}/odom'),
+```
+Then rebuild your laptop workspace:
+```bash
+cd ~/swerve_transport_project/ros2_ws && colcon build --packages-select swerve_bringup
+source install/setup.bash
+```
+Re-launch rtabmap. Pose feedback will now use raw wheel odom, breaking the loop.
+
+`slam_pose_relay_node` (auto-started by the launch) is not optional — it converts RTAB's `PoseWithCovarianceStamped` to the `PoseStamped` that `ekf_node` subscribes to.
 
 ---
 
