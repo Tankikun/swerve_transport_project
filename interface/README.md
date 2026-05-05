@@ -38,6 +38,15 @@ tb3_1_room.db                                    (~115 MB, RTAB-Map mapping run)
 
 ---
 
+## Live localization viewer
+
+Once a `map.json` is loaded, `ros_pose_bridge.py` streams the robot's live
+`map -> base_link` TF to the Flask server so the GUI shows a moving robot
+icon and a `LOC: …` health badge. Operator runbook: see
+[`RUN_LOCALIZATION_VIEWER.md`](RUN_LOCALIZATION_VIEWER.md).
+
+---
+
 ## Quick start
 
 ```bash

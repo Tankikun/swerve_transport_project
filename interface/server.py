@@ -10,6 +10,7 @@ Usage:
 import argparse
 import json
 import threading
+import time
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
@@ -21,6 +22,8 @@ map_data       = None
 overlay_data   = None       # optional second map for visual A/B (e.g. Scaniverse .obj)
 latest_goal    = None
 goal_callbacks = []         # functions to call when a new goal is received
+latest_pose         = None  # most recent pose dict from ros_pose_bridge
+latest_pose_recv_t  = 0.0   # server-side wall clock when pose was received
 
 
 # --- Routes ---
@@ -95,6 +98,48 @@ def get_latest_goal():
     if latest_goal is None:
         return jsonify({"status": "no goal set"}), 204
     return jsonify(latest_goal)
+
+
+@app.route("/pose", methods=["POST"])
+def receive_pose():
+    """Receive live robot pose from ros_pose_bridge.py.
+
+    Body schema (see ros_pose_bridge.py docstring):
+        {
+          "robot_id":           "tb3_1",
+          "localized":          true | false,
+          "x": ..., "y": ..., "yaw_rad": ..., "yaw_deg": ...,
+          "frame":              "map",
+          "last_match_age_sec": float | null,
+          "wall_clock_iso":     "..."
+        }
+    """
+    global latest_pose, latest_pose_recv_t
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"error": "no JSON body"}), 400
+    latest_pose = data
+    latest_pose_recv_t = time.time()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/pose", methods=["GET"])
+def get_pose():
+    """Serve the latest robot pose to the GUI.
+
+    Adds a server-side `age_sec` so the browser can decide if the bridge
+    has gone silent (e.g. ros_pose_bridge crashed). When no bridge has
+    ever posted a pose, returns `available: false` so the GUI can show
+    a clear "NO BRIDGE" badge instead of stale data.
+    """
+    if latest_pose is None:
+        return jsonify({"available": False, "reason": "no_bridge_yet"}), 200
+    age_sec = time.time() - latest_pose_recv_t
+    return jsonify({
+        "available": True,
+        "age_sec":   age_sec,
+        **latest_pose,
+    }), 200
 
 
 def register_goal_callback(fn):

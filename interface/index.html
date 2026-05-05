@@ -71,6 +71,14 @@
   .status-pill.connected .dot { background: var(--success); }
   .status-pill.connected { color: var(--success); border-color: var(--success); }
 
+  /* Localization status pill — three states driven by /pose freshness */
+  .status-pill.localized .dot      { background: var(--success); }
+  .status-pill.localized           { color: var(--success); border-color: var(--success); }
+  .status-pill.dead-reckoning .dot { background: #ffaa00; }
+  .status-pill.dead-reckoning      { color: #ffaa00; border-color: #ffaa00; }
+  .status-pill.lost .dot           { background: var(--accent2); }
+  .status-pill.lost                { color: var(--accent2); border-color: var(--accent2); }
+
   /* --- Main Layout --- */
   .workspace {
     display: grid;
@@ -297,6 +305,10 @@
     <div class="status-pill" id="rosPill">
       <span class="dot"></span>
       <span class="ros-text">ROS Disconnected</span>
+    </div>
+    <div class="status-pill" id="locStatus">
+      <span class="dot"></span>
+      <span id="locStatusText">LOC: ...</span>
     </div>
   </div>
 </header>
@@ -1126,6 +1138,170 @@ draw2D = function() {
   ctx2d.fillStyle = "rgba(0,229,160,0.8)";
   ctx2d.font      = "9px 'Space Mono', monospace";
   ctx2d.fillText("ROBOT", cx + 10, cy - 10);
+};
+
+// ================================================
+// LIVE LOCALIZATION (via /pose from ros_pose_bridge.py)
+// ================================================
+// Drives the LOC status pill and a cyan robot icon on both 2D and 3D maps.
+// Decoupled from the rosbridge path above — works even when rosbridge is
+// down, as long as ros_pose_bridge.py is POSTing to the Flask server.
+//
+// /pose JSON shape (see ros_pose_bridge.py docstring):
+//   { available, age_sec, robot_id, localized, x, y, yaw_rad, yaw_deg,
+//     frame, last_match_age_sec, wall_clock_iso }
+
+let livePose       = null;   // latest pose from /pose, or null
+let robotMarker3D  = null;   // THREE.Group cone+disk
+
+async function pollPose() {
+  try {
+    const res  = await fetch("/pose");
+    const data = await res.json();
+    if (data.available) {
+      livePose = data;
+      updateLocStatusPill(data);
+      updateRobotMarker3D(data);
+      // 2D marker is drawn in draw2D() (called on every redraw / animation)
+    } else {
+      livePose = null;
+      setLocStatus("lost", "LOC: NO BRIDGE");
+    }
+  } catch (e) {
+    setLocStatus("lost", "LOC: SERVER DOWN");
+  }
+}
+setInterval(pollPose, 200);
+
+function setLocStatus(cls, text) {
+  const pill = document.getElementById("locStatus");
+  pill.className = "status-pill " + cls;
+  document.getElementById("locStatusText").textContent = text;
+}
+
+function updateLocStatusPill(data) {
+  // Server-side staleness: bridge stopped POSTing more than 2 s ago.
+  if (data.age_sec > 2) {
+    setLocStatus("lost", `LOC: STALE ${data.age_sec.toFixed(1)}s`);
+    return;
+  }
+  if (!data.localized) {
+    setLocStatus("lost", `LOC: SEARCHING ${data.age_sec.toFixed(1)}s`);
+  } else if (data.last_match_age_sec !== null && data.last_match_age_sec > 5) {
+    setLocStatus("dead-reckoning",
+      `LOC: DEAD-RECK ${data.last_match_age_sec.toFixed(1)}s`);
+  } else {
+    setLocStatus("localized",
+      `LOC: LIVE ${data.x.toFixed(2)},${data.y.toFixed(2)}`);
+  }
+}
+
+// 3D marker — cyan cone (apex pointing along ROS +x of robot frame) sitting
+// on a translucent disk at floor height. Coordinate transform mirrors
+// db_to_map_json.py's Z-up -> Y-up axis remap:
+//     ROS x  -> scene x
+//     ROS y  -> scene z
+//     ROS z (=0 for ground robot) -> scene y, but we plant the marker on
+//     the detected floor (mapData.metadata.floor_y) since the robot's base
+//     link is at the ground plane.
+// We also subtract the same centroid offset that update3DMarker uses so the
+// cone aligns with the centered point cloud.
+function updateRobotMarker3D(p) {
+  if (!mapData || !p.localized) {
+    if (robotMarker3D) robotMarker3D.visible = false;
+    return;
+  }
+  const floorY = mapData.metadata.floor_y || 0;
+
+  if (!robotMarker3D) {
+    const grp = new THREE.Group();
+    // Cone: ConeGeometry default points along +y. Rotate -90° about z so
+    // the apex points along +x (ROS forward) in the local frame.
+    const coneGeo = new THREE.ConeGeometry(0.10, 0.30, 12);
+    const coneMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
+    const cone    = new THREE.Mesh(coneGeo, coneMat);
+    cone.rotation.z = -Math.PI / 2;
+    cone.position.x = 0.15;   // apex 0.30/2 ahead of group origin
+    grp.add(cone);
+    // Translucent base disk so the marker reads even when looking straight
+    // down.
+    const diskGeo = new THREE.CircleGeometry(0.12, 24);
+    const diskMat = new THREE.MeshBasicMaterial({
+      color: 0x00e5ff, transparent: true, opacity: 0.5, depthWrite: false,
+    });
+    const disk = new THREE.Mesh(diskGeo, diskMat);
+    disk.rotation.x = -Math.PI / 2;   // lie flat on the floor
+    grp.add(disk);
+    robotMarker3D = grp;
+    scene.add(robotMarker3D);
+  }
+  robotMarker3D.visible = true;
+
+  // Match the centroid offset used by update3DMarker so the cone aligns
+  // with the centered point cloud.
+  const pts = mapData.points;
+  let sumX = 0, sumY = 0, sumZ = 0;
+  for (const pt of pts) { sumX += pt[0]; sumY += pt[1]; sumZ += pt[2]; }
+  const n  = pts.length;
+  const ox = sumX / n, oy = sumY / n, oz = sumZ / n;
+
+  // ROS map -> scene: (x, floor, y) - centroid offset.
+  // +0.05 lifts the disk slightly above the floor grid to avoid z-fighting.
+  robotMarker3D.position.set(
+    p.x - ox,
+    floorY - oy + 0.05,
+    p.y - oz
+  );
+  // ROS yaw is CCW about Z (up). In the scene, "up" is +y, so we rotate
+  // the marker about the Y axis. Sign flips because going from a Z-up
+  // right-handed frame to a Y-up right-handed frame inverts the rotation
+  // direction about the vertical axis.
+  robotMarker3D.rotation.y = -p.yaw_rad;
+}
+
+// 2D marker — patch draw2D so the cyan triangle redraws every frame.
+// Wrapping after the rosbridge patch above means this draws on top.
+const _draw2D_with_robot = draw2D;
+draw2D = function() {
+  _draw2D_with_robot();
+  if (!mapData || !livePose || !livePose.localized) return;
+
+  const meta    = mapData.metadata;
+  const cw      = canvas2d.width, ch = canvas2d.height;
+  const padding = 20;
+
+  // ROS y maps to the scene's "z" (the second floor-plane axis), which is
+  // the same axis the 2D grid indexes by row. So:
+  //   col <- (pose.x - min_x) / resolution
+  //   row <- (pose.y - min_z) / resolution    (min_z is scene-z, = ROS y)
+  const col = Math.floor((livePose.x - meta.min_x) / meta.resolution);
+  const row = Math.floor((livePose.y - meta.min_z) / meta.resolution);
+  if (col < 0 || col >= meta.grid_width || row < 0 || row >= meta.grid_height) {
+    return;
+  }
+  const { cx, cy } = gridToCanvas(col, row, meta, cw, ch, padding);
+
+  const r = 8;
+  ctx2d.save();
+  ctx2d.translate(cx, cy);
+  // Canvas y grows downward, so a CCW yaw about ROS +z (up) corresponds to
+  // a CW rotation in the canvas — invert.
+  ctx2d.rotate(-livePose.yaw_rad);
+  ctx2d.fillStyle = "#00e5ff";
+  ctx2d.beginPath();
+  ctx2d.moveTo( r,        0);          // forward tip
+  ctx2d.lineTo(-r * 0.6,  r * 0.6);    // back-right
+  ctx2d.lineTo(-r * 0.3,  0);          // notch
+  ctx2d.lineTo(-r * 0.6, -r * 0.6);    // back-left
+  ctx2d.closePath();
+  ctx2d.fill();
+  ctx2d.restore();
+
+  ctx2d.fillStyle = "#00e5ff";
+  ctx2d.font      = "11px 'Space Mono', monospace";
+  ctx2d.fillText(
+    `${livePose.robot_id || 'robot'} ${livePose.x.toFixed(2)},${livePose.y.toFixed(2)}`,
+    cx + 10, cy);
 };
 
 // ================================================
