@@ -615,9 +615,10 @@ window.addEventListener("keydown", e => {
   }
 });
 
-// Auto-load the mesh once the page is ready (best-effort; silent if missing).
+// Mesh auto-load DISABLED — only the current db's point cloud is shown.
+// Press M or B to manually load the mesh overlay if/when one is regenerated.
 window.addEventListener("load", () => {
-  loadMeshOverlay("/tb3_1_room_from_db_mesh.obj");
+  // loadMeshOverlay("/tb3_1_room_from_db_mesh.obj");
 });
 
 // Map a normalized height t∈[0,1] to a blue→cyan→green→yellow→red gradient.
