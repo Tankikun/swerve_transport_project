@@ -261,6 +261,38 @@ Until you drive the robot a bit, RTAB-Map hasn't matched, so the cyan markers do
 
 ---
 
+## Step 9.5 — Click to set initial pose (this is the magic step)
+
+Without this step, RTAB-Map has to do a global re-localization search
+through every keyframe in the map — slow and unreliable in real rooms.
+With this step, RTAB-Map gets a hint and converges in 1–2 seconds.
+
+1. **Look at the 2D map on the right** of the GUI. Find where the robot
+   actually is in the room (visually estimate based on landmarks).
+2. **Click the "📍 Set Initial Pose" button** in the header. The button
+   highlights and the cursor turns into a crosshair.
+3. **Click on the 2D map** at the position the robot is currently at.
+   A cyan dot appears.
+4. **Move the mouse** to indicate which way the robot is facing — an
+   arrow extends from the dot showing the yaw.
+5. **Click again** to confirm.
+6. The button briefly shows "✓ Pose sent — RTAB-Map matching…"
+
+Within 1–3 seconds the status pill should turn 🟢 LOC: LIVE and the
+cyan robot marker should appear on the map at your hinted location
+(possibly with a small refinement).
+
+If it doesn't turn green within 5 seconds:
+- Wrong room location — try clicking somewhere else
+- Hint too far from any keyframe — drive the robot a bit so RTAB-Map sees
+  fresh frames near the hint
+- Map and current view differ too much — see Step 4 (regenerate map.json)
+  and ensure the .db is current
+
+To cancel without setting a pose: press Escape, or click the button again.
+
+---
+
 ## Step 10 — T5: Drive the robot until it localizes
 
 In **Terminal 5** (laptop, fresh shell):

@@ -79,6 +79,22 @@
   .status-pill.lost .dot           { background: var(--accent2); }
   .status-pill.lost                { color: var(--accent2); border-color: var(--accent2); }
 
+  /* "Set Initial Pose" tool button — RViz "2D Pose Estimate" equivalent.
+     Idle: outlined accent. Active (placing/yaw): filled accent. */
+  .set-pose-btn {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .set-pose-btn:hover           { background: rgba(0, 229, 255, 0.1); }
+  .set-pose-btn.active          { background: var(--accent); color: var(--bg); }
+
   /* --- Main Layout --- */
   .workspace {
     display: grid;
@@ -298,6 +314,7 @@
 <header>
   <h1>&#9632; Robot Mission Planner</h1>
   <div style="display:flex; gap:10px; align-items:center;">
+    <button id="setPoseBtn" class="set-pose-btn" title="Click to seed RTAB-Map's pose estimate (RViz 2D Pose Estimate equivalent)">&#128205; Set Initial Pose</button>
     <div class="status-pill" id="statusPill">
       <span class="dot"></span>
       <span id="statusText">Awaiting map...</span>
@@ -865,15 +882,56 @@ function draw2D() {
   }
 }
 
-// 2D click handler — only allow clicks on ground cells
+// ================================================
+// SET-INITIAL-POSE TOOL — state machine
+// ================================================
+// IDLE         -> normal goal-setting
+// PLACING      -> next click anchors the position
+// SETTING_YAW  -> mouse moves rotate the arrow; next click confirms + POSTs
+const POSE_MODE = { IDLE: 'idle', PLACING: 'placing', SETTING_YAW: 'setting_yaw' };
+let poseMode         = POSE_MODE.IDLE;
+let pendingPose      = null;   // {x, y, yaw_rad}        (ROS map-frame meters)
+let pendingPosePixel = null;   // {cx, cy}               (canvas pixels for drawing)
+
+// 2D click handler — first checks the pose-tool state machine; if IDLE,
+// falls through to normal goal-setting (only allow clicks on ground cells).
 canvas2d.addEventListener("click", e => {
   if (!mapData) return;
 
-  const rect    = canvas2d.getBoundingClientRect();
-  const cx      = e.clientX - rect.left;
-  const cy      = e.clientY - rect.top;
-  const meta    = mapData.metadata;
-  const { col, row } = canvasToGrid(cx, cy, meta, canvas2d.width, canvas2d.height);
+  const rect = canvas2d.getBoundingClientRect();
+  const cx   = e.clientX - rect.left;
+  const cy   = e.clientY - rect.top;
+  const meta = mapData.metadata;
+  const cw   = canvas2d.width, ch = canvas2d.height;
+  const padding = 20;
+
+  // --- Pose-tool path: PLACING (1st click) ---
+  if (poseMode === POSE_MODE.PLACING) {
+    const grid  = canvasToGrid(cx, cy, meta, cw, ch, padding);
+    if (grid.col < 0 || grid.col >= meta.grid_width ||
+        grid.row < 0 || grid.row >= meta.grid_height) {
+      return;   // outside the map — ignore, stay in PLACING
+    }
+    const world = gridToWorld(grid.col, grid.row, meta);
+    // wx -> ROS x ; wz -> ROS y (the 2nd floor-plane axis; matches /goal
+    // POST body convention used elsewhere in the GUI).
+    pendingPose      = { x: world.wx, y: world.wz, yaw_rad: 0 };
+    pendingPosePixel = { cx, cy };
+    poseMode = POSE_MODE.SETTING_YAW;
+    document.getElementById("setPoseBtn").textContent = "\u{1F4CD} Drag to set yaw…";
+    draw2D();
+    return;
+  }
+
+  // --- Pose-tool path: SETTING_YAW (2nd click confirms + POSTs) ---
+  if (poseMode === POSE_MODE.SETTING_YAW) {
+    // Yaw is already updated by the mousemove handler below.
+    postInitialPose(pendingPose);
+    return;
+  }
+
+  // --- IDLE: existing goal-setting behavior ---
+  const { col, row } = canvasToGrid(cx, cy, meta, cw, ch, padding);
 
   // Bounds check
   if (col < 0 || col >= meta.grid_width || row < 0 || row >= meta.grid_height) return;
@@ -900,6 +958,91 @@ canvas2d.addEventListener("click", e => {
 
   update3DMarker(wx, wy, wz);
   draw2D();
+});
+
+// Mousemove handler — only active during SETTING_YAW. Updates yaw based on
+// drag direction from the anchor click. Canvas y axis is flipped vs ROS y,
+// so we negate dy when computing atan2.
+canvas2d.addEventListener("mousemove", (ev) => {
+  if (poseMode !== POSE_MODE.SETTING_YAW || !pendingPosePixel) return;
+  const rect = canvas2d.getBoundingClientRect();
+  const cx   = ev.clientX - rect.left;
+  const cy   = ev.clientY - rect.top;
+  const dx   = cx - pendingPosePixel.cx;
+  const dy   = cy - pendingPosePixel.cy;
+  pendingPose.yaw_rad = Math.atan2(-dy, dx);   // canvas y down -> flip
+  draw2D();
+});
+
+// Set-pose button: toggle the tool. ESC also cancels (handler further down).
+document.getElementById("setPoseBtn").addEventListener("click", () => {
+  if (poseMode === POSE_MODE.IDLE) {
+    poseMode = POSE_MODE.PLACING;
+    const btn = document.getElementById("setPoseBtn");
+    btn.classList.add("active");
+    btn.textContent = "\u{1F4CD} Click on map…";
+    canvas2d.style.cursor = "crosshair";
+  } else {
+    cancelInitialPose();
+  }
+});
+
+function cancelInitialPose() {
+  poseMode = POSE_MODE.IDLE;
+  pendingPose = null;
+  pendingPosePixel = null;
+  const btn = document.getElementById("setPoseBtn");
+  btn.classList.remove("active");
+  btn.textContent = "\u{1F4CD} Set Initial Pose";
+  canvas2d.style.cursor = "default";
+  draw2D();
+}
+
+// POST the captured pose to the server, then reset the tool state.
+async function postInitialPose(pose) {
+  try {
+    const res = await fetch("/set_initial_pose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        x:       pose.x,
+        y:       pose.y,
+        yaw_rad: pose.yaw_rad,
+      }),
+    });
+    if (res.ok) {
+      const j = await res.json();
+      console.log("Initial pose queued, seq=", j.seq);
+      flashConfirmation();
+    } else {
+      console.warn("Initial pose POST failed:", res.status);
+    }
+  } catch (e) {
+    console.error("Failed to send initial pose:", e);
+  }
+  cancelInitialPose();
+}
+
+// Briefly flip the button to a confirmation state so the user gets a
+// visible "the click landed" signal even if the LOC pill takes a moment
+// to flip green.
+function flashConfirmation() {
+  const btn  = document.getElementById("setPoseBtn");
+  btn.textContent = "✓ Pose sent — RTAB-Map matching…";
+  btn.style.background = "var(--success)";
+  btn.style.color      = "var(--bg)";
+  btn.style.borderColor = "var(--success)";
+  setTimeout(() => {
+    btn.textContent = "\u{1F4CD} Set Initial Pose";
+    btn.style.background  = "";
+    btn.style.color       = "";
+    btn.style.borderColor = "";
+  }, 2500);
+}
+
+// Escape cancels at any time.
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && poseMode !== POSE_MODE.IDLE) cancelInitialPose();
 });
 
 // ================================================
@@ -1302,6 +1445,51 @@ draw2D = function() {
   ctx2d.fillText(
     `${livePose.robot_id || 'robot'} ${livePose.x.toFixed(2)},${livePose.y.toFixed(2)}`,
     cx + 10, cy);
+};
+
+// 2D overlay — when the user is actively setting an initial pose, draw a
+// cyan dot + arrow at the click point so they can see what they're aiming
+// at. Wrapping draw2D last so this paints over everything else.
+const _draw2D_with_robot_and_init = draw2D;
+draw2D = function() {
+  _draw2D_with_robot_and_init();
+  if (poseMode !== POSE_MODE.SETTING_YAW || !pendingPosePixel) return;
+
+  const cx  = pendingPosePixel.cx;
+  const cy  = pendingPosePixel.cy;
+  const len = 30;
+  // Canvas y grows downward, so flip yaw sign for screen-space angle.
+  const ang = -pendingPose.yaw_rad;
+
+  ctx2d.save();
+  ctx2d.strokeStyle = "#00e5ff";
+  ctx2d.fillStyle   = "#00e5ff";
+  ctx2d.lineWidth   = 2;
+
+  // Anchor circle at click point
+  ctx2d.beginPath();
+  ctx2d.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx2d.fill();
+
+  // Arrow shaft
+  ctx2d.beginPath();
+  ctx2d.moveTo(cx, cy);
+  ctx2d.lineTo(cx + len * Math.cos(ang), cy + len * Math.sin(ang));
+  ctx2d.stroke();
+
+  // Arrow head
+  const tx = cx + len * Math.cos(ang);
+  const ty = cy + len * Math.sin(ang);
+  const headLen = 8;
+  ctx2d.beginPath();
+  ctx2d.moveTo(tx, ty);
+  ctx2d.lineTo(tx - headLen * Math.cos(ang - 0.4),
+               ty - headLen * Math.sin(ang - 0.4));
+  ctx2d.lineTo(tx - headLen * Math.cos(ang + 0.4),
+               ty - headLen * Math.sin(ang + 0.4));
+  ctx2d.closePath();
+  ctx2d.fill();
+  ctx2d.restore();
 };
 
 // ================================================

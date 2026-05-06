@@ -160,6 +160,14 @@ Press `z` 5 times to slow max speed to ~0.07 m/s. Drive a small loop through var
 
 ## Verify it works
 
+> **Pro tip — use the GUI's "Set Initial Pose" tool for fast convergence.**
+> RTAB-Map's global re-localization (without a hint) is unreliable in
+> indoor rooms. The interface GUI (see `interface/RUN_LOCALIZATION_VIEWER.md`)
+> includes a 📍 button that lets you click on the map to tell RTAB-Map
+> where the robot actually is. This is the fast, reliable path. Without
+> it, you may need to drive the robot for 30+ seconds before the first
+> match.
+
 In a NEW terminal (Step 0 env), paste this **single verdict block**:
 
 ```bash
