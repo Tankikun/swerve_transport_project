@@ -31,9 +31,9 @@ the localization quality is the same.
 Usage on the laptop:
 
   source /opt/ros/humble/setup.bash
-  source ~/swerve_transport_project/install/setup.bash
+  source ~/swerve_transport_project/ros2_ws/install/setup.bash
   export ROS_DOMAIN_ID=30
-  export FASTRTPS_DEFAULT_PROFILES_FILE=/home/toodmuk/fastdds_peers.xml
+  export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
 
   ros2 launch swerve_bringup rtabmap_laptop_localization.launch.py \\
       robot_id:=tb3_1 \\
@@ -121,14 +121,25 @@ def launch_setup(context, *args, **kwargs):
                     # thresholds so the first hint-driven match goes
                     # through within 1-3 sec instead of needing a long
                     # global-relocalization fallback.
-                    'Vis/MinInliers':     '10',     # default 20
-                    'Vis/MaxFeatures':    '500',    # more candidates / frame
-                    'Mem/STMSize':        '30',     # short-term memory horizon
-                                                    # for hint propagation
-                    'Bayes/PredictionLC': '0.1 0.36 0.30 0.16 0.062 0.0151 '
-                                          '0.00255 0.000324',
-                    # Loop-closure threshold (lower = more permissive accept).
-                    'Rtabmap/LoopThr':    '0.08',   # default 0.11
+                    'Vis/MinInliers':     '10',     # default 20 — fewer
+                                                    # geometrically-consistent
+                                                    # features required to
+                                                    # accept a transform.
+                    'Mem/STMSize':        '30',     # default 10 — keep more
+                                                    # recent keyframes resident
+                                                    # so a hint near a "newer"
+                                                    # keyframe matches without
+                                                    # disk reload.
+                    # Loop-closure (and re-localization) Bayesian threshold.
+                    # Lower = more permissive accept. Default is 0.11.
+                    'Rtabmap/LoopThr':    '0.08',
+                    # NOTE — params dropped from earlier draft:
+                    #   Vis/MaxFeatures: 500   (was below the 400-feature cap
+                    #     from Kp/MaxFeatures, so a no-op; raise Kp/MaxFeatures
+                    #     in config/rtabmap_localization.yaml if you want more
+                    #     features per frame).
+                    #   Bayes/PredictionLC: same 8 numbers as the rtabmap
+                    #     compiled-in default, so no effect.
                 },
             ],
             remappings=[

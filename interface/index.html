@@ -913,8 +913,14 @@ canvas2d.addEventListener("click", e => {
       return;   // outside the map — ignore, stay in PLACING
     }
     const world = gridToWorld(grid.col, grid.row, meta);
-    // wx -> ROS x ; wz -> ROS y (the 2nd floor-plane axis; matches /goal
-    // POST body convention used elsewhere in the GUI).
+    // db_to_map_json.py packs ROS map-frame coordinates into the JSON like:
+    //   wx -> ROS x   (RTAB-Map x)
+    //   wz -> ROS y   (RTAB-Map y; named "z" in the JSON because the 3D
+    //                  scene applies a Z-up → Y-up axis remap, NOT because
+    //                  this is height)
+    //   wy -> floor   (ROS z; the height of the floor plane, not a
+    //                  floor-plane coord)
+    // For /set_initial_pose we want the pair (ROS_x, ROS_y), i.e. (wx, wz).
     pendingPose      = { x: world.wx, y: world.wz, yaw_rad: 0 };
     pendingPosePixel = { cx, cy };
     poseMode = POSE_MODE.SETTING_YAW;
@@ -991,10 +997,15 @@ function cancelInitialPose() {
   poseMode = POSE_MODE.IDLE;
   pendingPose = null;
   pendingPosePixel = null;
+  canvas2d.style.cursor = "default";
   const btn = document.getElementById("setPoseBtn");
   btn.classList.remove("active");
-  btn.textContent = "\u{1F4CD} Set Initial Pose";
-  canvas2d.style.cursor = "default";
+  // Don't clobber a green confirmation flash — flashConfirmation owns the
+  // text/colors during its 2.5 s window. Only restore button copy when
+  // we're not flashing.
+  if (!btn._flashing) {
+    btn.textContent = "\u{1F4CD} Set Initial Pose";
+  }
   draw2D();
 }
 
@@ -1028,11 +1039,14 @@ async function postInitialPose(pose) {
 // to flip green.
 function flashConfirmation() {
   const btn  = document.getElementById("setPoseBtn");
+  // _flashing tells cancelInitialPose() to leave the button alone.
+  btn._flashing = true;
   btn.textContent = "✓ Pose sent — RTAB-Map matching…";
   btn.style.background = "var(--success)";
   btn.style.color      = "var(--bg)";
   btn.style.borderColor = "var(--success)";
   setTimeout(() => {
+    btn._flashing = false;
     btn.textContent = "\u{1F4CD} Set Initial Pose";
     btn.style.background  = "";
     btn.style.color       = "";
@@ -1305,7 +1319,6 @@ async function pollPose() {
       livePose = data;
       updateLocStatusPill(data);
       updateRobotMarker3D(data);
-      // 2D marker is drawn in draw2D() (called on every redraw / animation)
     } else {
       livePose = null;
       setLocStatus("lost", "LOC: NO BRIDGE");
@@ -1313,6 +1326,10 @@ async function pollPose() {
   } catch (e) {
     setLocStatus("lost", "LOC: SERVER DOWN");
   }
+  // 2D canvas is NOT redrawn on a Three.js animation tick; we have to
+  // drive it here so the cyan robot icon actually tracks pose updates
+  // (instead of being frozen wherever it was first drawn).
+  if (typeof draw2D === 'function') draw2D();
 }
 setInterval(pollPose, 200);
 

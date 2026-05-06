@@ -33,6 +33,10 @@ latest_pose_recv_t  = 0.0   # server-side wall clock when pose was received
 # only acts when `seq` increments past its `last_seen_seq`.
 pending_initial_pose = None       # latest pose hint from GUI, awaiting bridge pickup
 initial_pose_seq     = 0          # monotonic sequence so bridge knows when there's a new one
+# Flask's dev server is multi-threaded by default; protect the
+# read-modify-write on initial_pose_seq + pending_initial_pose against
+# two simultaneous POSTs racing (rare in practice but trivially safe).
+_initial_pose_lock   = threading.Lock()
 
 
 # --- Routes ---
@@ -166,20 +170,23 @@ def set_initial_pose():
     data = request.get_json(silent=True)
     if data is None or "x" not in data or "y" not in data:
         return jsonify({"error": "missing x/y in JSON body"}), 400
-    initial_pose_seq += 1
-    pending_initial_pose = {
-        "seq":      initial_pose_seq,
-        "x":        float(data["x"]),
-        "y":        float(data["y"]),
-        "yaw_rad":  float(data.get("yaw_rad", 0.0)),
-        "frame":    "map",
-        "wall_clock_iso": datetime.now(timezone.utc).isoformat(),
-    }
-    print(f"[server] initial pose hint #{initial_pose_seq}: "
-          f"x={pending_initial_pose['x']:.2f}, "
-          f"y={pending_initial_pose['y']:.2f}, "
-          f"yaw={math.degrees(pending_initial_pose['yaw_rad']):.0f}deg")
-    return jsonify({"status": "queued", "seq": initial_pose_seq})
+    with _initial_pose_lock:
+        initial_pose_seq += 1
+        pending_initial_pose = {
+            "seq":      initial_pose_seq,
+            "x":        float(data["x"]),
+            "y":        float(data["y"]),
+            "yaw_rad":  float(data.get("yaw_rad", 0.0)),
+            "frame":    "map",
+            "wall_clock_iso": datetime.now(timezone.utc).isoformat(),
+        }
+        seq_for_log = initial_pose_seq
+        snapshot    = pending_initial_pose
+    print(f"[server] initial pose hint #{seq_for_log}: "
+          f"x={snapshot['x']:.2f}, "
+          f"y={snapshot['y']:.2f}, "
+          f"yaw={math.degrees(snapshot['yaw_rad']):.0f}deg")
+    return jsonify({"status": "queued", "seq": seq_for_log})
 
 
 @app.route("/set_initial_pose", methods=["GET"])

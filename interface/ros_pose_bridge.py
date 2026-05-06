@@ -68,6 +68,8 @@ turn the status pill red.
 """
 
 import math
+import queue
+import threading
 from datetime import datetime, timezone
 
 import rclpy
@@ -116,9 +118,22 @@ class PoseBridge(Node):
         self._init_pub = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10)
         self._last_seen_init_seq = 0   # only act on strictly higher seqs
+        # On bridge restart we DON'T want to act on a hint queued before we
+        # came up — the user may already have driven away from there or
+        # localization may already have converged. First poll syncs to the
+        # server's current seq so subsequent ticks only react to NEW hints.
+        self._init_seq_synced    = False
 
         # Throttle the "TF not ready yet" warning to once per 5 s.
         self._last_warn_t = 0.0
+
+        # HTTP work runs in a background thread so a slow Flask response
+        # never starves the rclpy timer/subscription callbacks. The queue
+        # holds POST bodies; a sentinel `None` is the worker shutdown signal.
+        self._http_q = queue.Queue(maxsize=4)
+        self._http_thread = threading.Thread(
+            target=self._http_worker, name='pose-http', daemon=True)
+        self._http_thread.start()
 
         self._timer = self.create_timer(1.0 / rate, self._tick)
 
@@ -172,27 +187,51 @@ class PoseBridge(Node):
                     f'robot not localized yet')
                 self._last_warn_t = now_ros
 
+        # Hand the POST body to the worker thread and return immediately.
+        # If the queue is full (Flask is slow / dead), drop the oldest pose
+        # rather than block — losing a single 100 ms-stale frame is fine.
         try:
-            requests.post(self._server_url, json=body, timeout=0.2)
-        except requests.exceptions.RequestException:
-            # Flask not up, network blip, etc. — stay quiet, keep polling.
-            pass
+            self._http_q.put_nowait(body)
+        except queue.Full:
+            try:
+                self._http_q.get_nowait()
+                self._http_q.put_nowait(body)
+            except (queue.Empty, queue.Full):
+                pass
 
-        # ---- Initial-pose hint pickup ----
-        # Poll the GUI's pending hint; on a fresh seq, republish to
-        # /initialpose so RTAB-Map seeds its current estimate at the
-        # user-clicked location.
-        self._poll_initial_pose()
+    # --------------------------------------------------------- HTTP worker
+
+    def _http_worker(self):
+        """Pumps POSTs to /pose and polls /set_initial_pose on a background thread.
+
+        Doing HTTP off the rclpy executor keeps subscription callbacks
+        responsive even when Flask is slow or unreachable (timeouts up to
+        0.5 s + 0.5 s would otherwise stall the timer for ~1 s).
+        """
+        while True:
+            body = self._http_q.get()
+            if body is None:           # shutdown sentinel
+                return
+            try:
+                requests.post(self._server_url, json=body, timeout=0.5)
+            except requests.exceptions.RequestException:
+                pass
+            try:
+                resp = requests.get(self._initial_pose_url, timeout=0.5)
+                self._handle_initial_pose_response(resp)
+            except requests.exceptions.RequestException:
+                pass
 
     # ---------------------------------------------------- initial-pose helper
 
-    def _poll_initial_pose(self):
-        """If server has a new /set_initial_pose hint, publish to /initialpose once."""
-        try:
-            resp = requests.get(self._initial_pose_url, timeout=0.2)
-        except requests.exceptions.RequestException:
-            # Server unreachable — same best-effort policy as the POST path.
-            return
+    def _handle_initial_pose_response(self, resp):
+        """If server has a new /set_initial_pose hint, publish to /initialpose once.
+
+        Called from the HTTP worker thread. rclpy publishers are
+        thread-safe; the only shared state we mutate is
+        `_last_seen_init_seq` and `_init_seq_synced` which are only read
+        and written from this same worker, so no lock needed.
+        """
         if resp.status_code != 200:
             return
         try:
@@ -202,13 +241,25 @@ class PoseBridge(Node):
         if not data.get('available'):
             return
         seq = int(data.get('seq', 0))
+
+        # First successful poll: sync to whatever the server already had.
+        # Without this, a bridge crash + restart would replay the most
+        # recent hint, yanking an already-converged localization.
+        if not self._init_seq_synced:
+            self._last_seen_init_seq = seq
+            self._init_seq_synced    = True
+            self.get_logger().info(
+                f'Initial-pose seq synced to server (seq={seq}); '
+                f'will only act on strictly NEW hints from here.')
+            return
+
         if seq <= self._last_seen_init_seq:
             return  # already published this hint
 
-        x       = float(data.get('x',       0.0))
-        y       = float(data.get('y',       0.0))
-        yaw     = float(data.get('yaw_rad', 0.0))
-        frame   = str(data.get('frame', 'map'))
+        x     = float(data.get('x',       0.0))
+        y     = float(data.get('y',       0.0))
+        yaw   = float(data.get('yaw_rad', 0.0))
+        frame = str(data.get('frame', 'map'))
 
         msg = PoseWithCovarianceStamped()
         msg.header.stamp    = self.get_clock().now().to_msg()
