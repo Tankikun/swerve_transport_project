@@ -41,7 +41,7 @@
     Rtabmap/DetectionRate: "1.0"      # 1 Hz; mapping doesn't need fast updates
     
     # Memory management
-    Mem/STMSize: "30"                 # short-term memory size
+    Mem/STMSize: "10"                 # short-term memory size
     Mem/RehearsalSimilarity: "0.6"    # suppress redundant keyframes
     
     # Proximity detection: enabled during mapping (default)
@@ -55,7 +55,6 @@
     Optimizer/Robust: "true"          # robust kernel for outlier resistance
     
     # Database settings
-    Mem/STMSize: "10"
     Db/TargetVersion: ""              # use latest DB format
     
     # Stats and debug
