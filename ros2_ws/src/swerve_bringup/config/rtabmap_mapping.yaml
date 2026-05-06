@@ -5,8 +5,7 @@
     Mem/IncrementalMemory: "true"
     Mem/InitWMWithAllNodes: "false"
     
-    # Database path (will be created if not present)
-    database_path: "~/maps/lab.db"
+    # Database path is expected to be provided by launch-time override.
     
     # Frame configuration (same as localization)
     frame_id: "base_link"
