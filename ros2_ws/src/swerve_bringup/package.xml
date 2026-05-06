@@ -9,6 +9,8 @@
 
   <exec_depend>swerve_formation</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>depthai_ros_driver</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

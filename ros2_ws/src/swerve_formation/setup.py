@@ -35,7 +35,6 @@ setup(
             'navigation_node = swerve_formation.navigation_node:main',
             'formation_size_node = swerve_formation.formation_size_node:main',
             'ai_camera_node = swerve_formation.ai_camera_node:main',
-            'oak_camera_node = swerve_formation.oak_camera_node:main',
             'slam_pose_relay_node = swerve_formation.slam_pose_relay_node:main',
             'slam_3d_node = swerve_formation.slam_3d_node:main',
             'alignment_node = swerve_formation.alignment_node:main',

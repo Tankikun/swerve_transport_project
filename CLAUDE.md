@@ -13,7 +13,7 @@ A multi-robot cooperative transport system built on ROS 2 Humble. Two (scaling t
 - **Motor IDs**: drive = [7, 3, 5, 1], steering = [8, 4, 6, 2]
 - **Microcontroller**: OpenCR (STM32) — runs custom swerve IK firmware in C++
 - **Compute**: Raspberry Pi 4 (username `pi1`/`pi2`, workspace `~/ros2_ws`)
-- **Camera**: Luxonis OAK-D Lite (RGB + stereo depth) — **only one host connection allowed at a time**; `oak_camera_node` owns the device exclusively via the depthai SDK. Never propose code that opens a second depthai device handle.
+- **Camera**: Luxonis OAK-D Lite (RGB + stereo depth) — **only one host connection allowed at a time**; the `depthai_ros_driver` `Camera` component (loaded into the OAK container in `oak_camera.launch.py`) owns the device exclusively. Never propose code that opens a second depthai device handle.
 - **Dev machine**: ROG-Strix-G513QE, Ubuntu 22.04, ROS 2 Humble, username `tankikun`
 
 ## OpenCR Firmware
@@ -57,8 +57,8 @@ All nodes are Python 3. Always use numpy for matrix math in control loops (Pi 4 
 | Node | Role |
 |---|---|
 | `conveyor_base_node` | Lifecycle node; serial bridge to OpenCR over USB-CDC. Publishes `/{robot_id}/odom` + TF `{robot_id}_odom → {robot_id}_base_link` |
-| `ekf_node` | Extended Kalman filter: prediction from `/{robot_id}/odom`, correction from `/{robot_id}/slam/pose`. Publishes authoritative `/{robot_id}/ekf/odom`. Fixed observation noise `R = diag(0.05, 0.05, 0.02)`. **Only this node reads raw `/odom`.** |
-| `oak_camera_node` | Depthai 3.x camera publisher — RGB + aligned stereo depth. Uses the depthai Python SDK directly. Owns the OAK-D USB device exclusively. Publishes `/{robot_id}/camera/rgb/image_raw`, `/{robot_id}/camera/rgb/camera_info`, `/{robot_id}/camera/depth/image_raw`, `/{robot_id}/camera/depth/camera_info`. Default 15 fps at 640×400, depth aligned to RGB optical frame. |
+| `ekf_node` | Extended Kalman filter: prediction from `/{robot_id}/odom`, correction from `/{robot_id}/slam/pose`. Publishes authoritative `/{robot_id}/ekf/odom`. Fixed observation noise `R = diag(0.05, 0.05, 0.02)`. **In localization (production), this is the sole consumer of raw `/odom`** — rtabmap reads `/ekf/odom` instead. During mapping, rtabmap reads raw `/odom` directly (ekf is typically not running there). |
+| OAK camera (`depthai_ros_driver::Camera` component) | RGB + aligned stereo depth. Loaded into a `ComposableNodeContainer` by `oak_camera.launch.py`, configured by `swerve_bringup/config/depthai_oak_d_lite.yaml`. Owns the OAK-D USB device exclusively. Publishes `/{robot_id}/camera/rgb/image_raw`, `/{robot_id}/camera/rgb/camera_info`, `/{robot_id}/camera/depth/image_raw`, `/{robot_id}/camera/depth/camera_info`. Depth aligned to RGB optical frame. |
 | `ai_camera_node` | Subscribes to published detection topics from `oak_camera_node`. Does NOT open its own depthai device — the OAK-D only allows one host connection. |
 | `slam_pose_relay_node` | Type-conversion glue: converts `/{robot_id}/rtabmap/localization_pose` (`PoseWithCovarianceStamped`) → `/{robot_id}/slam/pose` (`PoseStamped`) for `ekf_node`. Covariance is dropped; `ekf_node` uses a fixed R matrix. Do not remove this node — the message types are incompatible and cannot be fixed with a remap alone. |
 | `laplacian_formation_node` | Rigid-body feedforward + optional Laplacian consensus correction. Publishes `/{robot_id}/cmd_vel` and `/formation/state`. Consensus (`enable_consensus`) is **OFF by default** — see node docstring for why. |
@@ -231,7 +231,7 @@ Workspace source order: ROS 2 base → TurtleBot3 ws → project ws (all in `~/.
 - **Never propose a central master node** — all control must be distributed
 - Use numpy heavily in control loops
 - Formation controller and serial bridge are intentionally separate nodes (allows sim/hardware swap)
-- **OAK-D Lite only allows one host connection.** `oak_camera_node` owns the device. `ai_camera_node` and any other node must subscribe to published ROS topics, not open a depthai device handle directly.
+- **OAK-D Lite only allows one host connection.** The `depthai_ros_driver` Camera component owns the device. `ai_camera_node` and any other node must subscribe to published ROS topics, not open a depthai device handle directly.
 - Consensus correction in `laplacian_formation_node` is **off by default** (`enable_consensus:=false`). Turn it on only after confirming every robot loads the **same** `.db` file. Different databases produce incompatible world frames and the correction silently corrupts the formation.
 - RTAB-Map multi-robot requirement: all robots must localize against **the same `.db`** for `/formation/leader`-gated consensus to be meaningful.
 - **`slam_pose_relay_node` is not redundant glue.** It exists because RTAB-Map publishes `PoseWithCovarianceStamped` and `ekf_node` subscribes to `PoseStamped` — these cannot be bridged with a remap alone. Do not remove it.

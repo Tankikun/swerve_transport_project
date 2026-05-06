@@ -6,9 +6,9 @@ static TF transform. Used standalone for camera-only smoke tests, and
 included by rtabmap_mapping.launch.py / rtabmap_localization.launch.py.
 
 What runs:
-  oak_camera_node       — depthai SDK 3.x publisher (custom, not the
-                           depthai_ros_driver apt package which the
-                           lab apt mirror cannot install reliably)
+  depthai_ros_driver::Camera component (loaded into a
+    ComposableNodeContainer) — RGB + aligned stereo depth.
+    Configured by swerve_bringup/config/depthai_oak_d_lite.yaml.
   static_transform_publisher — base_link → camera optical frame
 
 Coordinate conventions:
@@ -25,13 +25,19 @@ Launch args:
   robot_id            tb3_0 / tb3_1
   cam_x, cam_y, cam_z translation from base_link to optical frame [m]
   fps                 camera publish rate (default 15)
-  rgb_size, depth_size  resolution as 'WxH' (depth must be / 16 wide)
+  rgb_size, depth_size  legacy launch args, currently ignored — resolution
+                       is set in depthai_oak_d_lite.yaml. Declared so
+                       existing callers that pass them don't error out.
 """
 
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode
 
 
 def launch_setup(context, *args, **kwargs):
@@ -40,25 +46,40 @@ def launch_setup(context, *args, **kwargs):
     cam_y      = LaunchConfiguration('cam_y').perform(context)
     cam_z      = LaunchConfiguration('cam_z').perform(context)
     fps        = LaunchConfiguration('fps').perform(context)
-    rgb_size   = LaunchConfiguration('rgb_size').perform(context)
-    depth_size = LaunchConfiguration('depth_size').perform(context)
     suffix     = f'_{robot_id}'
 
     optical_frame = f'{robot_id}_oak_rgb_camera_optical_frame'
 
+    yaml_path = os.path.join(
+        get_package_share_directory('swerve_bringup'),
+        'config', 'depthai_oak_d_lite.yaml',
+    )
+
     return [
-        # ── OAK-D camera publisher ───────────────────────────────────────
-        Node(
-            package='swerve_formation',
-            executable='oak_camera_node',
-            name='oak_camera_node' + suffix,
-            parameters=[{
-                'robot_id':         robot_id,
-                'fps':              int(float(fps)),
-                'rgb_size':         rgb_size,
-                'stereo_size':      depth_size,
-                'use_stereo_align': True,
-            }],
+        # ── OAK-D camera publisher (depthai_ros_driver) ──────────────────
+        # i_tf_prefix matches the static TF child frame below.
+        # i_publish_tf_from_calibration is off because we publish the
+        # measured base→camera transform ourselves; two publishers on the
+        # same edge would clobber each other.
+        ComposableNodeContainer(
+            name='oak_container' + suffix,
+            namespace=robot_id,
+            package='rclcpp_components',
+            executable='component_container',
+            composable_node_descriptions=[
+                ComposableNode(
+                    package='depthai_ros_driver',
+                    plugin='depthai_ros_driver::Camera',
+                    name='oak',
+                    namespace=f'{robot_id}/camera',
+                    parameters=[yaml_path, {
+                        'camera.i_tf_prefix': f'{robot_id}_oak',
+                        'camera.i_publish_tf_from_calibration': False,
+                        'rgb.i_fps': float(fps),
+                        'stereo.i_fps': float(fps),
+                    }],
+                ),
+            ],
             output='screen',
         ),
 
