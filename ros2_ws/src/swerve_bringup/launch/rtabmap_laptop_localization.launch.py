@@ -108,6 +108,27 @@ def launch_setup(context, *args, **kwargs):
                     'RGBD/OptimizeFromGraphEnd': 'True',
                     'RGBD/AngularUpdate':        '0.01',
                     'RGBD/LinearUpdate':         '0.01',
+
+                    # ----- Hint-driven matching tuning -----
+                    # The interface GUI's "Set Initial Pose" tool
+                    # (interface/index.html → /set_initial_pose →
+                    # ros_pose_bridge.py → /initialpose) seeds RTAB-Map's
+                    # current estimate at the user-clicked location. Once
+                    # the search is narrowed to a small map region, the
+                    # default match thresholds are too strict — borderline
+                    # matches that ARE the correct one get rejected and
+                    # convergence stalls. The values below relax those
+                    # thresholds so the first hint-driven match goes
+                    # through within 1-3 sec instead of needing a long
+                    # global-relocalization fallback.
+                    'Vis/MinInliers':     '10',     # default 20
+                    'Vis/MaxFeatures':    '500',    # more candidates / frame
+                    'Mem/STMSize':        '30',     # short-term memory horizon
+                                                    # for hint propagation
+                    'Bayes/PredictionLC': '0.1 0.36 0.30 0.16 0.062 0.0151 '
+                                          '0.00255 0.000324',
+                    # Loop-closure threshold (lower = more permissive accept).
+                    'Rtabmap/LoopThr':    '0.08',   # default 0.11
                 },
             ],
             remappings=[
