@@ -15,15 +15,15 @@ Coordinate conventions:
   base_link            : x forward, y left,   z up    (REP-103 body)
   *_camera_optical     : x right,   y down,   z forward (REP-103 optical)
 
-The default mount offset assumes the OAK-D is bolted on the chassis
-top plate at the robot centre, lens forward, ~10 cm forward of the
-rotation centre and ~15 cm above the floor. **Re-measure for your
-exact mount and override via launch args before mapping** —
-RTAB-Map's pose accuracy depends on this transform being correct.
+Camera mount offsets are per-robot. Measured values live in the
+``_CAMERA_MOUNT`` table below — when a robot is added, measure it
+and append a row. Pass cam_x/cam_y/cam_z launch args to override.
 
 Launch args:
   robot_id            tb3_0 / tb3_1
   cam_x, cam_y, cam_z translation from base_link to optical frame [m]
+                       (leave empty to use the measured value from
+                        _CAMERA_MOUNT keyed by robot_id)
   fps                 camera publish rate (default 15)
   rgb_size, depth_size  legacy launch args, currently ignored — resolution
                        is set in depthai_oak_d_lite.yaml. Declared so
@@ -40,13 +40,39 @@ from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
 
 
+# Measured base_link → camera optical frame translations (meters).
+# Add a row when adding a robot; values come from physical measurement,
+# not from CAD. See CLAUDE.md > "Camera Mount TF".
+_CAMERA_MOUNT = {
+    'tb3_0': (0.128, 0.000, -0.0175),
+    'tb3_1': (0.128, 0.000, -0.0175),
+}
+
+
+def _resolve_cam(robot_id, cam_x, cam_y, cam_z):
+    """Resolve cam_x/y/z from launch args or the per-robot table."""
+    if cam_x or cam_y or cam_z:
+        # Any explicit value → use as-is. Missing components default to 0.
+        return (cam_x or '0.0', cam_y or '0.0', cam_z or '0.0')
+    if robot_id in _CAMERA_MOUNT:
+        x, y, z = _CAMERA_MOUNT[robot_id]
+        return str(x), str(y), str(z)
+    raise RuntimeError(
+        f'No measured camera mount for robot_id={robot_id!r}. Either pass '
+        f'cam_x:= cam_y:= cam_z:= launch args, or add the measurement to '
+        f'_CAMERA_MOUNT in oak_camera.launch.py.'
+    )
+
+
 def launch_setup(context, *args, **kwargs):
     robot_id   = LaunchConfiguration('robot_id').perform(context)
-    cam_x      = LaunchConfiguration('cam_x').perform(context)
-    cam_y      = LaunchConfiguration('cam_y').perform(context)
-    cam_z      = LaunchConfiguration('cam_z').perform(context)
+    cam_x_raw  = LaunchConfiguration('cam_x').perform(context)
+    cam_y_raw  = LaunchConfiguration('cam_y').perform(context)
+    cam_z_raw  = LaunchConfiguration('cam_z').perform(context)
     fps        = LaunchConfiguration('fps').perform(context)
     suffix     = f'_{robot_id}'
+
+    cam_x, cam_y, cam_z = _resolve_cam(robot_id, cam_x_raw, cam_y_raw, cam_z_raw)
 
     optical_frame = f'{robot_id}_oak_rgb_camera_optical_frame'
 
@@ -128,16 +154,18 @@ def generate_launch_description():
             'robot_id', default_value='tb3_0',
             description='Robot ID / namespace (tb3_0, tb3_1, ...)'),
         DeclareLaunchArgument(
-            'cam_x', default_value='0.10',
-            description='Camera optical frame X offset from base_link [m] '
-                        '(default 0.10 = 10 cm forward of rotation centre).'),
+            'cam_x', default_value='',
+            description='Camera optical frame X offset from base_link [m]. '
+                        'Leave empty to use the measured value from '
+                        '_CAMERA_MOUNT keyed by robot_id.'),
         DeclareLaunchArgument(
-            'cam_y', default_value='0.00',
-            description='Camera Y offset from base_link [m].'),
+            'cam_y', default_value='',
+            description='Camera Y offset from base_link [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
-            'cam_z', default_value='0.15',
-            description='Camera Z offset from base_link [m] '
-                        '(default 0.15 = 15 cm above floor).'),
+            'cam_z', default_value='',
+            description='Camera Z offset from base_link [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'fps', default_value='15',
             description='Camera publish rate (Hz). 15 is OAK-D Lite USB2 sweet spot.'),

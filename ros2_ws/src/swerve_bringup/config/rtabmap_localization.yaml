@@ -4,14 +4,13 @@
     # Mode: localization only
     Mem/IncrementalMemory: "false"
     Mem/InitWMWithAllNodes: "true"
-    
-    # Database path must be provided by the launch configuration.
-    
-    # Frame configuration
-    frame_id: "base_link"
-    odom_frame_id: "odom"
+
+    # Database path AND frame_id / odom_frame_id MUST be provided by the
+    # launch configuration. They are per-robot ({robot_id}_base_link,
+    # {robot_id}_odom) and have no safe default — leaving them as
+    # "base_link" / "odom" silently breaks the multi-robot TF tree.
     map_frame_id: "map"
-    
+
     # Subscriptions
     subscribe_depth: true
     subscribe_rgb: true

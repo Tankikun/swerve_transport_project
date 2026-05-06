@@ -132,14 +132,18 @@ def generate_launch_description():
             'fps', default_value='15',
             description='Camera FPS.'),
         DeclareLaunchArgument(
-            'cam_x', default_value='0.10',
-            description='Camera optical frame X offset from base_link [m].'),
+            'cam_x', default_value='',
+            description='Camera optical frame X offset from base_link [m]. '
+                        'Leave empty to use measured value from '
+                        '_CAMERA_MOUNT in oak_camera.launch.py.'),
         DeclareLaunchArgument(
-            'cam_y', default_value='0.00',
-            description='Camera Y offset from base_link [m].'),
+            'cam_y', default_value='',
+            description='Camera Y offset from base_link [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
-            'cam_z', default_value='0.15',
-            description='Camera Z offset from base_link [m].'),
+            'cam_z', default_value='',
+            description='Camera Z offset from base_link [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'enable_base', default_value='true',
             description='Start conveyor_base_node.'),

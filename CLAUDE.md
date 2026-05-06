@@ -68,7 +68,9 @@ All nodes are Python 3. Always use numpy for matrix math in control loops (Pi 4 
 | `alignment_node` | Pre-run depth-based spacing correction. Leader measures depth to payload via OAK-D central ROI, nudges all robots to equal depth, then publishes final offset PoseArray. |
 | `fake_swerve_simulator` | Software-only robot for local nav testing — no hardware needed. |
 
-**Pose data flow**: `/{robot_id}/odom` (raw) → `ekf_node` (prediction) + RTAB-Map → `/{robot_id}/rtabmap/localization_pose` → `slam_pose_relay_node` → `/{robot_id}/slam/pose` → `ekf_node` (correction) → `/{robot_id}/ekf/odom` (authoritative). Nothing reads raw `/odom` except `ekf_node`.
+**Pose data flow (localization, i.e. production runtime)**: `/{robot_id}/odom` (raw) → `ekf_node` (prediction); `ekf_node` publishes `/{robot_id}/ekf/odom` → RTAB-Map (used as a clean prior; the static `.db` prevents feedback drift). RTAB-Map → `/{robot_id}/rtabmap/localization_pose` → `slam_pose_relay_node` → `/{robot_id}/slam/pose` → `ekf_node` (correction) → `/{robot_id}/ekf/odom` (authoritative). Raw `/odom` has exactly one consumer: `ekf_node`.
+
+**Pose data flow (mapping)**: `/{robot_id}/odom` (raw) → RTAB-Map directly. ekf is typically not running. There is no SLAM-correction loop yet — rtabmap is building the `.db`, not consulting it — so raw odom is the right input and matches the `{robot_id}_odom → base_link` TF that `conveyor_base_node` publishes.
 
 **Command data flow**: `/virtual_center/cmd_vel` (formation centre) → `laplacian_formation_node` → `/{robot_id}/cmd_vel` → `conveyor_base_node` → OpenCR.
 
@@ -119,9 +121,23 @@ Each Pi runs an independent RTAB-Map instance in localization-only mode against 
 
 ### Camera Mount TF
 
-A static TF must be published from `{robot_id}_base_link` to `{robot_id}_oak_rgb_camera_optical_frame`. The measured mount values for tb3_1 are: `cam_x=+0.128 m`, `cam_y=0.000 m`, `cam_z=-0.0175 m`. `base_link` is defined at the top of the chassis (where the payload rests), so the camera is 17.5 mm below it. Rotation is the standard ROS optical-from-body convention: `roll=-π/2, pitch=0, yaw=-π/2`.
+A static TF must be published from `{robot_id}_base_link` to `{robot_id}_oak_rgb_camera_optical_frame`. `base_link` is defined at the top of the chassis (where the payload rests). Rotation is the standard ROS optical-from-body convention: `roll=-π/2, pitch=0, yaw=-π/2`.
 
-Errors in this TF translate directly into localization errors. Always measure and override the launch args — never rely on the default placeholder values.
+Translation lives in a per-robot table — `_CAMERA_MOUNT` at the top of `swerve_bringup/launch/oak_camera.launch.py`. Currently:
+
+| robot_id | cam_x [m] | cam_y [m] | cam_z [m] |
+|---|---|---|---|
+| `tb3_0` | +0.128 | 0.000 | -0.0175 |
+| `tb3_1` | +0.128 | 0.000 | -0.0175 |
+
+The cam_z is negative because the camera is 17.5 mm *below* `base_link` (which sits at the payload-rest plane). Both robots share a chassis design, so the same measurement applies to both — re-measure and update the table if a mount is changed.
+
+Resolution rule (in `oak_camera.launch.py:_resolve_cam`):
+- If any of `cam_x`/`cam_y`/`cam_z` is passed explicitly to the launch, those values win (missing components default to 0).
+- Otherwise the launch looks up `_CAMERA_MOUNT[robot_id]`.
+- If `robot_id` is not in the table and no explicit args are given, the launch raises `RuntimeError` rather than silently using a placeholder.
+
+Errors in this TF translate directly into localization errors. When adding a new robot, measure first and add a row.
 
 ### Config Files
 
@@ -234,6 +250,6 @@ Workspace source order: ROS 2 base → TurtleBot3 ws → project ws (all in `~/.
 - Consensus correction in `laplacian_formation_node` is **off by default** (`enable_consensus:=false`). Turn it on only after confirming every robot loads the **same** `.db` file. Different databases produce incompatible world frames and the correction silently corrupts the formation.
 - RTAB-Map multi-robot requirement: all robots must localize against **the same `.db`** for `/formation/leader`-gated consensus to be meaningful.
 - **`slam_pose_relay_node` is not redundant glue.** It exists because RTAB-Map publishes `PoseWithCovarianceStamped` and `ekf_node` subscribes to `PoseStamped` — these cannot be bridged with a remap alone. Do not remove it.
-- **Camera mount TF values must be physically measured** for each robot before mapping. Errors here propagate directly into every downstream pose estimate. Never hardcode the placeholder defaults (`cam_x=0.10, cam_z=0.15`) into production code.
+- **Camera mount TF values must be physically measured** for each robot before mapping. Errors here propagate directly into every downstream pose estimate. Add new robots to `_CAMERA_MOUNT` in `swerve_bringup/launch/oak_camera.launch.py` rather than passing one-off launch args — the table is the single source of truth.
 - `conveyor_base_node` is a **lifecycle node** — it must be configured then activated. The `main()` function handles this automatically, but manual lifecycle management in tests requires explicit `trigger_configure()` + `trigger_activate()` calls.
 - New YAML config files in `swerve_bringup/config/` must be registered in `setup.py` `data_files` and the package must be rebuilt before they are accessible at runtime.

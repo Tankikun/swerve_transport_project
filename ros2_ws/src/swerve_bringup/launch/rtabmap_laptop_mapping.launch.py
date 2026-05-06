@@ -103,7 +103,12 @@ def launch_setup(context, *args, **kwargs):
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
                 ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
                 ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
-                ('odom',              f'/{robot_id}/ekf/odom'),
+                # Raw wheel odom during mapping — there is no SLAM
+                # correction yet, and the {robot_id}_odom→base_link TF
+                # (from conveyor_base_node on the Pi) is also raw, so
+                # topic and TF agree. Localization-mode launches use
+                # /ekf/odom instead.
+                ('odom',              f'/{robot_id}/odom'),
                 # Per-robot scoping (consistent with the on-pi launches).
                 ('localization_pose', f'/{robot_id}/rtabmap/localization_pose'),
                 ('info',              f'/{robot_id}/rtabmap/info'),

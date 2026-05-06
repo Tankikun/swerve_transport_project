@@ -141,7 +141,11 @@ def launch_setup(context, *args, **kwargs):
             ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
             ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
             ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
-            ('odom',              f'/{robot_id}/ekf/odom'),
+            # Raw wheel odom during mapping — there is no SLAM correction
+            # yet, and the {robot_id}_odom→base_link TF is also raw, so
+            # topic and TF agree. (Localization-mode launches use
+            # /ekf/odom instead — see rtabmap_localization.launch.py.)
+            ('odom',              f'/{robot_id}/odom'),
             # Per-robot scoping (mirrors rtabmap_localization.launch.py).
             # Even in mapping mode, namespacing keeps logs / cloud_map /
             # info clean if a second robot ever runs concurrently.
@@ -173,14 +177,18 @@ def generate_launch_description():
             'fps', default_value='15',
             description='Camera FPS.'),
         DeclareLaunchArgument(
-            'cam_x', default_value='0.10',
-            description='Camera optical frame X offset from base_link [m].'),
+            'cam_x', default_value='',
+            description='Camera optical frame X offset from base_link [m]. '
+                        'Leave empty to use measured value from '
+                        '_CAMERA_MOUNT in oak_camera.launch.py.'),
         DeclareLaunchArgument(
-            'cam_y', default_value='0.00',
-            description='Camera Y offset from base_link [m].'),
+            'cam_y', default_value='',
+            description='Camera Y offset from base_link [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
-            'cam_z', default_value='0.15',
-            description='Camera Z offset from base_link [m].'),
+            'cam_z', default_value='',
+            description='Camera Z offset from base_link [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'enable_base', default_value='true',
             description='Start conveyor_base_node. Set false if odometry '

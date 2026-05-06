@@ -114,6 +114,11 @@ def launch_setup(context, *args, **kwargs):
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
                 ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
                 ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
+                # Fused odom — in localization mode ekf_node is the sole
+                # reader of raw /odom. rtabmap consumes ekf's output as a
+                # cleaner search prior. The static .db (Mem/IncrementalMemory
+                # false) anchors visual matches against fixed keyframes, so
+                # the ekf→rtabmap→ekf path does NOT drift.
                 ('odom',              f'/{robot_id}/ekf/odom'),
                 ('localization_pose', f'/{robot_id}/rtabmap/localization_pose'),
                 ('info',              f'/{robot_id}/rtabmap/info'),
