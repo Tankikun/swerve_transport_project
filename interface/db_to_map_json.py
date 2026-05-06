@@ -285,6 +285,13 @@ def main():
                    help='[Group B] Min neighbors required within --rtabmap-noise-radius (e.g. 5).')
     p.add_argument('--rtabmap-prop-radius', type=float, default=None, metavar='F',
                    help='[Group B] Adaptive proportional-radius noise filter factor (try 0.01).')
+
+    # Post-align (calls post_align.py after the main pipeline)
+    p.add_argument('--auto-align', action='store_true',
+                   help='Run post_align.py after building map.json '
+                        '(SOR + auto-rotate walls to grid + density-based 2D grid).')
+    p.add_argument('--flip-x', action='store_true',
+                   help='With --auto-align: also mirror left<->right (X -> -X).')
     args = p.parse_args()
 
     cleanup_dir = None
@@ -316,6 +323,16 @@ def main():
             json.dump(out, f)
         size_mb = os.path.getsize(args.output) / 1024 / 1024
         print(f"[save] wrote {args.output} ({size_mb:.1f} MB)")
+
+        if args.auto_align:
+            import subprocess, sys
+            here = os.path.dirname(os.path.abspath(__file__))
+            cmd = [sys.executable, os.path.join(here, 'post_align.py'),
+                   '--in', args.output, '--out', args.output]
+            if args.flip_x:
+                cmd.append('--flip-x')
+            print(f"\n[auto-align] running: {' '.join(cmd)}")
+            subprocess.check_call(cmd)
 
     finally:
         if cleanup_dir:
