@@ -1,0 +1,62 @@
+# config/rtabmap_mapping.yaml
+/**:
+  ros__parameters:
+    # Mode: incremental mapping (the default, but explicit is better)
+    Mem/IncrementalMemory: "true"
+    Mem/InitWMWithAllNodes: "false"
+    
+    # Database path is expected to be provided by launch-time override.
+    
+    # Frame configuration (same as localization)
+    frame_id: "base_link"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    
+    # Subscriptions
+    subscribe_depth: true
+    subscribe_rgb: true
+    subscribe_odom: true
+    approx_sync: true
+    queue_size: 10
+    
+    # Feature detector: more features for richer map
+    Kp/DetectorStrategy: "6"          # GFTT + ORB
+    Kp/MaxFeatures: "800"             # higher than localization
+    
+    # Image quality: full resolution for mapping
+    Mem/ImagePreDecimation: "1"       # no decimation, laptop can handle it
+    Mem/DepthDecimation: "1"
+    
+    # Keyframe density
+    RGBD/LinearUpdate: "0.1"          # add keyframe every 10 cm
+    RGBD/AngularUpdate: "0.1"         # or every ~6 degrees
+    
+    # Loop closure: stricter inlier requirement during mapping
+    Vis/MinInliers: "20"              # higher than localization (15)
+    Vis/EstimationType: "1"           # PnP
+    Reg/Force3DoF: "true"             # ground plane constraint
+    
+    # Loop closure detection
+    Rtabmap/LoopThr: "0.11"           # default Bayesian threshold
+    Rtabmap/DetectionRate: "1.0"      # 1 Hz; mapping doesn't need fast updates
+    
+    # Memory management
+    Mem/STMSize: "10"                 # short-term memory size
+    Mem/RehearsalSimilarity: "0.6"    # suppress redundant keyframes
+    
+    # Proximity detection: enabled during mapping (default)
+    RGBD/ProximityBySpace: "true"
+    RGBD/ProximityByTime: "true"
+    RGBD/ProximityMaxGraphDepth: "50"
+    
+    # Graph optimization
+    Optimizer/Strategy: "1"           # g2o
+    Optimizer/Iterations: "20"
+    Optimizer/Robust: "true"          # robust kernel for outlier resistance
+    
+    # Database settings
+    Db/TargetVersion: ""              # use latest DB format
+    
+    # Stats and debug
+    Rtabmap/PublishStats: "true"
+    Rtabmap/PublishLastSignature: "true"

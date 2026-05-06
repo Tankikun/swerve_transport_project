@@ -57,6 +57,7 @@ Once mapping is finished and the .db is on the laptop:
 
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -74,31 +75,30 @@ def launch_setup(context, *args, **kwargs):
     db_path = os.path.expanduser(db_path)
     os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
 
+    config_path = os.path.join(
+        get_package_share_directory('swerve_bringup'), 'config', 'rtabmap_mapping.yaml'
+    )
+
     return [
         Node(
             package='rtabmap_slam',
             executable='rtabmap',
             name='rtabmap' + suffix,
             output='screen',
-            parameters=[{
-                'frame_id':            base_link,
-                'odom_frame_id':       odom_frame,
-                'map_frame_id':        'map',
-                'subscribe_depth':     True,
-                'subscribe_rgb':       True,
-                'subscribe_rgbd':      False,
-                'subscribe_scan':      False,
-                'subscribe_scan_cloud': False,
-                'approx_sync':         True,
-                'queue_size':          30,
-                'database_path':       db_path,
-                # Mapping mode: build new keyframes
-                'Mem/IncrementalMemory':    'True',
-                'Mem/InitWMWithAllNodes':   'False',
-                'RGBD/OptimizeFromGraphEnd': 'True',
-                'RGBD/AngularUpdate':         '0.01',
-                'RGBD/LinearUpdate':          '0.01',
-            }],
+            parameters=[
+                config_path,
+                {
+                    # Robot-specific overrides (cannot live in the shared YAML)
+                    'frame_id':             base_link,
+                    'odom_frame_id':        odom_frame,
+                    'database_path':        db_path,
+                    # Not in YAML; keep existing behaviour
+                    'subscribe_rgbd':       False,
+                    'subscribe_scan':       False,
+                    'subscribe_scan_cloud': False,
+                    'RGBD/OptimizeFromGraphEnd': 'True',
+                },
+            ],
             remappings=[
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
                 ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),

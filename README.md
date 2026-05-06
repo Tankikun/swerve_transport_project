@@ -273,11 +273,11 @@ Then sync the source to each Pi. Run both commands from the same terminal (they 
 
 ```bash
 # Deploy to tb3_0
-rsync -av --exclude='__pycache__' \
+rsync -av --delete --exclude='__pycache__' \
   src/ pi1@<tb3_0-ip>:~/turtlebot3_ws/src/
 
 # Deploy to tb3_1
-rsync -av --exclude='__pycache__' \
+rsync -av --delete --exclude='__pycache__' \
   src/ pi1@<tb3_1-ip>:~/turtlebot3_ws/src/
 ```
 

@@ -1,0 +1,76 @@
+# config/depthai_oak_d_lite.yaml
+/**:
+  ros__parameters:
+    
+    # ===== Pipeline composition =====
+    # Which components to enable
+    camera:
+      i_pipeline_type: "RGBD"          # RGB + stereo depth
+      i_nn_type: "none"                # no neural network in this pipeline
+      i_enable_imu: false              # OAK-D Lite has no IMU; set true on OAK-D Pro
+      i_enable_ir: false               # IR projector (OAK-D Pro only)
+      i_enable_sync: true              # hardware-synchronize RGB and depth
+      i_floodlight_brightness: 0       # IR floodlight (OAK-D Pro only)
+      i_laser_dot_brightness: 0        # IR pattern projector (OAK-D Pro only)
+      i_pipeline_dump: false           # debug: dump pipeline graph
+      i_calibration_dump: false        # debug: dump factory calibration
+    
+    # ===== RGB camera =====
+    rgb:
+      i_resolution: "720P"             # 1280x720 native
+      i_fps: 15.0                      # comfortably above 5 Hz RTAB-Map rate
+      i_interleaved: false             # planar output, what ROS expects
+      i_max_q_size: 10                 # output queue depth
+      i_low_bandwidth: false           # MJPEG compression off; we want raw
+      i_publish_topic: true
+      i_enable_preview: false          # downscaled preview not needed
+      i_board_socket_id: 0             # CAM_A on OAK-D Lite
+      i_keep_preview_aspect_ratio: true
+      i_set_isp_scale: true            # enable ISP scaling for proper alignment
+      i_isp_num: 2
+      i_isp_den: 3                     # scales 1080P -> 720P at ISP level
+    
+    # ===== Stereo depth =====
+    stereo:
+      i_align_depth: true              # align depth to RGB camera (CRITICAL)
+      i_output_disparity: false        # we want depth, not disparity
+      i_publish_topic: true
+      i_publish_synced_rect_pair: false  # don't need rectified mono pairs
+      i_subpixel: true                 # subpixel disparity for better depth precision
+      i_subpixel_fractional_bits: 3
+      i_lr_check: true                 # left-right consistency check; rejects bad depths
+      i_lrc_threshold: 5
+      i_extended_disparity: false      # default range, fine for indoor
+      i_depth_filter_size: "5x5"       # spatial filter kernel
+      i_stereo_conf_threshold: 230     # confidence threshold; lower = more depths kept
+      i_max_q_size: 10
+      i_resolution: "400P"             # 640x400 stereo native; matches OAK-D Lite
+      i_fps: 15.0                      # match RGB rate
+      i_board_socket_id: 2             # CAM_C (right mono) on OAK-D Lite
+      i_left_socket_id: 1              # CAM_B (left mono) on OAK-D Lite
+      i_height: 400
+      i_width: 640
+      
+      # Postprocessing filters (improve depth quality, slight CPU cost)
+      i_enable_spatial_filter: true
+      i_enable_temporal_filter: true
+      i_enable_speckle_filter: true
+      i_enable_threshold_filter: true
+      i_threshold_filter_min_range: 200    # mm, below this depth is invalid
+      i_threshold_filter_max_range: 5000   # mm, beyond this depth is invalid
+    
+    # ===== Mono cameras (used by stereo, generally not published separately) =====
+    left:
+      i_publish_topic: false           # not needed for RTAB-Map
+      i_resolution: "400P"
+      i_fps: 15.0
+      i_board_socket_id: 1
+    
+    right:
+      i_publish_topic: false
+      i_resolution: "400P"
+      i_fps: 15.0
+      i_board_socket_id: 2
+    
+    # ===== USB =====
+    use_usb_3: true                    # USB3 superspeed; required for full-res
