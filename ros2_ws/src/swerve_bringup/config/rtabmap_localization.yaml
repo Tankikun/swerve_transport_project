@@ -5,8 +5,7 @@
     Mem/IncrementalMemory: "false"
     Mem/InitWMWithAllNodes: "true"
     
-    # Database path (override per-robot in launch if needed)
-    database_path: "/home/pi1/maps/lab.db"
+    # Database path must be provided by the launch configuration.
     
     # Frame configuration
     frame_id: "base_link"
