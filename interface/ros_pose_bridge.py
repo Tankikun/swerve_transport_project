@@ -6,6 +6,13 @@ plus a moving icon on the 2D and 3D maps. This standalone rclpy node feeds
 both — it looks up the canonical map -> base_link transform at 10 Hz and
 POSTs the result to server.py's /pose endpoint.
 
+It ALSO carries the GUI's "Set Initial Pose" hint downstream: each tick it
+polls server.py's `/set_initial_pose` (GET); when the seq increments past
+`last_seen_seq`, the bridge publishes one `PoseWithCovarianceStamped` to
+`/initialpose` for RTAB-Map to seed its current estimate. This is the
+exact same topic AMCL / RViz "2D Pose Estimate" use, so RTAB-Map converges
+in 1-2 sec instead of doing a slow global re-localization search.
+
 How it works
 ------------
 - TF lookup, NOT a topic subscription.
@@ -21,9 +28,14 @@ How it works
 
 Topics / TF
 -----------
-- TF: `map -> {robot_id}_base_link`        (lookup at 10 Hz, lookup_timeout 0.5 s)
-- Sub: `/{robot_id}/slam/pose`             (PoseStamped — last-match timer only)
-- HTTP: POST `{server_url}` (default http://localhost:5002/pose)
+- TF:  `map -> {robot_id}_base_link`        (lookup at 10 Hz, lookup_timeout 0.5 s)
+- Sub: `/{robot_id}/slam/pose`              (PoseStamped — last-match timer only)
+- Pub: `/initialpose`                       (PoseWithCovarianceStamped — GUI hint
+                                             republished for RTAB-Map; global
+                                             namespace because the rtabmap node
+                                             does not remap initialpose)
+- HTTP: POST `{server_url}`                 (default http://localhost:5002/pose)
+- HTTP: GET  `{initial_pose_url}`           (default http://localhost:5002/set_initial_pose)
 
 Run
 ---
@@ -34,10 +46,11 @@ Run
     # Or override server URL:
     python3 interface/ros_pose_bridge.py --ros-args \
         -p robot_id:=tb3_1 \
-        -p server_url:=http://192.168.1.42:5002/pose
+        -p server_url:=http://192.168.1.42:5002/pose \
+        -p initial_pose_url:=http://192.168.1.42:5002/set_initial_pose
 
-POST body schema
-----------------
+POST body schema (POST -> {server_url})
+---------------------------------------
     {
       "robot_id":           "tb3_1",
       "localized":          true,
@@ -62,7 +75,7 @@ import requests
 from rclpy.duration import Duration
 from rclpy.node import Node
 import tf2_ros
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 
 
 def quat_to_yaw(q):
@@ -75,13 +88,15 @@ class PoseBridge(Node):
     def __init__(self):
         super().__init__('ros_pose_bridge')
 
-        self.declare_parameter('robot_id',  'tb3_1')
-        self.declare_parameter('server_url', 'http://localhost:5002/pose')
-        self.declare_parameter('rate_hz',    10.0)
+        self.declare_parameter('robot_id',         'tb3_1')
+        self.declare_parameter('server_url',       'http://localhost:5002/pose')
+        self.declare_parameter('initial_pose_url', 'http://localhost:5002/set_initial_pose')
+        self.declare_parameter('rate_hz',          10.0)
 
-        self._robot_id   = str(self.get_parameter('robot_id').value)
-        self._server_url = str(self.get_parameter('server_url').value)
-        rate             = float(self.get_parameter('rate_hz').value)
+        self._robot_id         = str(self.get_parameter('robot_id').value)
+        self._server_url       = str(self.get_parameter('server_url').value)
+        self._initial_pose_url = str(self.get_parameter('initial_pose_url').value)
+        rate                   = float(self.get_parameter('rate_hz').value)
 
         self._base_frame  = f'{self._robot_id}_base_link'
         self._tf_buffer   = tf2_ros.Buffer()
@@ -94,6 +109,14 @@ class PoseBridge(Node):
             self._slam_cb, 10)
         self._last_slam_pose_t = None  # ROS clock seconds, or None
 
+        # Initial-pose republisher. The rtabmap node in our launch runs at the
+        # GLOBAL namespace and subscribes to the un-remapped `/initialpose`
+        # (same as RViz's "2D Pose Estimate"), so we publish there — NOT to
+        # `/{robot_id}/initialpose`.
+        self._init_pub = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
+        self._last_seen_init_seq = 0   # only act on strictly higher seqs
+
         # Throttle the "TF not ready yet" warning to once per 5 s.
         self._last_warn_t = 0.0
 
@@ -101,7 +124,8 @@ class PoseBridge(Node):
 
         self.get_logger().info(
             f'ros_pose_bridge: robot_id={self._robot_id} '
-            f'-> {self._server_url} @ {rate:.1f} Hz')
+            f'-> {self._server_url} @ {rate:.1f} Hz '
+            f'(initial-pose poll: {self._initial_pose_url})')
 
     # ----------------------------------------------------------- callbacks
 
@@ -153,6 +177,65 @@ class PoseBridge(Node):
         except requests.exceptions.RequestException:
             # Flask not up, network blip, etc. — stay quiet, keep polling.
             pass
+
+        # ---- Initial-pose hint pickup ----
+        # Poll the GUI's pending hint; on a fresh seq, republish to
+        # /initialpose so RTAB-Map seeds its current estimate at the
+        # user-clicked location.
+        self._poll_initial_pose()
+
+    # ---------------------------------------------------- initial-pose helper
+
+    def _poll_initial_pose(self):
+        """If server has a new /set_initial_pose hint, publish to /initialpose once."""
+        try:
+            resp = requests.get(self._initial_pose_url, timeout=0.2)
+        except requests.exceptions.RequestException:
+            # Server unreachable — same best-effort policy as the POST path.
+            return
+        if resp.status_code != 200:
+            return
+        try:
+            data = resp.json()
+        except ValueError:
+            return
+        if not data.get('available'):
+            return
+        seq = int(data.get('seq', 0))
+        if seq <= self._last_seen_init_seq:
+            return  # already published this hint
+
+        x       = float(data.get('x',       0.0))
+        y       = float(data.get('y',       0.0))
+        yaw     = float(data.get('yaw_rad', 0.0))
+        frame   = str(data.get('frame', 'map'))
+
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp    = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.position.z = 0.0
+        # Yaw-only quaternion (rotation about +z).
+        msg.pose.pose.orientation.x = 0.0
+        msg.pose.pose.orientation.y = 0.0
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+
+        # 6x6 row-major covariance, same defaults RViz's "2D Pose Estimate"
+        # uses: 0.5 m std on x and y, 15 deg (~0.262 rad) std on yaw.
+        # Diagonal entries: var_x=0.25, var_y=0.25, var_yaw≈0.069.
+        cov = [0.0] * 36
+        cov[0]  = 0.25   # x  x
+        cov[7]  = 0.25   # y  y
+        cov[35] = 0.069  # yaw yaw
+        msg.pose.covariance = cov
+
+        self._init_pub.publish(msg)
+        self._last_seen_init_seq = seq
+        self.get_logger().info(
+            f'Published initial pose: x={x:.2f} y={y:.2f} '
+            f'yaw={math.degrees(yaw):.0f}deg, seq={seq}')
 
 
 def main(args=None):

@@ -9,8 +9,10 @@ Usage:
 
 import argparse
 import json
+import math
 import threading
 import time
+from datetime import datetime, timezone
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
@@ -24,6 +26,13 @@ latest_goal    = None
 goal_callbacks = []         # functions to call when a new goal is received
 latest_pose         = None  # most recent pose dict from ros_pose_bridge
 latest_pose_recv_t  = 0.0   # server-side wall clock when pose was received
+
+# Initial-pose hint (RViz "2D Pose Estimate" equivalent — sent by the GUI's
+# 📍 button, picked up by ros_pose_bridge.py and republished to /initialpose
+# for RTAB-Map). The bridge polls /set_initial_pose at its tick rate; it
+# only acts when `seq` increments past its `last_seen_seq`.
+pending_initial_pose = None       # latest pose hint from GUI, awaiting bridge pickup
+initial_pose_seq     = 0          # monotonic sequence so bridge knows when there's a new one
 
 
 # --- Routes ---
@@ -140,6 +149,50 @@ def get_pose():
         "age_sec":   age_sec,
         **latest_pose,
     }), 200
+
+
+@app.route("/set_initial_pose", methods=["POST"])
+def set_initial_pose():
+    """Receive an initial-pose hint from the browser GUI.
+
+    Body: {"x": float, "y": float, "yaw_rad": float}
+    The bridge polls /set_initial_pose (GET) at its tick rate; when seq
+    increments, it publishes one PoseWithCovarianceStamped to /initialpose
+    for RTAB-Map. This is the same topic AMCL / RViz "2D Pose Estimate"
+    use, so RTAB-Map seeds its pose at the hint and converges in 1-2 sec
+    instead of doing a slow global re-localization search.
+    """
+    global pending_initial_pose, initial_pose_seq
+    data = request.get_json(silent=True)
+    if data is None or "x" not in data or "y" not in data:
+        return jsonify({"error": "missing x/y in JSON body"}), 400
+    initial_pose_seq += 1
+    pending_initial_pose = {
+        "seq":      initial_pose_seq,
+        "x":        float(data["x"]),
+        "y":        float(data["y"]),
+        "yaw_rad":  float(data.get("yaw_rad", 0.0)),
+        "frame":    "map",
+        "wall_clock_iso": datetime.now(timezone.utc).isoformat(),
+    }
+    print(f"[server] initial pose hint #{initial_pose_seq}: "
+          f"x={pending_initial_pose['x']:.2f}, "
+          f"y={pending_initial_pose['y']:.2f}, "
+          f"yaw={math.degrees(pending_initial_pose['yaw_rad']):.0f}deg")
+    return jsonify({"status": "queued", "seq": initial_pose_seq})
+
+
+@app.route("/set_initial_pose", methods=["GET"])
+def get_initial_pose():
+    """Polled by ros_pose_bridge.py. Returns current pending pose + seq.
+
+    The bridge tracks its own last_seen_seq; whenever the seq we return
+    here is greater, the bridge publishes one PoseWithCovarianceStamped
+    on /initialpose and updates its last_seen_seq.
+    """
+    if pending_initial_pose is None:
+        return jsonify({"available": False, "seq": 0}), 200
+    return jsonify({"available": True, **pending_initial_pose}), 200
 
 
 def register_goal_callback(fn):
