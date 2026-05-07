@@ -22,25 +22,13 @@
 
   body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
          height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
-         height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 
   header { display: flex; align-items: center; justify-content: space-between;
            padding: 12px 24px; border-bottom: 1px solid var(--border);
            background: var(--panel); flex-shrink: 0; }
   header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
               letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
-  header { display: flex; align-items: center; justify-content: space-between;
-           padding: 12px 24px; border-bottom: 1px solid var(--border);
-           background: var(--panel); flex-shrink: 0; }
-  header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
-              letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
 
-  .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
-                 padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
-                 color: var(--muted); display: flex; align-items: center; gap: 6px; }
-  .status-pill .dot { width: 6px; height: 6px; border-radius: 50%;
-                      background: var(--muted); transition: background 0.3s; }
   .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
                  padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
                  color: var(--muted); display: flex; align-items: center; gap: 6px; }
@@ -48,6 +36,25 @@
                       background: var(--muted); transition: background 0.3s; }
   .status-pill.connected .dot { background: var(--success); }
   .status-pill.connected { color: var(--success); border-color: var(--success); }
+
+  /* Localization status pill — three states driven by /pose freshness */
+  .status-pill.localized .dot      { background: var(--success); }
+  .status-pill.localized           { color: var(--success); border-color: var(--success); }
+  .status-pill.dead-reckoning .dot { background: #ffaa00; }
+  .status-pill.dead-reckoning      { color: #ffaa00; border-color: #ffaa00; }
+  .status-pill.lost .dot           { background: var(--accent2); }
+  .status-pill.lost                { color: var(--accent2); border-color: var(--accent2); }
+
+  /* "Set Initial Pose" tool button — RViz "2D Pose Estimate" equivalent.
+     Idle: outlined accent. Active (placing/yaw): filled accent. */
+  .set-pose-btn {
+    font-family: 'Space Mono', monospace; font-size: 11px;
+    padding: 4px 12px; border-radius: 20px;
+    border: 1px solid var(--accent); background: transparent;
+    color: var(--accent); cursor: pointer; transition: background 0.2s;
+  }
+  .set-pose-btn:hover  { background: rgba(0, 229, 255, 0.1); }
+  .set-pose-btn.active { background: var(--accent); color: var(--bg); }
 
   .workspace { display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr auto;
                gap: 1px; background: var(--border); flex: 1; overflow: hidden; }
@@ -59,17 +66,7 @@
 
   #canvas3d { width: 100%; height: 100%; display: block; cursor: crosshair; }
   #canvas3d.dragging { cursor: grabbing; }
-  #canvas3d { width: 100%; height: 100%; display: block; cursor: crosshair; }
-  #canvas3d.dragging { cursor: grabbing; }
 
-  .bottom-bar { background: var(--panel); padding: 14px 24px;
-                display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
-  .coords { display: flex; gap: 20px; flex: 1; }
-  .coord-item { display: flex; flex-direction: column; gap: 2px; }
-  .coord-item label { font-family: 'Space Mono', monospace; font-size: 9px;
-                      letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
-  .coord-item span { font-family: 'Space Mono', monospace; font-size: 16px;
-                     color: var(--accent); min-width: 80px; }
   .bottom-bar { background: var(--panel); padding: 14px 24px;
                 display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
   .coords { display: flex; gap: 20px; flex: 1; }
@@ -91,25 +88,7 @@
                                             background: var(--accent); cursor: pointer; }
   .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
                 color: var(--accent); min-width: 48px; }
-  .orient-wrap { display: flex; flex-direction: column; gap: 4px; }
-  .orient-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
-                       letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
-  .orient-row { display: flex; align-items: center; gap: 10px; }
-  input[type=range] { -webkit-appearance: none; width: 140px; height: 2px;
-                      background: var(--border); outline: none; border-radius: 2px; }
-  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none;
-                                            width: 14px; height: 14px; border-radius: 50%;
-                                            background: var(--accent); cursor: pointer; }
-  .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
-                color: var(--accent); min-width: 48px; }
 
-  .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
-              text-transform: uppercase; padding: 10px 28px; background: transparent;
-              border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
-              border-radius: 2px; transition: all 0.2s; }
-  .send-btn:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
-  .send-btn:disabled { border-color: var(--muted); color: var(--muted); cursor: not-allowed; }
-  .send-btn.sent { border-color: var(--success); color: var(--success); }
   .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
               text-transform: uppercase; padding: 10px 28px; background: transparent;
               border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
@@ -124,19 +103,7 @@
            font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
            border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  .toast { position: fixed; bottom: 80px; left: 50%;
-           transform: translateX(-50%) translateY(20px); background: var(--panel);
-           border: 1px solid var(--success); color: var(--success);
-           font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
-           border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
-  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  .loading { position: absolute; inset: 0; display: flex; align-items: center;
-             justify-content: center; background: var(--bg); z-index: 50;
-             font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
-             letter-spacing: 0.1em; flex-direction: column; gap: 12px; }
-  .spinner { width: 24px; height: 24px; border: 2px solid var(--border);
-             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   .loading { position: absolute; inset: 0; display: flex; align-items: center;
              justify-content: center; background: var(--bg); z-index: 50;
              font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
@@ -173,7 +140,6 @@
 <div class="workspace">
   <div class="panel" id="panel3d">
     <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
-    <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
     <div class="loading" id="loading3d">
       <div class="spinner"></div>
       <span>Loading point cloud...</span>
@@ -186,13 +152,9 @@
       <div class="coord-item"><label>X (m)</label><span id="valX" class="empty">—</span></div>
       <div class="coord-item"><label>Y (m)</label><span id="valY" class="empty">—</span></div>
       <div class="coord-item"><label>Z (m)</label><span id="valZ" class="empty">—</span></div>
-      <div class="coord-item"><label>X (m)</label><span id="valX" class="empty">—</span></div>
-      <div class="coord-item"><label>Y (m)</label><span id="valY" class="empty">—</span></div>
-      <div class="coord-item"><label>Z (m)</label><span id="valZ" class="empty">—</span></div>
     </div>
 
     <div class="orient-wrap">
-      <label>Orientation (Yaw, deg, 0=+X, CCW+)</label>
       <label>Orientation (Yaw, deg, 0=+X, CCW+)</label>
       <div class="orient-row">
         <input type="range" id="orientSlider" min="0" max="359" value="0">
@@ -211,46 +173,47 @@
 
 <script>
 // =======================================================================
-// Robot Mission Planner — 3D-only build
+// Robot Mission Planner — 3D + localization
 //
-//   • Z-up world frame from the .db (REP-103).
-//   • Single THREE.Scene rendered into one canvas.
-//   • Click on the canvas → raycast against the math floor plane at
-//     world Z = floor_z → world (X, Y, Z) coordinate of the click.
-//   • That coordinate is shown in the bottom bar and is what gets
-//     published to ROS as a goal.
-//   • Orbit controls: drag to rotate, scroll to zoom, double-click to
-//     refit the camera. A short click (no significant drag) sets a
-//     goal — drags are filtered out.
+//   • Z-up world frame from the .db (REP-103, no axis remap).
+//   • Single THREE.Scene, single canvas — all interaction in 3D.
+//   • Click on the floor → raycast → world (X, Y, floor_z) → goal.
+//   • "Set Initial Pose" tool seeds RTAB-Map's pose estimate (RViz
+//     "2D Pose Estimate" equivalent) — click to anchor, move to set
+//     yaw, click again to confirm + POST /set_initial_pose.
+//   • LOC status pill polls /pose every 200 ms — green/yellow/red
+//     based on RTAB-Map's localization freshness.
+//   • A cyan cone shows RTAB-Map's reported robot pose; a green
+//     sphere shows the rosbridge /tb3_0/pose feed (typically EKF).
 // =======================================================================
 
 const ROSBRIDGE_URL    = "ws://localhost:9090";
 const ROBOT_POSE_TOPIC = "/tb3_0/pose";
 const GOAL_TOPIC       = "/goal_pose";
+const POSE_POLL_MS     = 200;
 
 // =======================================================================
 // State
 // =======================================================================
 let mapData     = null;
 let goal        = null;
-let robotPose   = null;
+let robotPose   = null;        // from rosbridge /tb3_0/pose subscription
+let livePose    = null;        // from /pose HTTP polling (RTAB-Map output)
 
 let cloudObj    = null;
 let goalGroup   = null;
-let robotGroup  = null;
+let robotGroup  = null;        // green sphere — rosbridge feed
+let livePoseGroup = null;      // cyan cone+disk — /pose feed
+let pendingPoseGroup = null;   // visual during Set Initial Pose
 
 let cloudCenter = new THREE.Vector3();
 let cloudFitR   = 8;
 
-// =======================================================================
-// Scene + camera + renderer (Z-up, REP-103)
-// =======================================================================
-THREE.Object3D.DefaultUp = new THREE.Vector3(0, 0, 1);
-const scene = new THREE.Scene();
+// Set-initial-pose state machine
+const POSE_MODE = { IDLE: 'idle', PLACING: 'placing', SETTING_YAW: 'setting_yaw' };
+let poseMode    = POSE_MODE.IDLE;
+let pendingPose = null;        // { x, y, yaw_rad } in world (ROS map) frame
 
-const panel3d  = document.getElementById("panel3d");
-const canvas3d = document.getElementById("canvas3d");
-const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
 // =======================================================================
 // Scene + camera + renderer (Z-up, REP-103)
 // =======================================================================
@@ -267,14 +230,8 @@ const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
 camera.up.set(0, 0, 1);
 
 let camSpherical = { theta: 0, phi: 0.85, radius: 8 };
-camera.up.set(0, 0, 1);
-
-let camSpherical = { theta: 0, phi: 0.85, radius: 8 };
 
 function updateCamera() {
-  const r  = camSpherical.radius;
-  const ph = camSpherical.phi;
-  const th = camSpherical.theta;
   const r  = camSpherical.radius;
   const ph = camSpherical.phi;
   const th = camSpherical.theta;
@@ -284,20 +241,9 @@ function updateCamera() {
     cloudCenter.z +  r * Math.cos(ph)
   );
   camera.lookAt(cloudCenter);
-    cloudCenter.x +  r * Math.sin(ph) * Math.sin(th),
-    cloudCenter.y + -r * Math.sin(ph) * Math.cos(th),
-    cloudCenter.z +  r * Math.cos(ph)
-  );
-  camera.lookAt(cloudCenter);
 }
 updateCamera();
-updateCamera();
 
-function fitCamera() {
-  const fovV = camera.fov * Math.PI / 180;
-  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
-  const fov  = Math.min(fovV, fovH);
-  camSpherical.radius = (cloudFitR / Math.sin(fov / 2)) * 1.18;
 function fitCamera() {
   const fovV = camera.fov * Math.PI / 180;
   const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
@@ -324,12 +270,13 @@ window.addEventListener("mouseup", () => {
 });
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
+  if (poseMode === POSE_MODE.SETTING_YAW) return;   // free mouse for yaw setting
   if (!dragMoved) {
     const dx = e.clientX - dragStartPos.x;
     const dy = e.clientY - dragStartPos.y;
     if (Math.hypot(dx, dy) > DRAG_THRESH) dragMoved = true;
   }
-  if (!dragMoved) return;          // movement below threshold — could still become a click
+  if (!dragMoved) return;
   const dx = (e.clientX - dragStartPos.x) * 0.005;
   const dy = (e.clientY - dragStartPos.y) * 0.005;
   camSpherical.theta -= dx;
@@ -344,51 +291,156 @@ canvas3d.addEventListener("wheel", e => {
 canvas3d.addEventListener("dblclick", () => fitCamera());
 
 // =======================================================================
-// Click → world (X, Y) via raycasting against the floor plane
+// Raycasting helpers
 // =======================================================================
 const raycaster = new THREE.Raycaster();
 const ndc       = new THREE.Vector2();
-const hitPoint  = new THREE.Vector3();
 
-canvas3d.addEventListener("click", e => {
-  if (!mapData) return;
-  if (dragMoved) return;           // ignore the click that ended a drag
-
+// Hit point on the floor plane at world Z = floor_z, given a mouse event.
+// Returns null if the ray misses the floor or no map is loaded.
+function raycastFloor(e) {
+  if (!mapData) return null;
   const rect = canvas3d.getBoundingClientRect();
   ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
   ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
   raycaster.setFromCamera(ndc, camera);
 
-  // Math plane at world Z = floor_z, normal pointing up
   const floorZ = mapData.metadata.floor_z || 0;
-  const floorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -floorZ);
-  if (!raycaster.ray.intersectPlane(floorPlane, hitPoint)) return;
+  const plane  = new THREE.Plane(new THREE.Vector3(0, 0, 1), -floorZ);
+  const hit    = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+  return hit;
+}
 
-  // Optional: ignore clicks far outside the mapped area
-  const meta = mapData.metadata;
-  const margin = 0.5;              // 50 cm tolerance outside the bbox
-  if (hitPoint.x < meta.min_x - margin || hitPoint.x > meta.max_x + margin ||
-      hitPoint.y < meta.min_y - margin || hitPoint.y > meta.max_y + margin) {
-    showToast("Click is outside the mapped area");
+// =======================================================================
+// Click handler — branches based on poseMode
+// =======================================================================
+canvas3d.addEventListener("click", e => {
+  if (!mapData) return;
+  if (dragMoved) return;                           // ignore click that ended a drag
+
+  const hit = raycastFloor(e);
+  if (!hit) return;
+
+  const meta   = mapData.metadata;
+  const margin = 0.5;
+  const inside = hit.x >= meta.min_x - margin && hit.x <= meta.max_x + margin &&
+                 hit.y >= meta.min_y - margin && hit.y <= meta.max_y + margin;
+
+  // ---- Pose-tool path: PLACING (1st click) ----
+  if (poseMode === POSE_MODE.PLACING) {
+    if (!inside) return;
+    pendingPose = { x: hit.x, y: hit.y, yaw_rad: 0 };
+    poseMode    = POSE_MODE.SETTING_YAW;
+    document.getElementById("setPoseBtn").textContent = "\u{1F4CD} Move to set yaw, click to confirm";
+    updatePendingPoseMarker();
     return;
   }
 
-  goal = {
-    x: hitPoint.x,
-    y: hitPoint.y,
-    z: floorZ,
-    orientation: parseFloat(document.getElementById("orientSlider").value),
-  };
+  // ---- Pose-tool path: SETTING_YAW (2nd click confirms + POSTs) ----
+  if (poseMode === POSE_MODE.SETTING_YAW) {
+    postInitialPose(pendingPose);
+    return;
+  }
 
-  document.getElementById("valX").textContent = hitPoint.x.toFixed(3);
+  // ---- IDLE: regular goal-setting ----
+  if (!inside) {
+    showToast("Click is outside the mapped area");
+    return;
+  }
+  const floorZ = meta.floor_z || 0;
+  goal = { x: hit.x, y: hit.y, z: floorZ,
+           orientation: parseFloat(document.getElementById("orientSlider").value) };
+
+  document.getElementById("valX").textContent = hit.x.toFixed(3);
   document.getElementById("valX").className   = "";
-  document.getElementById("valY").textContent = hitPoint.y.toFixed(3);
+  document.getElementById("valY").textContent = hit.y.toFixed(3);
   document.getElementById("valY").className   = "";
   document.getElementById("valZ").textContent = floorZ.toFixed(3);
   document.getElementById("valZ").className   = "";
   document.getElementById("sendBtn").disabled = false;
 
   updateGoalMarker();
+});
+
+// =======================================================================
+// Mousemove during SETTING_YAW — projects cursor onto the floor and
+// computes yaw as the angle from the anchor to the cursor.
+// =======================================================================
+canvas3d.addEventListener("mousemove", e => {
+  if (poseMode !== POSE_MODE.SETTING_YAW || !pendingPose) return;
+  const hit = raycastFloor(e);
+  if (!hit) return;
+  pendingPose.yaw_rad = Math.atan2(hit.y - pendingPose.y, hit.x - pendingPose.x);
+  updatePendingPoseMarker();
+});
+
+// =======================================================================
+// Set Initial Pose — button + state-machine helpers
+// =======================================================================
+document.getElementById("setPoseBtn").addEventListener("click", () => {
+  if (poseMode === POSE_MODE.IDLE) {
+    poseMode = POSE_MODE.PLACING;
+    const btn = document.getElementById("setPoseBtn");
+    btn.classList.add("active");
+    btn.textContent = "\u{1F4CD} Click on map to anchor";
+  } else {
+    cancelInitialPose();
+  }
+});
+
+function cancelInitialPose() {
+  poseMode    = POSE_MODE.IDLE;
+  pendingPose = null;
+  removePendingPoseMarker();
+
+  const btn = document.getElementById("setPoseBtn");
+  btn.classList.remove("active");
+  if (!btn._flashing) {
+    btn.textContent = "\u{1F4CD} Set Initial Pose";
+  }
+}
+
+async function postInitialPose(pose) {
+  try {
+    const res = await fetch("/set_initial_pose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: pose.x, y: pose.y, yaw_rad: pose.yaw_rad }),
+    });
+    if (res.ok) {
+      const j = await res.json();
+      console.log("Initial pose queued, seq=", j.seq);
+      flashConfirmation();
+    } else {
+      console.warn("Initial pose POST failed:", res.status);
+      showToast("Set Initial Pose failed: HTTP " + res.status);
+    }
+  } catch (err) {
+    console.error("Failed to send initial pose:", err);
+    showToast("Set Initial Pose failed: " + err.message);
+  }
+  cancelInitialPose();
+}
+
+function flashConfirmation() {
+  const btn = document.getElementById("setPoseBtn");
+  btn._flashing = true;
+  btn.textContent = "✓ Pose sent — RTAB-Map matching…";
+  btn.style.background  = "var(--success)";
+  btn.style.color       = "var(--bg)";
+  btn.style.borderColor = "var(--success)";
+  setTimeout(() => {
+    btn._flashing = false;
+    btn.textContent = "\u{1F4CD} Set Initial Pose";
+    btn.style.background  = "";
+    btn.style.color       = "";
+    btn.style.borderColor = "";
+  }, 2500);
+}
+
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape" && poseMode !== POSE_MODE.IDLE) cancelInitialPose();
 });
 
 // =======================================================================
@@ -425,12 +477,7 @@ function buildCloud(points, colors) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geo.setAttribute("color",    new THREE.BufferAttribute(cols,      3));
-  geo.setAttribute("color",    new THREE.BufferAttribute(cols,      3));
 
-  const mat = new THREE.PointsMaterial({
-    size: 0.02, vertexColors: true, sizeAttenuation: true
-  });
-  cloudObj = new THREE.Points(geo, mat);
   const mat = new THREE.PointsMaterial({
     size: 0.02, vertexColors: true, sizeAttenuation: true
   });
@@ -438,27 +485,23 @@ function buildCloud(points, colors) {
 
   geo.computeBoundingBox();
   geo.boundingBox.getCenter(cloudCenter);
-  geo.boundingBox.getCenter(cloudCenter);
   geo.computeBoundingSphere();
   cloudFitR = geo.boundingSphere.radius;
-  cloudFitR = geo.boundingSphere.radius;
 
   scene.add(cloudObj);
-  scene.add(cloudObj);
 
-  // Reference helpers — a floor-aligned grid and an axes gnomon
+  // Floor grid + axes gnomon at the detected floor height
   const xs = geo.boundingBox.max.x - geo.boundingBox.min.x;
   const ys = geo.boundingBox.max.y - geo.boundingBox.min.y;
   const sz = Math.ceil(Math.max(xs, ys, 4)) + 2;
 
   const floorZ = mapData.metadata.floor_z || 0;
   const grid   = new THREE.GridHelper(sz, sz, 0x44aaff, 0x223344);
-  grid.rotation.x = Math.PI / 2;          // GridHelper is XZ → make XY
+  grid.rotation.x = Math.PI / 2;
   grid.position.set(cloudCenter.x, cloudCenter.y, floorZ);
   scene.add(grid);
 
   const axes = new THREE.AxesHelper(1.0);
-  axes.position.set(cloudCenter.x, cloudCenter.y, floorZ);
   axes.position.set(cloudCenter.x, cloudCenter.y, floorZ);
   scene.add(axes);
 }
@@ -471,6 +514,7 @@ function buildArrow(start, end, color) {
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
 }
 
+// Goal marker — cyan sphere + arrow at goal pose.
 function updateGoalMarker() {
   if (goalGroup) scene.remove(goalGroup);
   if (!goal) return;
@@ -485,7 +529,7 @@ function updateGoalMarker() {
   goalGroup.add(sphere);
 
   const yawRad = goal.orientation * Math.PI / 180;
-  const tip    = new THREE.Vector3(
+  const tip = new THREE.Vector3(
     center.x + Math.cos(yawRad) * 0.50,
     center.y + Math.sin(yawRad) * 0.50,
     center.z
@@ -495,6 +539,8 @@ function updateGoalMarker() {
   scene.add(goalGroup);
 }
 
+// Robot marker (green) — driven by rosbridge /tb3_0/pose subscription
+// (typically the EKF-fused output).
 function updateRobotMarker(pose) {
   if (robotGroup) scene.remove(robotGroup);
   robotGroup = new THREE.Group();
@@ -515,6 +561,83 @@ function updateRobotMarker(pose) {
   robotGroup.add(buildArrow(center, tip, 0x00e5a0));
 
   scene.add(robotGroup);
+}
+
+// Live RTAB-Map pose marker (cyan cone + disk) — driven by /pose HTTP feed.
+// Distinct from the rosbridge marker so divergence between RTAB-Map's
+// localization output and the EKF estimate is visible.
+function updateLivePoseMarker(p) {
+  if (!mapData || !p || !p.localized) {
+    if (livePoseGroup) livePoseGroup.visible = false;
+    return;
+  }
+  const floorZ = mapData.metadata.floor_z || 0;
+
+  if (!livePoseGroup) {
+    livePoseGroup = new THREE.Group();
+    // Cone: ConeGeometry default points along +Y. Rotate -90° about Z so
+    // the apex points along +X (ROS forward) when group rotation.z = 0.
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.10, 0.30, 12),
+      new THREE.MeshBasicMaterial({ color: 0x00e5ff })
+    );
+    cone.rotation.z = -Math.PI / 2;
+    cone.position.x = 0.15;          // base at group origin, apex at +0.30
+    livePoseGroup.add(cone);
+
+    // Translucent disk on the floor under the marker — readable from above
+    const disk = new THREE.Mesh(
+      new THREE.CircleGeometry(0.13, 24),
+      new THREE.MeshBasicMaterial({
+        color: 0x00e5ff, transparent: true, opacity: 0.5, depthWrite: false
+      })
+    );
+    livePoseGroup.add(disk);
+    scene.add(livePoseGroup);
+  }
+  livePoseGroup.visible = true;
+
+  // Z-up direct: ROS map (x, y, floor_z) → scene (x, y, z). +0.02 lifts
+  // the disk slightly above the floor grid to avoid z-fighting.
+  livePoseGroup.position.set(p.x, p.y, floorZ + 0.02);
+  livePoseGroup.rotation.z = p.yaw_rad;
+}
+
+// Pending-pose marker shown during PLACING/SETTING_YAW so the user sees
+// where they're aiming + which way the arrow points before confirming.
+function updatePendingPoseMarker() {
+  if (pendingPoseGroup) {
+    scene.remove(pendingPoseGroup);
+    pendingPoseGroup = null;
+  }
+  if (!pendingPose || !mapData) return;
+
+  const floorZ = mapData.metadata.floor_z || 0;
+  pendingPoseGroup = new THREE.Group();
+
+  // Anchor sphere
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.08, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0x00e5ff })
+  );
+  sphere.position.set(pendingPose.x, pendingPose.y, floorZ + 0.03);
+  pendingPoseGroup.add(sphere);
+
+  // Yaw arrow (only meaningful in SETTING_YAW; in PLACING the yaw is 0)
+  const tx = pendingPose.x + Math.cos(pendingPose.yaw_rad) * 0.50;
+  const ty = pendingPose.y + Math.sin(pendingPose.yaw_rad) * 0.50;
+  const a  = new THREE.Vector3(pendingPose.x, pendingPose.y, floorZ + 0.03);
+  const b  = new THREE.Vector3(tx, ty, floorZ + 0.03);
+  pendingPoseGroup.add(buildArrow(a, b, 0x00e5ff));
+
+  scene.add(pendingPoseGroup);
+}
+
+function removePendingPoseMarker() {
+  if (pendingPoseGroup) {
+    scene.remove(pendingPoseGroup);
+    pendingPoseGroup = null;
+  }
 }
 
 // =======================================================================
@@ -539,7 +662,6 @@ document.getElementById("sendBtn").addEventListener("click", () => {
     btn.textContent = "Sent ✓";
     btn.classList.add("sent");
     showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
-    showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
     setTimeout(() => {
       btn.textContent = "Send Goal";
       btn.classList.remove("sent");
@@ -556,17 +678,7 @@ document.getElementById("sendBtn").addEventListener("click", () => {
     }, 2000);
   }
 });
-    setTimeout(() => {
-      btn.textContent = "Send Goal";
-      btn.style       = "";
-      btn.disabled    = false;
-    }, 2000);
-  }
-});
 
-// =======================================================================
-// Status helpers
-// =======================================================================
 // =======================================================================
 // Status helpers
 // =======================================================================
@@ -578,8 +690,12 @@ function setStatus(connected, text) {
 function setRosStatus(connected) {
   const pill = document.getElementById("rosPill");
   pill.className = "status-pill" + (connected ? " connected" : "");
-  pill.className = "status-pill" + (connected ? " connected" : "");
   pill.querySelector(".ros-text").textContent = connected ? "ROS Connected" : "ROS Disconnected";
+}
+function setLocStatus(cls, text) {
+  const pill = document.getElementById("locStatus");
+  pill.className = "status-pill " + cls;
+  document.getElementById("locStatusText").textContent = text;
 }
 function showToast(msg) {
   const t = document.getElementById("toast");
@@ -589,7 +705,7 @@ function showToast(msg) {
 }
 
 // =======================================================================
-// Rosbridge
+// Rosbridge — robot pose subscription + goal publishing
 // =======================================================================
 const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
 ros.on("connection", () => { setRosStatus(true); subscribeToRobotPose(); });
@@ -623,6 +739,53 @@ function publishGoalToROS(g) {
               orientation: { x: 0,    y: 0,    z: qz, w: qw } }
   });
   goalTopic.publish(msg);
+}
+
+// =======================================================================
+// /pose polling — RTAB-Map's localization output via ros_pose_bridge.py
+//
+// /pose JSON shape (see ros_pose_bridge.py docstring):
+//   { available, age_sec, robot_id, localized, x, y, yaw_rad, yaw_deg,
+//     frame, last_match_age_sec, wall_clock_iso }
+//
+// Decoupled from the rosbridge path above — works even when rosbridge is
+// down, as long as ros_pose_bridge.py is POSTing to the Flask server.
+// =======================================================================
+async function pollPose() {
+  try {
+    const res  = await fetch("/pose");
+    const data = await res.json();
+    if (data.available) {
+      livePose = data;
+      updateLocPill(data);
+      updateLivePoseMarker(data);
+    } else {
+      livePose = null;
+      setLocStatus("lost", "LOC: NO BRIDGE");
+      if (livePoseGroup) livePoseGroup.visible = false;
+    }
+  } catch (e) {
+    setLocStatus("lost", "LOC: SERVER DOWN");
+    if (livePoseGroup) livePoseGroup.visible = false;
+  }
+}
+setInterval(pollPose, POSE_POLL_MS);
+
+function updateLocPill(data) {
+  // Server-side staleness: bridge stopped POSTing > 2 s ago.
+  if (data.age_sec > 2) {
+    setLocStatus("lost", `LOC: STALE ${data.age_sec.toFixed(1)}s`);
+    return;
+  }
+  if (!data.localized) {
+    setLocStatus("lost", `LOC: SEARCHING ${data.age_sec.toFixed(1)}s`);
+  } else if (data.last_match_age_sec !== null && data.last_match_age_sec > 5) {
+    setLocStatus("dead-reckoning",
+      `LOC: DEAD-RECK ${data.last_match_age_sec.toFixed(1)}s`);
+  } else {
+    setLocStatus("localized",
+      `LOC: LIVE ${data.x.toFixed(2)},${data.y.toFixed(2)}`);
+  }
 }
 
 // =======================================================================
@@ -666,10 +829,8 @@ async function loadMap() {
 
 window.addEventListener("load", () => {
   onResize();
-  onResize();
   loadMap();
 });
 </script>
 </body>
 </html>
-
