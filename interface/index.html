@@ -22,13 +22,25 @@
 
   body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
          height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
+         height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 
   header { display: flex; align-items: center; justify-content: space-between;
            padding: 12px 24px; border-bottom: 1px solid var(--border);
            background: var(--panel); flex-shrink: 0; }
   header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
               letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding: 12px 24px; border-bottom: 1px solid var(--border);
+           background: var(--panel); flex-shrink: 0; }
+  header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
+              letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
 
+  .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
+                 padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
+                 color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .status-pill .dot { width: 6px; height: 6px; border-radius: 50%;
+                      background: var(--muted); transition: background 0.3s; }
   .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
                  padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
                  color: var(--muted); display: flex; align-items: center; gap: 6px; }
@@ -47,7 +59,17 @@
 
   #canvas3d { width: 100%; height: 100%; display: block; cursor: crosshair; }
   #canvas3d.dragging { cursor: grabbing; }
+  #canvas3d { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #canvas3d.dragging { cursor: grabbing; }
 
+  .bottom-bar { background: var(--panel); padding: 14px 24px;
+                display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
+  .coords { display: flex; gap: 20px; flex: 1; }
+  .coord-item { display: flex; flex-direction: column; gap: 2px; }
+  .coord-item label { font-family: 'Space Mono', monospace; font-size: 9px;
+                      letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .coord-item span { font-family: 'Space Mono', monospace; font-size: 16px;
+                     color: var(--accent); min-width: 80px; }
   .bottom-bar { background: var(--panel); padding: 14px 24px;
                 display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
   .coords { display: flex; gap: 20px; flex: 1; }
@@ -69,7 +91,25 @@
                                             background: var(--accent); cursor: pointer; }
   .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
                 color: var(--accent); min-width: 48px; }
+  .orient-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .orient-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
+                       letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .orient-row { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { -webkit-appearance: none; width: 140px; height: 2px;
+                      background: var(--border); outline: none; border-radius: 2px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none;
+                                            width: 14px; height: 14px; border-radius: 50%;
+                                            background: var(--accent); cursor: pointer; }
+  .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
+                color: var(--accent); min-width: 48px; }
 
+  .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+              text-transform: uppercase; padding: 10px 28px; background: transparent;
+              border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
+              border-radius: 2px; transition: all 0.2s; }
+  .send-btn:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+  .send-btn:disabled { border-color: var(--muted); color: var(--muted); cursor: not-allowed; }
+  .send-btn.sent { border-color: var(--success); color: var(--success); }
   .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
               text-transform: uppercase; padding: 10px 28px; background: transparent;
               border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
@@ -84,7 +124,19 @@
            font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
            border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast { position: fixed; bottom: 80px; left: 50%;
+           transform: translateX(-50%) translateY(20px); background: var(--panel);
+           border: 1px solid var(--success); color: var(--success);
+           font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
+           border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  .loading { position: absolute; inset: 0; display: flex; align-items: center;
+             justify-content: center; background: var(--bg); z-index: 50;
+             font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+             letter-spacing: 0.1em; flex-direction: column; gap: 12px; }
+  .spinner { width: 24px; height: 24px; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   .loading { position: absolute; inset: 0; display: flex; align-items: center;
              justify-content: center; background: var(--bg); z-index: 50;
              font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
@@ -99,6 +151,10 @@
 <header>
   <h1>&#9632; Robot Mission Planner</h1>
   <div style="display:flex; gap:10px; align-items:center;">
+    <button id="setPoseBtn" class="set-pose-btn"
+            title="Click to seed RTAB-Map's pose estimate (RViz 2D Pose Estimate equivalent)">
+      &#128205; Set Initial Pose
+    </button>
     <div class="status-pill" id="statusPill">
       <span class="dot"></span>
       <span id="statusText">Awaiting map...</span>
@@ -107,11 +163,16 @@
       <span class="dot"></span>
       <span class="ros-text">ROS Disconnected</span>
     </div>
+    <div class="status-pill" id="locStatus">
+      <span class="dot"></span>
+      <span id="locStatusText">LOC: ...</span>
+    </div>
   </div>
 </header>
 
 <div class="workspace">
   <div class="panel" id="panel3d">
+    <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
     <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
     <div class="loading" id="loading3d">
       <div class="spinner"></div>
@@ -125,9 +186,13 @@
       <div class="coord-item"><label>X (m)</label><span id="valX" class="empty">—</span></div>
       <div class="coord-item"><label>Y (m)</label><span id="valY" class="empty">—</span></div>
       <div class="coord-item"><label>Z (m)</label><span id="valZ" class="empty">—</span></div>
+      <div class="coord-item"><label>X (m)</label><span id="valX" class="empty">—</span></div>
+      <div class="coord-item"><label>Y (m)</label><span id="valY" class="empty">—</span></div>
+      <div class="coord-item"><label>Z (m)</label><span id="valZ" class="empty">—</span></div>
     </div>
 
     <div class="orient-wrap">
+      <label>Orientation (Yaw, deg, 0=+X, CCW+)</label>
       <label>Orientation (Yaw, deg, 0=+X, CCW+)</label>
       <div class="orient-row">
         <input type="range" id="orientSlider" min="0" max="359" value="0">
@@ -186,6 +251,15 @@ const scene = new THREE.Scene();
 const panel3d  = document.getElementById("panel3d");
 const canvas3d = document.getElementById("canvas3d");
 const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
+// =======================================================================
+// Scene + camera + renderer (Z-up, REP-103)
+// =======================================================================
+THREE.Object3D.DefaultUp = new THREE.Vector3(0, 0, 1);
+const scene = new THREE.Scene();
+
+const panel3d  = document.getElementById("panel3d");
+const canvas3d = document.getElementById("canvas3d");
+const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x0a0c10, 1);
 
@@ -193,8 +267,14 @@ const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
 camera.up.set(0, 0, 1);
 
 let camSpherical = { theta: 0, phi: 0.85, radius: 8 };
+camera.up.set(0, 0, 1);
+
+let camSpherical = { theta: 0, phi: 0.85, radius: 8 };
 
 function updateCamera() {
+  const r  = camSpherical.radius;
+  const ph = camSpherical.phi;
+  const th = camSpherical.theta;
   const r  = camSpherical.radius;
   const ph = camSpherical.phi;
   const th = camSpherical.theta;
@@ -204,9 +284,20 @@ function updateCamera() {
     cloudCenter.z +  r * Math.cos(ph)
   );
   camera.lookAt(cloudCenter);
+    cloudCenter.x +  r * Math.sin(ph) * Math.sin(th),
+    cloudCenter.y + -r * Math.sin(ph) * Math.cos(th),
+    cloudCenter.z +  r * Math.cos(ph)
+  );
+  camera.lookAt(cloudCenter);
 }
 updateCamera();
+updateCamera();
 
+function fitCamera() {
+  const fovV = camera.fov * Math.PI / 180;
+  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
+  const fov  = Math.min(fovV, fovH);
+  camSpherical.radius = (cloudFitR / Math.sin(fov / 2)) * 1.18;
 function fitCamera() {
   const fovV = camera.fov * Math.PI / 180;
   const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
@@ -334,7 +425,12 @@ function buildCloud(points, colors) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geo.setAttribute("color",    new THREE.BufferAttribute(cols,      3));
+  geo.setAttribute("color",    new THREE.BufferAttribute(cols,      3));
 
+  const mat = new THREE.PointsMaterial({
+    size: 0.02, vertexColors: true, sizeAttenuation: true
+  });
+  cloudObj = new THREE.Points(geo, mat);
   const mat = new THREE.PointsMaterial({
     size: 0.02, vertexColors: true, sizeAttenuation: true
   });
@@ -342,9 +438,12 @@ function buildCloud(points, colors) {
 
   geo.computeBoundingBox();
   geo.boundingBox.getCenter(cloudCenter);
+  geo.boundingBox.getCenter(cloudCenter);
   geo.computeBoundingSphere();
   cloudFitR = geo.boundingSphere.radius;
+  cloudFitR = geo.boundingSphere.radius;
 
+  scene.add(cloudObj);
   scene.add(cloudObj);
 
   // Reference helpers — a floor-aligned grid and an axes gnomon
@@ -359,6 +458,7 @@ function buildCloud(points, colors) {
   scene.add(grid);
 
   const axes = new THREE.AxesHelper(1.0);
+  axes.position.set(cloudCenter.x, cloudCenter.y, floorZ);
   axes.position.set(cloudCenter.x, cloudCenter.y, floorZ);
   scene.add(axes);
 }
@@ -439,6 +539,7 @@ document.getElementById("sendBtn").addEventListener("click", () => {
     btn.textContent = "Sent ✓";
     btn.classList.add("sent");
     showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
+    showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
     setTimeout(() => {
       btn.textContent = "Send Goal";
       btn.classList.remove("sent");
@@ -455,7 +556,17 @@ document.getElementById("sendBtn").addEventListener("click", () => {
     }, 2000);
   }
 });
+    setTimeout(() => {
+      btn.textContent = "Send Goal";
+      btn.style       = "";
+      btn.disabled    = false;
+    }, 2000);
+  }
+});
 
+// =======================================================================
+// Status helpers
+// =======================================================================
 // =======================================================================
 // Status helpers
 // =======================================================================
@@ -466,6 +577,7 @@ function setStatus(connected, text) {
 }
 function setRosStatus(connected) {
   const pill = document.getElementById("rosPill");
+  pill.className = "status-pill" + (connected ? " connected" : "");
   pill.className = "status-pill" + (connected ? " connected" : "");
   pill.querySelector(".ros-text").textContent = connected ? "ROS Connected" : "ROS Disconnected";
 }
@@ -554,8 +666,10 @@ async function loadMap() {
 
 window.addEventListener("load", () => {
   onResize();
+  onResize();
   loadMap();
 });
 </script>
 </body>
 </html>
+
