@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Robot Mission Planner</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #0a0c10;
+    --panel:     #111318;
+    --border:    #1e2330;
+    --accent:    #00e5ff;
+    --accent2:   #ff3f6c;
+    --plan:      #ffd33f;
+    --text:      #e0e6f0;
+    --muted:     #4a5268;
+    --success:   #00e5a0;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
+         height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding: 12px 24px; border-bottom: 1px solid var(--border);
+           background: var(--panel); flex-shrink: 0; }
+  header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
+              letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
+
+  .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
+                 padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
+                 color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .status-pill .dot { width: 6px; height: 6px; border-radius: 50%;
+                      background: var(--muted); transition: background 0.3s; }
+  .status-pill.connected .dot { background: var(--success); }
+  .status-pill.connected { color: var(--success); border-color: var(--success); }
+
+  .status-pill.localized .dot      { background: var(--success); }
+  .status-pill.localized           { color: var(--success); border-color: var(--success); }
+  .status-pill.dead-reckoning .dot { background: #ffaa00; }
+  .status-pill.dead-reckoning      { color: #ffaa00; border-color: #ffaa00; }
+  .status-pill.lost .dot           { background: var(--accent2); }
+  .status-pill.lost                { color: var(--accent2); border-color: var(--accent2); }
+
+  .set-pose-btn {
+    font-family: 'Space Mono', monospace; font-size: 11px;
+    padding: 4px 12px; border-radius: 20px;
+    border: 1px solid var(--accent); background: transparent;
+    color: var(--accent); cursor: pointer; transition: background 0.2s;
+  }
+  .set-pose-btn:hover  { background: rgba(0, 229, 255, 0.1); }
+  .set-pose-btn.active { background: var(--accent); color: var(--bg); }
+
+  /* PLAN-PATH button uses the yellow plan colour so it reads as a
+     distinct action from "Send Goal" (cyan) and "Set Initial Pose" (cyan). */
+  .plan-btn {
+    font-family: 'Space Mono', monospace; font-size: 11px;
+    padding: 4px 12px; border-radius: 20px;
+    border: 1px solid var(--plan); background: transparent;
+    color: var(--plan); cursor: pointer; transition: background 0.2s;
+  }
+  .plan-btn:hover:not(:disabled)   { background: rgba(255, 211, 63, 0.12); }
+  .plan-btn:disabled               { border-color: var(--muted); color: var(--muted); cursor: not-allowed; }
+  .plan-btn.active                 { background: var(--plan); color: var(--bg); }
+
+  .workspace { display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr auto;
+               gap: 1px; background: var(--border); flex: 1; overflow: hidden; }
+  .panel { background: var(--bg); position: relative; overflow: hidden; }
+  .panel-label { position: absolute; top: 12px; left: 16px;
+                 font-family: 'Space Mono', monospace; font-size: 10px;
+                 letter-spacing: 0.12em; text-transform: uppercase;
+                 color: var(--muted); z-index: 10; pointer-events: none; }
+
+  #canvas3d { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #canvas3d.dragging { cursor: grabbing; }
+
+  .bottom-bar { background: var(--panel); padding: 14px 24px;
+                display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
+  .coords { display: flex; gap: 20px; flex: 1; }
+  .coord-item { display: flex; flex-direction: column; gap: 2px; }
+  .coord-item label { font-family: 'Space Mono', monospace; font-size: 9px;
+                      letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .coord-item span { font-family: 'Space Mono', monospace; font-size: 16px;
+                     color: var(--accent); min-width: 80px; }
+  .coord-item span.empty { color: var(--muted); }
+
+  .orient-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .orient-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
+                       letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .orient-row { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { -webkit-appearance: none; width: 140px; height: 2px;
+                      background: var(--border); outline: none; border-radius: 2px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none;
+                                            width: 14px; height: 14px; border-radius: 50%;
+                                            background: var(--accent); cursor: pointer; }
+  .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
+                color: var(--accent); min-width: 48px; }
+
+  .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+              text-transform: uppercase; padding: 10px 28px; background: transparent;
+              border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
+              border-radius: 2px; transition: all 0.2s; }
+  .send-btn:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+  .send-btn:disabled { border-color: var(--muted); color: var(--muted); cursor: not-allowed; }
+  .send-btn.sent { border-color: var(--success); color: var(--success); }
+
+  .plan-summary { font-family: 'Space Mono', monospace; font-size: 10px;
+                  color: var(--muted); letter-spacing: 0.05em; min-width: 180px; }
+  .plan-summary b { color: var(--plan); }
+
+  .toast { position: fixed; bottom: 80px; left: 50%;
+           transform: translateX(-50%) translateY(20px); background: var(--panel);
+           border: 1px solid var(--success); color: var(--success);
+           font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
+           border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .loading { position: absolute; inset: 0; display: flex; align-items: center;
+             justify-content: center; background: var(--bg); z-index: 50;
+             font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+             letter-spacing: 0.1em; flex-direction: column; gap: 12px; }
+  .spinner { width: 24px; height: 24px; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9632; Robot Mission Planner</h1>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <button id="setPoseBtn" class="set-pose-btn"
+            title="Click to seed RTAB-Map's pose estimate (RViz 2D Pose Estimate equivalent)">
+      &#128205; Set Initial Pose
+    </button>
+    <button id="simPoseBtn" class="set-pose-btn"
+            title="Toggle a simulated pose feed at (x=-4.0, y=-1.3) — bypasses /pose polling for visualisation testing">
+      &#127919; Sim Pose
+    </button>
+    <button id="planBtn" class="plan-btn" disabled
+            title="Run grid-based A* from the current localized pose to the placed goal pose">
+      &#9654; Plan Path
+    </button>
+    <div class="status-pill" id="statusPill">
+      <span class="dot"></span>
+      <span id="statusText">Awaiting map...</span>
+    </div>
+    <div class="status-pill" id="rosPill">
+      <span class="dot"></span>
+      <span class="ros-text">ROS Disconnected</span>
+    </div>
+    <div class="status-pill" id="locStatus">
+      <span class="dot"></span>
+      <span id="locStatusText">LOC: ...</span>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <div class="panel" id="panel3d">
+    <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
+    <div class="loading" id="loading3d">
+      <div class="spinner"></div>
+      <span>Loading point cloud...</span>
+    </div>
+    <canvas id="canvas3d"></canvas>
+  </div>
+
+  <div class="bottom-bar">
+    <div class="coords">
+      <div class="coord-item"><label>X (m)</label><span id="valX" class="empty">—</span></div>
+      <div class="coord-item"><label>Y (m)</label><span id="valY" class="empty">—</span></div>
+      <div class="coord-item"><label>Z (m)</label><span id="valZ" class="empty">—</span></div>
+    </div>
+
+    <div class="orient-wrap">
+      <label>Orientation (Yaw, deg, 0=+X, CCW+)</label>
+      <div class="orient-row">
+        <input type="range" id="orientSlider" min="0" max="359" value="0">
+        <span class="orient-val" id="orientVal">0°</span>
+      </div>
+    </div>
+
+    <div class="plan-summary" id="planSummary">
+      no plan · <span style="color:#ff3f6c">click goal + Plan Path</span>
+    </div>
+
+    <button class="send-btn" id="sendBtn" disabled>Send Goal</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+
+<script>
+// =======================================================================
+// Robot Mission Planner — 3D + localization + grid-based A* planning
+//
+//   • Z-up world frame from the .db (REP-103, no axis remap).
+//   • Single THREE.Scene, single canvas — all interaction in 3D.
+//   • Click on the floor → raycast → world (X, Y, floor_z) → goal.
+//   • "Set Initial Pose" tool seeds RTAB-Map's pose estimate (RViz
+//     "2D Pose Estimate" equivalent).
+//   • "Sim Pose" toggles a fixed simulated pose for testing without ROS.
+//   • "Plan Path" triggers /plan with start = current localized pose
+//     (live or sim) and end = the placed goal pose. The server writes
+//     path_plan.json which is polled and rendered as a yellow line +
+//     formation-envelope rings on the floor.
+//   • LOC status pill polls /pose every 200 ms.
+//   • Robot envelope is a wireframe box sized to the formation footprint
+//     (the friend's "two robots side-by-side" model).
+// =======================================================================
+
+const ROSBRIDGE_URL    = "ws://localhost:9090";
+const ROBOT_POSE_TOPIC = "/tb3_0/pose";
+const GOAL_TOPIC       = "/goal_pose";
+const POSE_POLL_MS     = 200;
+const PLAN_POLL_MS     = 750;
+
+// =======================================================================
+// State
+// =======================================================================
+let mapData     = null;
+let goal        = null;
+let robotPose   = null;
+let livePose    = null;
+
+let cloudObj    = null;
+let goalGroup   = null;
+let robotGroup  = null;
+let livePoseGroup = null;
+let pendingPoseGroup = null;
+let planGroup3d = null;          // PLAN: yellow path + envelope rings on the floor
+
+let planData    = null;
+let planSeq     = -1;
+
+let cloudCenter = new THREE.Vector3();
+let cloudFitR   = 8;
+
+const POSE_MODE = {
+  IDLE:        'idle',
+  PLACING:     'placing',
+  SETTING_YAW: 'setting_yaw',
+  GOAL_YAW:    'goal_yaw',
+};
+let poseMode    = POSE_MODE.IDLE;
+let pendingPose = null;
+
+// Robot footprint visualisation
+const ROBOT_LENGTH_M = 0.50;
+const ROBOT_WIDTH_M  = 0.35;
+const ROBOT_HEIGHT_M = 0.10;
+
+// Simulated-pose mode
+const SIM_POSE = Object.freeze({
+  available:          true,
+  localized:          true,
+  robot_id:           'sim',
+  frame:              'map',
+  x:                  -4.0,
+  y:                  -1.3,
+  yaw_rad:            0.0,
+  yaw_deg:            0.0,
+  last_match_age_sec: 0.0,
+});
+let simModeActive = false;
+
+// =======================================================================
+// Scene + camera + renderer (Z-up, REP-103)
+// =======================================================================
+THREE.Object3D.DefaultUp = new THREE.Vector3(0, 0, 1);
+const scene = new THREE.Scene();
+
+const panel3d  = document.getElementById("panel3d");
+const canvas3d = document.getElementById("canvas3d");
+const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x0a0c10, 1);
+
+const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
+camera.up.set(0, 0, 1);
+
+let camSpherical = { theta: 0, phi: 0.85, radius: 8 };
+
+function updateCamera() {
+  const r  = camSpherical.radius;
+  const ph = camSpherical.phi;
+  const th = camSpherical.theta;
+  camera.position.set(
+    cloudCenter.x +  r * Math.sin(ph) * Math.sin(th),
+    cloudCenter.y + -r * Math.sin(ph) * Math.cos(th),
+    cloudCenter.z +  r * Math.cos(ph)
+  );
+  camera.lookAt(cloudCenter);
+}
+updateCamera();
+
+function fitCamera() {
+  const fovV = camera.fov * Math.PI / 180;
+  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
+  const fov  = Math.min(fovV, fovH);
+  camSpherical.radius = (cloudFitR / Math.sin(fov / 2)) * 1.18;
+  updateCamera();
+}
+
+// Orbit controls + click vs drag detection
+let dragging       = false;
+let dragMoved      = false;
+let dragStartPos   = { x: 0, y: 0 };
+const DRAG_THRESH  = 5;
+
+canvas3d.addEventListener("mousedown", e => {
+  dragging = true; dragMoved = false;
+  dragStartPos = { x: e.clientX, y: e.clientY };
+  canvas3d.classList.add("dragging");
+});
+window.addEventListener("mouseup", () => {
+  dragging = false; canvas3d.classList.remove("dragging");
+});
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  if (poseMode === POSE_MODE.SETTING_YAW || poseMode === POSE_MODE.GOAL_YAW) return;
+  if (!dragMoved) {
+    const dx = e.clientX - dragStartPos.x;
+    const dy = e.clientY - dragStartPos.y;
+    if (Math.hypot(dx, dy) > DRAG_THRESH) dragMoved = true;
+  }
+  if (!dragMoved) return;
+  const dx = (e.clientX - dragStartPos.x) * 0.005;
+  const dy = (e.clientY - dragStartPos.y) * 0.005;
+  camSpherical.theta -= dx;
+  camSpherical.phi   = Math.max(0.05, Math.min(Math.PI - 0.05, camSpherical.phi - dy));
+  dragStartPos = { x: e.clientX, y: e.clientY };
+  updateCamera();
+});
+canvas3d.addEventListener("wheel", e => {
+  camSpherical.radius = Math.max(0.5, Math.min(60, camSpherical.radius + e.deltaY * 0.01));
+  updateCamera();
+});
+canvas3d.addEventListener("dblclick", () => fitCamera());
+
+// =======================================================================
+// Raycasting
+// =======================================================================
+const raycaster = new THREE.Raycaster();
+const ndc       = new THREE.Vector2();
+
+function raycastFloor(e) {
+  if (!mapData) return null;
+  const rect = canvas3d.getBoundingClientRect();
+  ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+  ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const floorZ = mapData.metadata.floor_z || 0;
+  const plane  = new THREE.Plane(new THREE.Vector3(0, 0, 1), -floorZ);
+  const hit    = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+  return hit;
+}
+
+// =======================================================================
+// Click handler — branches based on poseMode
+// =======================================================================
+canvas3d.addEventListener("click", e => {
+  if (!mapData) return;
+  if (dragMoved) return;
+
+  const hit = raycastFloor(e);
+  if (!hit) return;
+
+  const meta   = mapData.metadata;
+  const margin = 0.5;
+  const inside = hit.x >= meta.min_x - margin && hit.x <= meta.max_x + margin &&
+                 hit.y >= meta.min_y - margin && hit.y <= meta.max_y + margin;
+
+  if (poseMode === POSE_MODE.PLACING) {
+    if (!inside) return;
+    pendingPose = { x: hit.x, y: hit.y, yaw_rad: 0 };
+    poseMode    = POSE_MODE.SETTING_YAW;
+    document.getElementById("setPoseBtn").textContent = "\u{1F4CD} Move to set yaw, click to confirm";
+    updatePendingPoseMarker();
+    return;
+  }
+  if (poseMode === POSE_MODE.SETTING_YAW) { postInitialPose(pendingPose); return; }
+  if (poseMode === POSE_MODE.GOAL_YAW)    { confirmGoal(pendingPose);     return; }
+
+  if (!inside) {
+    showToast("Click is outside the mapped area");
+    return;
+  }
+  const initialYawRad = parseFloat(document.getElementById("orientSlider").value) * Math.PI / 180;
+  pendingPose = { x: hit.x, y: hit.y, yaw_rad: initialYawRad };
+  poseMode    = POSE_MODE.GOAL_YAW;
+  document.getElementById("valX").textContent = hit.x.toFixed(3);
+  document.getElementById("valX").className   = "";
+  document.getElementById("valY").textContent = hit.y.toFixed(3);
+  document.getElementById("valY").className   = "";
+  document.getElementById("valZ").textContent = (meta.floor_z || 0).toFixed(3);
+  document.getElementById("valZ").className   = "";
+  updatePendingPoseMarker();
+});
+
+canvas3d.addEventListener("mousemove", e => {
+  if ((poseMode !== POSE_MODE.SETTING_YAW && poseMode !== POSE_MODE.GOAL_YAW) || !pendingPose) return;
+  const hit = raycastFloor(e);
+  if (!hit) return;
+  pendingPose.yaw_rad = Math.atan2(hit.y - pendingPose.y, hit.x - pendingPose.x);
+  updatePendingPoseMarker();
+});
+
+// =======================================================================
+// Set Initial Pose button (RTAB-Map seed)
+// =======================================================================
+document.getElementById("setPoseBtn").addEventListener("click", () => {
+  if (poseMode === POSE_MODE.PLACING || poseMode === POSE_MODE.SETTING_YAW) {
+    cancelInitialPose(); return;
+  }
+  if (poseMode === POSE_MODE.GOAL_YAW) {
+    poseMode = POSE_MODE.IDLE; pendingPose = null;
+    removePendingPoseMarker();
+  }
+  clearGoal();
+  poseMode = POSE_MODE.PLACING;
+  const btn = document.getElementById("setPoseBtn");
+  btn.classList.add("active");
+  btn.textContent = "\u{1F4CD} Click on map to anchor";
+});
+
+function cancelInitialPose() {
+  poseMode = POSE_MODE.IDLE; pendingPose = null;
+  removePendingPoseMarker();
+  const btn = document.getElementById("setPoseBtn");
+  btn.classList.remove("active");
+  if (!btn._flashing) btn.textContent = "\u{1F4CD} Set Initial Pose";
+}
+
+async function postInitialPose(pose) {
+  try {
+    const res = await fetch("/set_initial_pose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x: pose.x, y: pose.y, yaw_rad: pose.yaw_rad }),
+    });
+    if (res.ok) {
+      const j = await res.json();
+      console.log("Initial pose queued, seq=", j.seq);
+      flashConfirmation();
+    } else {
+      showToast("Set Initial Pose failed: HTTP " + res.status);
+    }
+  } catch (err) {
+    showToast("Set Initial Pose failed: " + err.message);
+  }
+  cancelInitialPose();
+}
+
+function flashConfirmation() {
+  const btn = document.getElementById("setPoseBtn");
+  btn._flashing = true;
+  btn.textContent = "✓ Pose sent — RTAB-Map matching…";
+  btn.style.background  = "var(--success)";
+  btn.style.color       = "var(--bg)";
+  btn.style.borderColor = "var(--success)";
+  setTimeout(() => {
+    btn._flashing = false;
+    btn.textContent = "\u{1F4CD} Set Initial Pose";
+    btn.style.background = btn.style.color = btn.style.borderColor = "";
+  }, 2500);
+}
+
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape" && poseMode !== POSE_MODE.IDLE) cancelInitialPose();
+});
+
+// =======================================================================
+// Sim Pose toggle
+// =======================================================================
+document.getElementById("simPoseBtn").addEventListener("click", () => {
+  simModeActive = !simModeActive;
+  const btn = document.getElementById("simPoseBtn");
+  if (simModeActive) {
+    btn.classList.add("active");
+    btn.textContent = "\u{1F3AF} Sim ON (-4.0, -1.3)";
+    const simData = { ...SIM_POSE, age_sec: 0,
+                      wall_clock_iso: new Date().toISOString() };
+    livePose = simData;
+    updateLocPill(simData);
+    updateLivePoseMarker(simData);
+  } else {
+    btn.classList.remove("active");
+    btn.textContent = "\u{1F3AF} Sim Pose";
+    livePose = null;
+  }
+  refreshPlanButtonState();
+});
+
+// =======================================================================
+// PLAN PATH — runs A* from the current live (or sim) pose to the goal pose
+// =======================================================================
+document.getElementById("planBtn").addEventListener("click", doPlan);
+
+function refreshPlanButtonState() {
+  const btn = document.getElementById("planBtn");
+  // Plan needs both: a localized start AND a confirmed goal.
+  const haveStart = !!(livePose && livePose.localized);
+  const haveGoal  = !!goal;
+  btn.disabled = !(haveStart && haveGoal);
+}
+
+async function doPlan() {
+  if (!livePose || !goal) return;
+  const btn = document.getElementById("planBtn");
+  btn.disabled = true;
+  btn.classList.add("active");
+  btn.textContent = "⏳ Planning…";
+  try {
+    const r = await fetch("/plan", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({
+        start: { x: livePose.x, y: livePose.y },
+        goal:  { x: goal.x,     y: goal.y },
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      btn.textContent = "⚠ FAILED";
+      showToast(`Plan failed: ${j.error || r.status}`);
+    } else {
+      btn.textContent = "✓ Planned";
+      showToast(`A* plan: ${j.waypoints} waypoints, ${j.vc_distance.toFixed(2)} m`);
+    }
+  } catch (e) {
+    btn.textContent = "⚠ FAILED";
+    showToast(`Plan error: ${e.message}`);
+  }
+  setTimeout(() => {
+    btn.classList.remove("active");
+    btn.textContent = "▶ Plan Path";
+    refreshPlanButtonState();
+  }, 1800);
+}
+
+// =======================================================================
+// Animation loop
+// =======================================================================
+(function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+})();
+
+// =======================================================================
+// Cloud
+// =======================================================================
+function buildCloud(points, colors) {
+  if (cloudObj) {
+    scene.remove(cloudObj);
+    cloudObj.geometry.dispose();
+    cloudObj.material.dispose();
+  }
+  const N = points.length;
+  const positions = new Float32Array(N * 3);
+  const cols      = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    positions[i*3]     = points[i][0];
+    positions[i*3 + 1] = points[i][1];
+    positions[i*3 + 2] = points[i][2];
+    const c = colors[i] || [150, 150, 150];
+    cols[i*3] = c[0] / 255; cols[i*3 + 1] = c[1] / 255; cols[i*3 + 2] = c[2] / 255;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("color",    new THREE.BufferAttribute(cols,      3));
+  const mat = new THREE.PointsMaterial({ size: 0.02, vertexColors: true, sizeAttenuation: true });
+  cloudObj = new THREE.Points(geo, mat);
+  geo.computeBoundingBox();
+  geo.boundingBox.getCenter(cloudCenter);
+  geo.computeBoundingSphere();
+  cloudFitR = geo.boundingSphere.radius;
+  scene.add(cloudObj);
+
+  const xs = geo.boundingBox.max.x - geo.boundingBox.min.x;
+  const ys = geo.boundingBox.max.y - geo.boundingBox.min.y;
+  const sz = Math.ceil(Math.max(xs, ys, 4)) + 2;
+  const floorZ = mapData.metadata.floor_z || 0;
+  const grid = new THREE.GridHelper(sz, sz, 0x44aaff, 0x223344);
+  grid.rotation.x = Math.PI / 2;
+  grid.position.set(cloudCenter.x, cloudCenter.y, floorZ);
+  scene.add(grid);
+  const axes = new THREE.AxesHelper(1.0);
+  axes.position.set(cloudCenter.x, cloudCenter.y, floorZ);
+  scene.add(axes);
+}
+
+// =======================================================================
+// Markers
+// =======================================================================
+function buildArrow(start, end, color) {
+  const geo = new THREE.BufferGeometry().setFromPoints([start, end]);
+  return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+}
+
+function disposeGroup(g) {
+  if (!g) return;
+  g.traverse(c => {
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) {
+      if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+      else c.material.dispose();
+    }
+  });
+  scene.remove(g);
+}
+
+function updateGoalMarker() {
+  if (goalGroup) { disposeGroup(goalGroup); goalGroup = null; }
+  if (!goal) return;
+  const yawRad = goal.orientation * Math.PI / 180;
+  goalGroup = buildLivePoseVisual(0xffd33f);   // yellow goal
+  goalGroup.position.set(goal.x, goal.y, (goal.z || 0) + 0.02);
+  goalGroup.rotation.z = yawRad;
+  scene.add(goalGroup);
+}
+
+function clearGoal() {
+  if (goalGroup) { disposeGroup(goalGroup); goalGroup = null; }
+  goal = null;
+  ['valX', 'valY', 'valZ'].forEach(id => {
+    const el = document.getElementById(id);
+    el.textContent = '—';
+    el.className   = 'empty';
+  });
+  document.getElementById('sendBtn').disabled = true;
+  refreshPlanButtonState();
+}
+
+function confirmGoal(p) {
+  if (!mapData) return;
+  const meta   = mapData.metadata;
+  const floorZ = meta.floor_z || 0;
+  const yawDeg = ((p.yaw_rad * 180 / Math.PI) % 360 + 360) % 360;
+  goal = { x: p.x, y: p.y, z: floorZ, orientation: yawDeg };
+
+  const slider = document.getElementById('orientSlider');
+  const slVal  = document.getElementById('orientVal');
+  slider.value      = String(Math.round(yawDeg) % 360);
+  slVal.textContent = slider.value + '°';
+
+  document.getElementById('valX').textContent = p.x.toFixed(3); document.getElementById('valX').className = '';
+  document.getElementById('valY').textContent = p.y.toFixed(3); document.getElementById('valY').className = '';
+  document.getElementById('valZ').textContent = floorZ.toFixed(3); document.getElementById('valZ').className = '';
+  document.getElementById('sendBtn').disabled = false;
+
+  poseMode = POSE_MODE.IDLE; pendingPose = null;
+  removePendingPoseMarker();
+  updateGoalMarker();
+  refreshPlanButtonState();
+}
+
+function updateRobotMarker(pose) {
+  if (robotGroup) scene.remove(robotGroup);
+  robotGroup = new THREE.Group();
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0x00e5a0 })
+  );
+  const center = new THREE.Vector3(pose.x, pose.y, (pose.z || 0) + 0.05);
+  sphere.position.copy(center);
+  robotGroup.add(sphere);
+  const tip = new THREE.Vector3(
+    center.x + Math.cos(pose.yaw) * 0.50,
+    center.y + Math.sin(pose.yaw) * 0.50, center.z);
+  robotGroup.add(buildArrow(center, tip, 0x00e5a0));
+  scene.add(robotGroup);
+}
+
+function updateLivePoseMarker(p) {
+  if (!mapData || !p || !p.localized) {
+    if (livePoseGroup) livePoseGroup.visible = false;
+    return;
+  }
+  const floorZ = mapData.metadata.floor_z || 0;
+  if (!livePoseGroup) {
+    livePoseGroup = buildLivePoseVisual(0x00e5ff);
+    scene.add(livePoseGroup);
+  }
+  livePoseGroup.visible = true;
+  livePoseGroup.position.set(p.x, p.y, floorZ + 0.02);
+  livePoseGroup.rotation.z = p.yaw_rad;
+}
+
+function buildLivePoseVisual(color = 0x00e5ff) {
+  const grp = new THREE.Group();
+
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.012, 0.012, 0.32, 12),
+    new THREE.MeshBasicMaterial({ color }));
+  shaft.rotation.z = -Math.PI / 2; shaft.position.x = 0.16;
+  grp.add(shaft);
+
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.035, 0.08, 12),
+    new THREE.MeshBasicMaterial({ color }));
+  head.rotation.z = -Math.PI / 2; head.position.x = 0.36;
+  grp.add(head);
+
+  const disk = new THREE.Mesh(
+    new THREE.CircleGeometry(0.07, 24),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, depthWrite: false }));
+  grp.add(disk);
+
+  grp.add(buildRobotEnvelopeMesh(color));
+  return grp;
+}
+
+function buildRobotEnvelopeMesh(color = 0x00e5ff) {
+  const env = new THREE.Group();
+  const sx = ROBOT_WIDTH_M, sy = ROBOT_LENGTH_M, sz = ROBOT_HEIGHT_M;
+  const t  = 0.012;
+  const edgeMat = new THREE.MeshBasicMaterial({ color });
+
+  for (const ys of [-sy/2, sy/2]) for (const zs of [-sz/2, sz/2]) {
+    const e = new THREE.Mesh(new THREE.BoxGeometry(sx + t, t, t), edgeMat);
+    e.position.set(0, ys, zs); env.add(e);
+  }
+  for (const xs of [-sx/2, sx/2]) for (const zs of [-sz/2, sz/2]) {
+    const e = new THREE.Mesh(new THREE.BoxGeometry(t, sy + t, t), edgeMat);
+    e.position.set(xs, 0, zs); env.add(e);
+  }
+  for (const xs of [-sx/2, sx/2]) for (const ys of [-sy/2, sy/2]) {
+    const e = new THREE.Mesh(new THREE.BoxGeometry(t, t, sz + t), edgeMat);
+    e.position.set(xs, ys, 0); env.add(e);
+  }
+  env.position.z = sz / 2;
+
+  const endRect = new THREE.PlaneGeometry(sx, sz);
+  const endMat  = new THREE.MeshBasicMaterial({
+    color, transparent: true, opacity: 0.18,
+    side: THREE.DoubleSide, depthWrite: false });
+  for (const offY of [-sy/2, sy/2]) {
+    const cap = new THREE.Mesh(endRect, endMat.clone());
+    cap.position.set(0, offY, 0); cap.rotation.x = -Math.PI / 2;
+    env.add(cap);
+  }
+  return env;
+}
+
+function updatePendingPoseMarker() {
+  if (pendingPoseGroup) { disposeGroup(pendingPoseGroup); pendingPoseGroup = null; }
+  if (!pendingPose || !mapData) return;
+  const floorZ = mapData.metadata.floor_z || 0;
+  pendingPoseGroup = buildLivePoseVisual(0xffd33f);
+  pendingPoseGroup.position.set(pendingPose.x, pendingPose.y, floorZ + 0.02);
+  pendingPoseGroup.rotation.z = pendingPose.yaw_rad;
+  scene.add(pendingPoseGroup);
+}
+
+function removePendingPoseMarker() {
+  if (pendingPoseGroup) { disposeGroup(pendingPoseGroup); pendingPoseGroup = null; }
+}
+
+// =======================================================================
+// PLAN OVERLAY — yellow VC path + formation envelope rings on the floor
+// =======================================================================
+function clearPlanGroup() {
+  if (planGroup3d) { disposeGroup(planGroup3d); planGroup3d = null; }
+  planGroup3d = new THREE.Group();
+  scene.add(planGroup3d);
+}
+
+function renderPlan3D() {
+  if (!planData || !mapData) return;
+  clearPlanGroup();
+  const floorZ = (mapData.metadata.floor_z || 0) + 0.005;
+  const vc     = planData.virtual_center;
+  const fr     = planData.metadata.formation_radius;
+  const v3 = (x, y, z=floorZ) => new THREE.Vector3(x, y, z);
+
+  if (vc.waypoints && vc.waypoints.length > 1) {
+    const pts = vc.waypoints.map(([x, y]) => v3(x, y));
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0xffd33f }));
+    planGroup3d.add(line);
+    for (const [wx, wy] of vc.waypoints) {
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 12, 12),
+        new THREE.MeshBasicMaterial({ color: 0xffd33f }));
+      sphere.position.copy(v3(wx, wy, floorZ + 0.01));
+      planGroup3d.add(sphere);
+    }
+  }
+
+  for (const [wx, wy] of vc.waypoints) {
+    const segs = 32; const pts = [];
+    for (let s = 0; s <= segs; s++) {
+      const a = (s / segs) * Math.PI * 2;
+      pts.push(v3(wx + Math.cos(a) * fr, wy + Math.sin(a) * fr));
+    }
+    const ring = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0xffaa55, transparent: true, opacity: 0.55 }));
+    planGroup3d.add(ring);
+  }
+
+  // Update bottom-bar plan summary
+  const sum = document.getElementById("planSummary");
+  if (sum) {
+    sum.innerHTML =
+      `plan #${planData.seq}: <b>${vc.waypoints.length}</b> wp · ` +
+      `<b>${planData.metadata.vc_distance.toFixed(2)}</b> m · ` +
+      `~${planData.metadata.travel_time_sec.toFixed(1)} s @ 0.18 m/s · ` +
+      `formation ${(fr*100).toFixed(0)} cm`;
+  }
+}
+
+async function pollPlan() {
+  try {
+    const r = await fetch('/path_plan.json', { cache: 'no-store' });
+    if (!r.ok) return;
+    const p = await r.json();
+    if (p.seq === planSeq) return;
+    planData = p; planSeq = p.seq ?? -1;
+    renderPlan3D();
+  } catch (_) { /* silent */ }
+}
+
+// =======================================================================
+// Slider + Send Goal
+// =======================================================================
+document.getElementById("orientSlider").addEventListener("input", e => {
+  document.getElementById("orientVal").textContent = e.target.value + "°";
+  if (goal) { goal.orientation = parseFloat(e.target.value); updateGoalMarker(); }
+});
+
+document.getElementById("sendBtn").addEventListener("click", () => {
+  if (!goal) return;
+  const btn = document.getElementById("sendBtn");
+  btn.disabled = true; btn.textContent = "Sending...";
+  try {
+    publishGoalToROS(goal);
+    btn.textContent = "Sent ✓";
+    btn.classList.add("sent");
+    showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
+    setTimeout(() => {
+      btn.textContent = "Send Goal"; btn.classList.remove("sent"); btn.disabled = false;
+    }, 2500);
+  } catch (e) {
+    btn.textContent = "Failed";
+    btn.style.borderColor = "var(--accent2)"; btn.style.color = "var(--accent2)";
+    setTimeout(() => {
+      btn.textContent = "Send Goal"; btn.style = ""; btn.disabled = false;
+    }, 2000);
+  }
+});
+
+// =======================================================================
+// Status
+// =======================================================================
+function setStatus(connected, text) {
+  const pill = document.getElementById("statusPill");
+  document.getElementById("statusText").textContent = text;
+  pill.className = "status-pill" + (connected ? " connected" : "");
+}
+function setRosStatus(connected) {
+  const pill = document.getElementById("rosPill");
+  pill.className = "status-pill" + (connected ? " connected" : "");
+  pill.querySelector(".ros-text").textContent = connected ? "ROS Connected" : "ROS Disconnected";
+}
+function setLocStatus(cls, text) {
+  const pill = document.getElementById("locStatus");
+  pill.className = "status-pill " + cls;
+  document.getElementById("locStatusText").textContent = text;
+}
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3000);
+}
+
+// =======================================================================
+// Rosbridge
+// =======================================================================
+const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
+ros.on("connection", () => { setRosStatus(true); subscribeToRobotPose(); });
+ros.on("error", () => setRosStatus(false));
+ros.on("close", () => {
+  setRosStatus(false);
+  setTimeout(() => ros.connect(ROSBRIDGE_URL), 3000);
+});
+
+function subscribeToRobotPose() {
+  const t = new ROSLIB.Topic({ ros, name: ROBOT_POSE_TOPIC, messageType: "geometry_msgs/PoseStamped" });
+  t.subscribe(msg => {
+    const p = msg.pose.position;
+    const q = msg.pose.orientation;
+    const yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y),
+                           1 - 2 * (q.y * q.y + q.z * q.z));
+    robotPose = { x: p.x, y: p.y, z: p.z, yaw };
+    updateRobotMarker(robotPose);
+  });
+}
+
+const goalTopic = new ROSLIB.Topic({ ros, name: GOAL_TOPIC, messageType: "geometry_msgs/PoseStamped" });
+
+function publishGoalToROS(g) {
+  const yawRad = g.orientation * Math.PI / 180;
+  const qz = Math.sin(yawRad / 2);
+  const qw = Math.cos(yawRad / 2);
+  const msg = new ROSLIB.Message({
+    header: { frame_id: "map", stamp: { secs: 0, nsecs: 0 } },
+    pose:   { position:    { x: g.x, y: g.y, z: g.z },
+              orientation: { x: 0, y: 0, z: qz, w: qw } }
+  });
+  goalTopic.publish(msg);
+}
+
+// =======================================================================
+// /pose polling
+// =======================================================================
+async function pollPose() {
+  if (simModeActive) {
+    const simData = { ...SIM_POSE, age_sec: 0,
+                      wall_clock_iso: new Date().toISOString() };
+    livePose = simData;
+    updateLocPill(simData);
+    updateLivePoseMarker(simData);
+    refreshPlanButtonState();
+    return;
+  }
+  try {
+    const res  = await fetch("/pose");
+    const data = await res.json();
+    if (data.available) {
+      livePose = data;
+      updateLocPill(data);
+      updateLivePoseMarker(data);
+    } else {
+      livePose = null;
+      setLocStatus("lost", "LOC: NO BRIDGE");
+      if (livePoseGroup) livePoseGroup.visible = false;
+    }
+  } catch (e) {
+    setLocStatus("lost", "LOC: SERVER DOWN");
+    if (livePoseGroup) livePoseGroup.visible = false;
+  }
+  refreshPlanButtonState();
+}
+setInterval(pollPose, POSE_POLL_MS);
+setInterval(pollPlan, PLAN_POLL_MS);
+
+function updateLocPill(data) {
+  if (data.age_sec > 2) {
+    setLocStatus("lost", `LOC: STALE ${data.age_sec.toFixed(1)}s`); return;
+  }
+  if (!data.localized) {
+    setLocStatus("lost", `LOC: SEARCHING ${data.age_sec.toFixed(1)}s`);
+  } else if (data.last_match_age_sec !== null && data.last_match_age_sec > 5) {
+    setLocStatus("dead-reckoning",
+      `LOC: DEAD-RECK ${data.last_match_age_sec.toFixed(1)}s`);
+  } else {
+    setLocStatus("localized",
+      `LOC: LIVE ${data.x.toFixed(2)},${data.y.toFixed(2)}`);
+  }
+}
+
+// =======================================================================
+// Resize, load, init
+// =======================================================================
+function onResize() {
+  const w = panel3d.clientWidth, h = panel3d.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", onResize);
+
+async function loadMap() {
+  try {
+    const res  = await fetch("/map", { cache: "no-store" });
+    mapData    = await res.json();
+    if (mapData.metadata.axis_convention &&
+        mapData.metadata.axis_convention !== "z-up") {
+      console.warn("Unexpected axis_convention:", mapData.metadata.axis_convention);
+    }
+    buildCloud(mapData.points, mapData.colors);
+    onResize(); fitCamera();
+    document.getElementById("loading3d").style.display = "none";
+    setStatus(true,
+      `${mapData.metadata.point_count.toLocaleString()} pts · ` +
+      `floor ${mapData.metadata.floor_z.toFixed(2)} m · ` +
+      `bounds X[${mapData.metadata.min_x.toFixed(1)},${mapData.metadata.max_x.toFixed(1)}] ` +
+      `Y[${mapData.metadata.min_y.toFixed(1)},${mapData.metadata.max_y.toFixed(1)}]`);
+  } catch (e) {
+    console.error(e);
+    document.getElementById("loading3d").innerHTML =
+      `<span style="color:var(--accent2)">Failed to load map: ${e.message}</span>`;
+  }
+}
+
+window.addEventListener("load", () => {
+  onResize();
+  loadMap();
+});
+</script>
+</body>
+</html>
