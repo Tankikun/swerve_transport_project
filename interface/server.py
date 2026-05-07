@@ -4,7 +4,7 @@ Flask server that serves the web UI and point cloud data.
 Also receives the selected goal from the browser and forwards to ros_bridge.
 
 Usage:
-    python3 server.py --map map.json --port 5000
+    python3 server.py --map map.json --port 5002
 """
 
 import argparse
@@ -16,24 +16,19 @@ from flask_cors import CORS
 app = Flask(__name__, static_folder=".")
 CORS(app)
 
-# --- Global state ---
 map_data       = None
-overlay_data   = None       # optional second map for visual A/B (e.g. Scaniverse .obj)
+overlay_data   = None
 latest_goal    = None
-goal_callbacks = []         # functions to call when a new goal is received
+goal_callbacks = []
 
-
-# --- Routes ---
 
 @app.route("/")
 def index():
-    """Serve the main web UI"""
     return send_from_directory(".", "index.html")
 
 
 @app.route("/map")
 def get_map():
-    """Serve the primary point cloud JSON to the browser."""
     if map_data is None:
         return jsonify({"error": "Map not loaded"}), 500
     return jsonify(map_data)
@@ -41,10 +36,6 @@ def get_map():
 
 @app.route("/map_overlay")
 def get_map_overlay():
-    """Serve a second map as an overlay for visual A/B comparison.
-
-    Returns 204 if no overlay was loaded, so the frontend can branch.
-    """
     if overlay_data is None:
         return ("", 204)
     return jsonify(overlay_data)
@@ -52,26 +43,20 @@ def get_map_overlay():
 
 @app.route("/goal", methods=["POST"])
 def receive_goal():
-    """
-    Receive selected destination from the browser.
-    Expected JSON body:
-    {
-        "x": 1.2,
-        "y": 0.0,
-        "z": 0.8,
-        "orientation": 90.0   (degrees, yaw only)
-    }
+    """Receive selected destination from the browser.
+       Z-up convention: x and y are floor-plane, z is height (= floor_z).
+       Body: { "x": float, "y": float, "z": float, "orientation": float (deg) }
     """
     global latest_goal
     data = request.get_json()
 
-    if not data or "x" not in data or "z" not in data:
+    if not data or "x" not in data or "y" not in data:
         return jsonify({"error": "Invalid goal data"}), 400
 
     latest_goal = {
         "x"           : float(data["x"]),
-        "y"           : float(data.get("y", 0.0)),
-        "z"           : float(data["z"]),
+        "y"           : float(data["y"]),
+        "z"           : float(data.get("z", 0.0)),
         "orientation" : float(data.get("orientation", 0.0))
     }
 
@@ -82,7 +67,6 @@ def receive_goal():
     print(f"Orientation: {latest_goal['orientation']:.1f}°")
     print("-------------------------\n")
 
-    # Notify any registered callbacks (e.g. ros_bridge)
     for cb in goal_callbacks:
         threading.Thread(target=cb, args=(latest_goal,), daemon=True).start()
 
@@ -91,20 +75,15 @@ def receive_goal():
 
 @app.route("/goal", methods=["GET"])
 def get_latest_goal():
-    """Let other scripts poll for the latest goal"""
     if latest_goal is None:
         return jsonify({"status": "no goal set"}), 204
     return jsonify(latest_goal)
 
 
 def register_goal_callback(fn):
-    """Register a function to be called when a new goal is received"""
     goal_callbacks.append(fn)
 
 
-# Catch-all static-file route — lets the browser fetch the mesh's .obj /
-# .mtl / .jpg trio (or any other file in this folder) directly. Defined
-# LAST so it doesn't shadow the specific routes above.
 @app.route("/<path:filename>")
 def static_files(filename):
     return send_from_directory(".", filename)
@@ -119,7 +98,6 @@ def load_map(path):
 
 
 def load_overlay(path):
-    """Optional second map served on /map_overlay for visual A/B."""
     global overlay_data
     print(f"Loading overlay map: {path}")
     with open(path, "r") as f:
@@ -135,8 +113,7 @@ def run(host="0.0.0.0", port=5002):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Map visualization server")
-    parser.add_argument("--map",     default="map.json",
-                        help="Primary map JSON")
+    parser.add_argument("--map",     default="map.json", help="Primary map JSON")
     parser.add_argument("--overlay", default=None,
                         help="Optional second map JSON to overlay (for A/B accuracy check)")
     parser.add_argument("--port",    type=int, default=5002, help="Port to serve on")
