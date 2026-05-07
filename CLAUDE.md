@@ -97,7 +97,7 @@ rsync ~/maps/lab.db pi2@<ip>:~/maps/lab.db
 
 ### Localization (runtime, per robot)
 
-Each Pi runs an independent RTAB-Map instance in localization-only mode against the shared `.db`. Robots share only fused EKF poses via Zenoh — map data is never shared at runtime.
+Each Pi runs an independent RTAB-Map instance in localization-only mode against the shared `.db`. Robots share only fused EKF poses over the ROS 2 middleware — map data is never shared at runtime.
 
 **Localization config** (`rtabmap_localization.yaml`): `Mem/IncrementalMemory false`, `Mem/InitWMWithAllNodes true`, `Mem/ImagePreDecimation 2`, `Kp/MaxFeatures 400`, `Rtabmap/DetectionRate 5 Hz`, `Reg/Force3DoF true` (flat floor assumption), `Vis/EstimationType 1` (PnP), `Vis/MinInliers 15`, `ProximityBySpace false`, `ProximityByTime false` (saves CPU).
 
@@ -112,10 +112,10 @@ Each Pi runs an independent RTAB-Map instance in localization-only mode against 
 
 ### Camera Configuration (OAK-D Lite)
 
-- **Resolution**: RGB at 640×400, stereo at 640×400 (width must be a multiple of 16)
+- **Resolution**: RGB streams at 960×540 (sensor 1080P with ISP scale 1/2; the IMX214 sensor does not support a native 720P/540P mode). The ISP downscale runs on the OAK's VPU at zero Pi CPU cost. Stereo streams at 640×400 native (OAK-D Lite mono cameras). Width must be a multiple of 16 — both 960 and 640 satisfy this. RTAB-Map further halves the effective processing resolution to 480×270 via `Mem/ImagePreDecimation 2` in the localization config.
 - **Frame rate**: 15 Hz. This gives RTAB-Map (running at 5 Hz) fresh frames with margin and reduces motion blur during fast swerve rotations.
-- **Depth alignment**: depth is aligned to the RGB optical frame (`use_stereo_align: true`). This is required for RTAB-Map's RGBD subscription — do not disable it.
-- **USB**: USB 3 required for sustained 15 fps streaming.
+- **Depth alignment**: depth is aligned to the RGB optical frame (`stereo.i_align_depth: true`). This is required for RTAB-Map's RGBD subscription — do not disable it.
+- **USB**: USB 3 required for sustained 15 fps streaming. Configured explicitly via `camera.i_usb_speed: "SUPER"` so init fails loudly if the cable/port negotiates USB 2.
 
 ### Camera Mount TF
 
@@ -177,10 +177,9 @@ The full chain `map → {robot_id}_odom → {robot_id}_base_link → {robot_id}_
 
 ## Middleware
 
-- **rmw_zenoh_cpp** v0.1.8 (not standard FastDDS)
-- Zenoh router (`rmw_zenohd`) runs on the laptop
-- Robots are Zenoh clients; config via `RMW_ZENOH_CONFIG_FILE` pointing to `zenoh_client.json5` with `mode: "client"` and explicit `connect.endpoints`
-- Do NOT use `ZENOH_CONNECT` or `ZENOH_CONFIG_OVERRIDE` env vars — they are ignored by rmw_zenoh_cpp
+- **Current RMW: `rmw_fastrtps_cpp`** (FastDDS). The project temporarily reverted to FastDDS due to time constraints; treat it as the active middleware for everything below (discovery, QoS tuning, debugging, deployment).
+- Discovery on the laptop is configured via `FASTRTPS_DEFAULT_PROFILES_FILE=~/fastdds_peers.xml` (exported in `~/.bashrc`). The `ROS_DOMAIN_ID` is `30`. The Pis use analogous `~/fastdds_peers.xml` files; see `LOCALIZATION_RUN_LAPTOP.md` and `MAPPING_RUN_LAPTOP.md` for the canonical locator structure.
+- **Zenoh migration is deferred.** The legacy Zenoh config files (`zenoh_client.json5`, any `RMW_ZENOH_CONFIG_FILE` references) are retained in the repo and shell history for the eventual switch back, but they are **not active** right now. Do not propose Zenoh-specific debugging steps, do not assume `rmw_zenohd` is running, and do not set `RMW_IMPLEMENTATION=rmw_zenoh_cpp` unless the user explicitly resumes the migration.
 
 ## Namespacing
 

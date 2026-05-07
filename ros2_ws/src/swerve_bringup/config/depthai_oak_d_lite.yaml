@@ -14,10 +14,19 @@
       i_laser_dot_brightness: 0        # IR pattern projector (OAK-D Pro only)
       i_pipeline_dump: false           # debug: dump pipeline graph
       i_calibration_dump: false        # debug: dump factory calibration
+      # USB link speed. "SUPER" = USB 3.x (5 Gbps). Required for sustained
+      # 15 fps RGB+stereo streaming. The driver will fail loudly at init
+      # if the cable / port / hub negotiates only USB 2 (HIGH speed).
+      # If init fails with a USB-speed error: the cable or port is USB 2
+      # and must be physically replaced. Do not lower this to "HIGH" to
+      # paper over it — frames will silently drop under load and break
+      # RTAB-Map alignment.
+      i_usb_speed: "SUPER"
     
     # ===== RGB camera =====
     rgb:
-      i_resolution: "720P"             # 1280x720 native
+      i_resolution: "1080P"            # 1920x1080 native (IMX214 does not support 720P);
+                                       # ISP scale 1/2 below brings the stream to 960x540
       i_fps: 15.0                      # comfortably above 5 Hz RTAB-Map rate
       i_interleaved: false             # planar output, what ROS expects
       i_max_q_size: 10                 # output queue depth
@@ -27,8 +36,8 @@
       i_board_socket_id: 0             # CAM_A on OAK-D Lite
       i_keep_preview_aspect_ratio: true
       i_set_isp_scale: true            # enable ISP scaling for proper alignment
-      i_isp_num: 2
-      i_isp_den: 3                     # scales 1080P -> 720P at ISP level
+      i_isp_num: 1
+      i_isp_den: 2                     # scales 1080P -> 960x540 at ISP level (VPU-side, no Pi CPU cost)
     
     # ===== Stereo depth =====
     stereo:
@@ -41,7 +50,7 @@
       i_lr_check: true                 # left-right consistency check; rejects bad depths
       i_lrc_threshold: 5
       i_extended_disparity: false      # default range, fine for indoor
-      i_depth_filter_size: "5x5"       # spatial filter kernel
+      i_depth_filter_size: 5           # median filter kernel size (int): 0=off, 3, 5, or 7
       i_stereo_conf_threshold: 230     # confidence threshold; lower = more depths kept
       i_max_q_size: 10
       i_resolution: "400P"             # 640x400 stereo native; matches OAK-D Lite
@@ -73,4 +82,5 @@
       i_board_socket_id: 2
     
     # ===== USB =====
-    use_usb_3: true                    # USB3 superspeed; required for full-res
+    # NOTE: top-level `use_usb_3` was the legacy flag; in 2.12.x the link
+    # speed is configured via `camera.i_usb_speed` (set above).
