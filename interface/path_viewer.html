@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>A* Path Planning — Virtual Center</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #0a0c10;
+    --panel:     #111318;
+    --border:    #1e2330;
+    --vc:        #ffd33f;        /* virtual center: yellow-gold */
+    --leader:    #00e5ff;        /* cyan */
+    --follower:  #ff9933;        /* orange */
+    --halo:      rgba(180, 90, 30, 0.50);
+    --envelope:  rgba(255, 211, 63, 0.35);
+    --text:      #e0e6f0;
+    --muted:     #4a5268;
+    --success:   #00e5a0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
+         min-height: 100vh; display: flex; flex-direction: column; padding: 20px; gap: 16px; }
+
+  header { display: flex; justify-content: space-between; align-items: center;
+           padding: 12px 16px; border: 1px solid var(--border); background: var(--panel); }
+  h1 { font-family: 'Space Mono', monospace; font-size: 14px;
+       letter-spacing: 0.15em; text-transform: uppercase; color: var(--vc); }
+  .info { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted); }
+  .info b { color: var(--text); }
+
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           padding: 12px; display: flex; flex-direction: column; }
+  .panel-title { font-family: 'Space Mono', monospace; font-size: 11px;
+                 letter-spacing: 0.12em; text-transform: uppercase;
+                 color: var(--muted); margin-bottom: 8px; }
+  .panel canvas { flex: 1; width: 100%; background: #000; }
+
+  .stats { display: flex; gap: 16px; flex-wrap: wrap; padding: 10px 16px;
+           background: var(--panel); border: 1px solid var(--border);
+           font-family: 'Space Mono', monospace; font-size: 11px; }
+  .stat { display: flex; flex-direction: column; gap: 2px; min-width: 110px; }
+  .stat-label { color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; font-size: 9px; }
+  .stat-value { color: var(--vc); font-size: 14px; font-weight: 700; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 16px;
+            background: var(--panel); border: 1px solid var(--border);
+            font-family: 'Space Mono', monospace; font-size: 11px; align-items: center; }
+  .swatch { display: inline-flex; align-items: center; gap: 6px; }
+  .sw-box { width: 14px; height: 14px; border-radius: 2px; border: 1px solid var(--border); }
+  .sw-circle { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); }
+
+  .err { color: #ff3f6c; font-family: 'Space Mono', monospace; padding: 12px;
+         border: 1px solid #ff3f6c; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9632; Virtual-Center Path Planning</h1>
+  <div class="info" id="topInfo">loading…</div>
+</header>
+
+<div class="legend">
+  <div class="swatch"><div class="sw-box" style="background:#1f2933"></div> <span>walls / obstacles</span></div>
+  <div class="swatch"><div class="sw-box" style="background:#11342f"></div> <span>navigable floor</span></div>
+  <div class="swatch"><div class="sw-box" style="background:rgba(180,90,30,0.5)"></div> <span>inflation halo (formation can't enter)</span></div>
+  <div class="swatch"><div class="sw-box" style="background:#ffd33f"></div> <span>virtual center path</span></div>
+  <div class="swatch"><div class="sw-circle" style="background:rgba(255,211,63,0.18);border-color:rgba(255,211,63,0.6)"></div> <span>formation envelope (radius set by friend's runtime calc)</span></div>
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-title">Map context — full view</div>
+    <canvas id="mapCanvas"></canvas>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Path planning detail — VC path + formation envelope + per-segment distances</div>
+    <canvas id="planCanvas"></canvas>
+  </div>
+</div>
+
+<div class="stats" id="statsBar"></div>
+
+<script>
+let mapData = null, planData = null;
+
+// ─────────────────────────────────────────────────────────────────────────
+// Coordinate helper
+// ─────────────────────────────────────────────────────────────────────────
+function worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, padding) {
+  const sx = (cw - padding * 2) / (x1 - x0);
+  const sy = (ch - padding * 2) / (y1 - y0);
+  const s  = Math.min(sx, sy);
+  const dx = (cw - (x1 - x0) * s) / 2;
+  const dy = (ch - (y1 - y0) * s) / 2;
+  return [
+    dx + (wx - x0) * s,
+    ch - (dy + (wy - y0) * s),
+    s
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Render the base map (obstacles + ground + inflation halo)
+// ─────────────────────────────────────────────────────────────────────────
+function renderBaseMap(ctx, x0, x1, y0, y1, cw, ch, pad, viewport=null) {
+  const meta = mapData.metadata;
+  const grid = mapData.grid;
+  const W = meta.grid_width, H = meta.grid_height;
+  const [, , scale] = worldToCanvas(0, 0, x0, x1, y0, y1, cw, ch, pad);
+  const cellW = meta.resolution * scale;
+
+  // Draw ground + obstacles
+  for (let r = 0; r < H; r++) {
+    for (let c = 0; c < W; c++) {
+      const v = grid[r][c];
+      const wx = meta.min_x + c * meta.resolution;
+      const wy = meta.min_y + r * meta.resolution;
+      if (viewport) {
+        if (wx < viewport.x0 || wx > viewport.x1 ||
+            wy < viewport.y0 || wy > viewport.y1) continue;
+      }
+      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+      if (v === 0) continue;
+      else if (v === 1) ctx.fillStyle = '#11342f';
+      else if (v === 2) ctx.fillStyle = '#1f2933';
+      ctx.fillRect(px, py - cellW, cellW + 1, cellW + 1);
+    }
+  }
+
+  // Inflation halo
+  if (planData && planData.inflation_cells) {
+    ctx.fillStyle = 'rgba(180, 90, 30, 0.5)';
+    for (const [c, r] of planData.inflation_cells) {
+      const wx = meta.min_x + c * meta.resolution;
+      const wy = meta.min_y + r * meta.resolution;
+      if (viewport) {
+        if (wx < viewport.x0 || wx > viewport.x1 ||
+            wy < viewport.y0 || wy > viewport.y1) continue;
+      }
+      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+      ctx.fillRect(px, py - cellW, cellW + 1, cellW + 1);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Draw the VC path + formation envelope + derived robot tracks
+// ─────────────────────────────────────────────────────────────────────────
+function drawPlan(ctx, x0, x1, y0, y1, cw, ch, pad, detailed=false) {
+  const vc          = planData.virtual_center;
+  const fr_radius   = planData.metadata.formation_radius;
+  const [, , scale] = worldToCanvas(0, 0, x0, x1, y0, y1, cw, ch, pad);
+
+  // Formation envelope at each waypoint (translucent yellow circle)
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < vc.waypoints.length; i++) {
+    const [wx, wy] = vc.waypoints[i];
+    const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+    const r        = fr_radius * scale;
+    ctx.fillStyle = 'rgba(255, 211, 63, 0.10)';
+    ctx.strokeStyle = 'rgba(255, 211, 63, 0.55)';
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  // Raw A* path (faint)
+  if (vc.path_raw && vc.path_raw.length > 1) {
+    ctx.strokeStyle = 'rgba(255, 211, 63, 0.30)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < vc.path_raw.length; i++) {
+      const [wx, wy] = vc.path_raw[i];
+      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+
+  // Virtual center main path
+  if (vc.waypoints && vc.waypoints.length > 1) {
+    ctx.strokeStyle = '#ffd33f';
+    ctx.lineWidth = detailed ? 4.5 : 3.5;
+    ctx.beginPath();
+    for (let i = 0; i < vc.waypoints.length; i++) {
+      const [wx, wy] = vc.waypoints[i];
+      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Waypoint markers + labels
+    for (let i = 0; i < vc.waypoints.length; i++) {
+      const [wx, wy] = vc.waypoints[i];
+      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+      ctx.fillStyle = '#ffd33f';
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(px, py, detailed ? 7 : 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (detailed) {
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 10px Space Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`W${i}`, px, py - 14);
+      }
+    }
+
+    // Per-segment distances (detail view)
+    if (detailed) {
+      for (let i = 0; i < vc.waypoints.length - 1; i++) {
+        const [ax, ay] = vc.waypoints[i];
+        const [bx, by] = vc.waypoints[i + 1];
+        const dist = Math.hypot(bx - ax, by - ay);
+        const mx = (ax + bx) / 2, my = (ay + by) / 2;
+        const [px, py] = worldToCanvas(mx, my, x0, x1, y0, y1, cw, ch, pad);
+        const lbl = dist.toFixed(2) + ' m';
+        ctx.font = 'bold 11px Space Mono, monospace';
+        const w = ctx.measureText(lbl).width + 10;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+        ctx.strokeStyle = '#ffd33f';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(px - w/2, py - 18, w, 16, 3);
+        else ctx.rect(px - w/2, py - 18, w, 16);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#ffd33f';
+        ctx.textAlign = 'center';
+        ctx.fillText(lbl, px, py - 6);
+      }
+    }
+  }
+
+  // Per-robot tracks DISABLED — the user's design treats individual robots
+  // as runtime-derived from the VC + offset, not as planned paths. The
+  // formation envelope already shows where each robot will be. Re-enable
+  // this loop if you want a debugging visualization of the per-robot offset.
+  if (false) for (const robot of planData.robots) {
+    if (!robot.track || robot.track.length < 2) continue;
+
+    ctx.strokeStyle = robot.color;
+    ctx.lineWidth = detailed ? 2.5 : 1.8;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    for (let i = 0; i < robot.track.length; i++) {
+      const [wx, wy] = robot.track[i];
+      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Robot at start (small filled circle)
+    const [sx, sy] = robot.track[0];
+    const [px, py] = worldToCanvas(sx, sy, x0, x1, y0, y1, cw, ch, pad);
+    const robotPx = 0.10 * scale;   // 10cm visual radius
+    ctx.fillStyle = robot.color + 'cc';
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(px, py, Math.max(robotPx, 4), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (detailed) {
+      ctx.fillStyle = robot.color;
+      ctx.font = 'bold 10px Space Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(robot.name.toUpperCase(),
+                   px, py - Math.max(robotPx, 4) - 6);
+    }
+  }
+
+  // VC start (yellow filled circle) + goal (yellow plus)
+  const [sx, sy] = worldToCanvas(vc.start[0], vc.start[1], x0, x1, y0, y1, cw, ch, pad);
+  ctx.fillStyle = '#ffd33f';
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(sx, sy, detailed ? 9 : 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#ffd33f';
+  ctx.font = 'bold 11px Space Mono, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('VC START', sx, sy - 14);
+
+  const [gx, gy] = worldToCanvas(vc.goal[0], vc.goal[1], x0, x1, y0, y1, cw, ch, pad);
+  ctx.strokeStyle = '#ffd33f';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(gx - 12, gy); ctx.lineTo(gx + 12, gy);
+  ctx.moveTo(gx, gy - 12); ctx.lineTo(gx, gy + 12);
+  ctx.stroke();
+  ctx.fillStyle = '#ffd33f';
+  ctx.font = 'bold 11px Space Mono, monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('VC GOAL', gx + 14, gy + 4);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Two render modes
+// ─────────────────────────────────────────────────────────────────────────
+function renderMapContext(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = canvas.clientWidth  * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, cw, ch);
+  if (!mapData) return;
+
+  const meta = mapData.metadata;
+  const x0 = meta.min_x, x1 = meta.min_x + meta.grid_width  * meta.resolution;
+  const y0 = meta.min_y, y1 = meta.min_y + meta.grid_height * meta.resolution;
+  const pad = 30;
+  renderBaseMap(ctx, x0, x1, y0, y1, cw, ch, pad);
+  if (planData) drawPlan(ctx, x0, x1, y0, y1, cw, ch, pad, false);
+}
+
+function renderPlanDetail(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = canvas.clientWidth  * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const pad = 30;
+  ctx.fillStyle = '#0a0c10';
+  ctx.fillRect(0, 0, cw, ch);
+  if (!planData || !mapData) return;
+
+  // Zoom around the path + formation envelope
+  const fr = planData.metadata.formation_radius;
+  const allXs = [];
+  const allYs = [];
+  planData.virtual_center.waypoints.forEach(([x, y]) => { allXs.push(x); allYs.push(y); });
+  for (const r of planData.robots) {
+    if (r.track) r.track.forEach(([x, y]) => { allXs.push(x); allYs.push(y); });
+  }
+  const margin = Math.max(fr * 1.5, 0.6);
+  const x0 = Math.min(...allXs) - margin, x1 = Math.max(...allXs) + margin;
+  const y0 = Math.min(...allYs) - margin, y1 = Math.max(...allYs) + margin;
+
+  renderBaseMap(ctx, x0, x1, y0, y1, cw, ch, pad,
+                { x0: x0, x1: x1, y0: y0, y1: y1 });
+  drawPlan(ctx, x0, x1, y0, y1, cw, ch, pad, true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stats bar
+// ─────────────────────────────────────────────────────────────────────────
+function renderStats() {
+  if (!planData) return;
+  const m = planData.metadata;
+  const stats = [
+    ['VC waypoints',         planData.virtual_center.waypoints.length],
+    ['VC distance',          m.vc_distance.toFixed(2) + ' m'],
+    ['Travel time',          '~' + m.travel_time_sec.toFixed(1) + ' s @ 0.18 m/s'],
+    ['Formation radius',     m.formation_radius.toFixed(2) + ' m'],
+    ['Inflation iters',      m.inflation_iters + ' cells'],
+    ['Robots in formation',  planData.robots.length],
+    ['Plan seq',             planData.seq ?? '—'],
+  ];
+  document.getElementById('statsBar').innerHTML = stats.map(
+    ([k, v]) => `<div class="stat"><div class="stat-label">${k}</div>` +
+                `<div class="stat-value">${v}</div></div>`
+  ).join('');
+
+  document.getElementById('topInfo').innerHTML =
+    `Map: <b>${mapData.metadata.grid_width}×${mapData.metadata.grid_height}</b> ` +
+    `cells @ ${mapData.metadata.resolution}m  ·  ` +
+    `Last update: <b>${planData.wall_clock_iso ? new Date(planData.wall_clock_iso).toLocaleTimeString() : '—'}</b>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Live polling — auto-refresh on new plan
+// ─────────────────────────────────────────────────────────────────────────
+const POLL_MS = 750;
+let lastSeq = -1;
+
+function rerender() {
+  renderStats();
+  renderMapContext(document.getElementById('mapCanvas'));
+  renderPlanDetail(document.getElementById('planCanvas'));
+  const flash = document.getElementById('topInfo');
+  if (flash) {
+    flash.style.transition = 'color 0.4s';
+    flash.style.color = '#00e5a0';
+    setTimeout(() => { flash.style.color = ''; }, 600);
+  }
+}
+
+async function load() {
+  try {
+    const mr = await fetch('/map');
+    if (!mr.ok) throw new Error('/map: ' + mr.status);
+    mapData = await mr.json();
+    await poll();
+  } catch (e) {
+    document.body.innerHTML =
+      `<div class="err">Failed to load /map: ${e.message}<br><br>` +
+      `Make sure server.py is running.</div>`;
+    return;
+  }
+  setInterval(poll, POLL_MS);
+}
+
+async function poll() {
+  try {
+    const pr = await fetch('/path_plan.json', { cache: 'no-store' });
+    if (!pr.ok) {
+      document.getElementById('statsBar').innerHTML =
+        `<div class="stat" style="min-width:auto"><div class="stat-label">status</div>` +
+        `<div class="stat-value" style="color:#ffaa00">waiting for first goal</div></div>` +
+        `<div class="stat" style="min-width:auto"><div class="stat-label">tip</div>` +
+        `<div class="stat-value" style="font-size:11px;color:#e0e6f0">click on the floor in the 3D view, then "Send Goal"</div></div>`;
+      return;
+    }
+    const newPlan = await pr.json();
+    const newSeq  = newPlan.seq ?? -1;
+    if (newSeq !== lastSeq) {
+      lastSeq = newSeq;
+      planData = newPlan;
+      rerender();
+      console.log('plan updated, seq =', newSeq);
+    }
+  } catch (e) {
+    console.warn('poll error:', e);
+  }
+}
+
+window.addEventListener('load', load);
+window.addEventListener('resize', () => {
+  if (mapData && planData) rerender();
+});
+</script>
+</body>
+</html>
