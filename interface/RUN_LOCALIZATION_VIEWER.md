@@ -34,10 +34,78 @@ Tick all four:
 - [ ] A working `.db` from a successful mapping run at `~/maps/tb3_1_room.db` (10+ MB)
 - [ ] A pre-generated `interface/map.json` matching that `.db` (preprocessing is out of scope for this doc — generate it with whatever tool your branch uses; a healthy `map.json` is 2–5 MB)
 - [ ] Python packages: `pip install flask flask-cors requests`
+- [ ] (Cross-host workflow only) `~/fastdds_peers.xml` exists. If you don't have it yet, copy `interface/fastdds_peers.xml.example` to `~/fastdds_peers.xml` and replace `YOUR_LAPTOP_LAN_IP` with the output of `ip -4 addr show | grep 192.168.`. Skip this if you're using **Step 0 alt** (Single-Laptop Simulation Mode).
 - [ ] You're on a branch whose `interface/` folder contains `index.html`, `server.py`, and `ros_pose_bridge.py`. Verify:
   ```bash
   ls interface/index.html interface/server.py interface/ros_pose_bridge.py
   ```
+
+---
+
+## Step 0 (alt) — Single-Laptop Simulation Mode (no Pi, no robot)
+
+If you only want to verify the **GUI ↔ bridge ↔ server** chain — for example to debug the web UI, fake a robot pose, or test `Set Initial Pose` without unplugging anything — skip the Pi, skip RTAB-Map, and skip the Fast-DDS XML entirely.
+
+> **Important — do NOT export `FASTRTPS_DEFAULT_PROFILES_FILE` in this mode.**  
+> The XML hardcodes `192.168.1.114` / `.101` / `.102`; on a laptop with a different LAN IP (or with the cable unplugged) Fast-DDS tries to bind to nonexistent interfaces and may silently fail discovery. Default multicast (`224.0.0.1:7400`) handles same-host discovery just fine.
+
+Open **4 terminals** on the laptop. In every one, source ROS but leave `FASTRTPS_DEFAULT_PROFILES_FILE` unset:
+
+```bash
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+source /opt/ros/humble/setup.bash
+source ~/swerve_transport_project/ros2_ws/install/setup.bash
+```
+
+Then in **T1**, fake the `map → tb3_1_base_link` TF that RTAB-Map would normally publish:
+
+```bash
+ros2 run tf2_ros static_transform_publisher \
+    --x 1.0 --y 2.0 --z 0.0 \
+    --yaw 0.5 --pitch 0.0 --roll 0.0 \
+    --frame-id map --child-frame-id tb3_1_base_link
+```
+
+In **T2**, start the Flask server:
+
+```bash
+cd ~/swerve_transport_project/interface
+python3 server.py --map map.json --port 5002
+```
+
+In **T3**, start the bridge:
+
+```bash
+cd ~/swerve_transport_project/interface
+python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1
+```
+
+In **T4**, sanity check:
+
+```bash
+ros2 run tf2_ros tf2_echo map tb3_1_base_link    # should print the transform
+curl http://localhost:5002/pose                  # should return "localized": true
+```
+
+Open **`http://localhost:5002`** in your browser. You should see the cyan cone at (1.0, 2.0). Click **📍 Set Initial Pose** to verify the hint round-trip; the bridge will log `Published initial pose: x=… seq=…`.
+
+To **make the cone move**, restart T1 with new `--x` / `--y` / `--yaw` values, or publish `/tf` directly in a loop:
+
+```bash
+ros2 topic pub -r 10 /tf tf2_msgs/msg/TFMessage \
+  "{transforms: [{header: {frame_id: 'map'}, child_frame_id: 'tb3_1_base_link',
+    transform: {translation: {x: 1.5, y: 2.0, z: 0.0},
+                rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}]}"
+```
+
+To turn the LOC pill **green** (LIVE) instead of orange (DEAD-RECK), also publish a heartbeat on `/{robot_id}/slam/pose` — the bridge uses any message arrival on that topic as the "fresh visual match" signal:
+
+```bash
+ros2 topic pub -r 2 /tb3_1/slam/pose geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'map'}, pose: {position: {x: 1.0, y: 2.0, z: 0.0}, orientation: {w: 1.0}}}"
+```
+
+When you're done with simulation mode, **skip directly to "Stopping the run"** at the bottom of this file. Resume from Step 1 below only when you're testing with the real Pi + robot.
 
 ---
 
@@ -154,7 +222,7 @@ In **Terminal 3** (laptop, fresh shell). First source the ROS env:
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (Step 0 alt)
 ```
 
 Then verify pi2's topics are visible:
@@ -205,7 +273,7 @@ In **Terminal 4** (laptop, fresh shell):
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (Step 0 alt)
 cd ~/swerve_transport_project/interface
 python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1
 ```
@@ -290,7 +358,7 @@ In **Terminal 5** (laptop, fresh shell):
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (Step 0 alt)
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/tb3_1/cmd_vel
 ```
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Robot Mission Planner</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+  /* fonts: system stack — no external dependency, works fully offline */
 
   :root {
     --bg:        #0a0c10;
@@ -16,20 +16,22 @@
     --text:      #e0e6f0;
     --muted:     #4a5268;
     --success:   #00e5a0;
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
-  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
+  body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
          height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 
   header { display: flex; align-items: center; justify-content: space-between;
            padding: 12px 24px; border-bottom: 1px solid var(--border);
            background: var(--panel); flex-shrink: 0; }
-  header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
+  header h1 { font-family: var(--font-mono); font-size: 13px;
               letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
 
-  .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
+  .status-pill { font-family: var(--font-mono); font-size: 11px;
                  padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
                  color: var(--muted); display: flex; align-items: center; gap: 6px; }
   .status-pill .dot { width: 6px; height: 6px; border-radius: 50%;
@@ -48,7 +50,7 @@
   /* "Set Initial Pose" tool button — RViz "2D Pose Estimate" equivalent.
      Idle: outlined accent. Active (placing/yaw): filled accent. */
   .set-pose-btn {
-    font-family: 'Space Mono', monospace; font-size: 11px;
+    font-family: var(--font-mono); font-size: 11px;
     padding: 4px 12px; border-radius: 20px;
     border: 1px solid var(--accent); background: transparent;
     color: var(--accent); cursor: pointer; transition: background 0.2s;
@@ -60,7 +62,7 @@
                gap: 1px; background: var(--border); flex: 1; overflow: hidden; }
   .panel { background: var(--bg); position: relative; overflow: hidden; }
   .panel-label { position: absolute; top: 12px; left: 16px;
-                 font-family: 'Space Mono', monospace; font-size: 10px;
+                 font-family: var(--font-mono); font-size: 10px;
                  letter-spacing: 0.12em; text-transform: uppercase;
                  color: var(--muted); z-index: 10; pointer-events: none; }
 
@@ -71,14 +73,14 @@
                 display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
   .coords { display: flex; gap: 20px; flex: 1; }
   .coord-item { display: flex; flex-direction: column; gap: 2px; }
-  .coord-item label { font-family: 'Space Mono', monospace; font-size: 9px;
+  .coord-item label { font-family: var(--font-mono); font-size: 9px;
                       letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
-  .coord-item span { font-family: 'Space Mono', monospace; font-size: 16px;
+  .coord-item span { font-family: var(--font-mono); font-size: 16px;
                      color: var(--accent); min-width: 80px; }
   .coord-item span.empty { color: var(--muted); }
 
   .orient-wrap { display: flex; flex-direction: column; gap: 4px; }
-  .orient-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
+  .orient-wrap label { font-family: var(--font-mono); font-size: 9px;
                        letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
   .orient-row { display: flex; align-items: center; gap: 10px; }
   input[type=range] { -webkit-appearance: none; width: 140px; height: 2px;
@@ -86,22 +88,22 @@
   input[type=range]::-webkit-slider-thumb { -webkit-appearance: none;
                                             width: 14px; height: 14px; border-radius: 50%;
                                             background: var(--accent); cursor: pointer; }
-  .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
+  .orient-val { font-family: var(--font-mono); font-size: 14px;
                 color: var(--accent); min-width: 48px; }
 
   .size-wrap { display: flex; flex-direction: column; gap: 4px; }
-  .size-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
+  .size-wrap label { font-family: var(--font-mono); font-size: 9px;
                      letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
   .size-wrap input[type=number] {
     width: 90px; background: transparent; border: 1px solid var(--border);
-    color: var(--accent); font-family: 'Space Mono', monospace; font-size: 14px;
+    color: var(--accent); font-family: var(--font-mono); font-size: 14px;
     padding: 6px 10px; border-radius: 2px; outline: none;
   }
   .size-wrap input[type=number]:focus { border-color: var(--accent); }
-  .size-hint { font-family: 'Space Mono', monospace; font-size: 9px;
+  .size-hint { font-family: var(--font-mono); font-size: 9px;
                color: var(--muted); letter-spacing: 0.05em; margin-top: 2px; }
 
-  .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+  .send-btn { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em;
               text-transform: uppercase; padding: 10px 28px; background: transparent;
               border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
               border-radius: 2px; transition: all 0.2s; }
@@ -112,13 +114,13 @@
   .toast { position: fixed; bottom: 80px; left: 50%;
            transform: translateX(-50%) translateY(20px); background: var(--panel);
            border: 1px solid var(--success); color: var(--success);
-           font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
+           font-family: var(--font-mono); font-size: 11px; padding: 10px 20px;
            border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
   .loading { position: absolute; inset: 0; display: flex; align-items: center;
              justify-content: center; background: var(--bg); z-index: 50;
-             font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+             font-family: var(--font-mono); font-size: 11px; color: var(--muted);
              letter-spacing: 0.1em; flex-direction: column; gap: 12px; }
   .spinner { width: 24px; height: 24px; border: 2px solid var(--border);
              border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
@@ -185,8 +187,10 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+<!-- Vendored locally so the GUI works fully offline (no CDN dependency). -->
+<!-- See interface/vendor/README.md for refresh instructions. -->
+<script src="vendor/three.min.js"></script>
+<script src="vendor/roslib.min.js"></script>
 
 <script>
 // =======================================================================
