@@ -20,268 +20,77 @@
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'DM Sans', sans-serif;
-    height: 100vh;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
+  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif;
+         height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 
-  /* --- Header --- */
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 24px;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel);
-    flex-shrink: 0;
-  }
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding: 12px 24px; border-bottom: 1px solid var(--border);
+           background: var(--panel); flex-shrink: 0; }
+  header h1 { font-family: 'Space Mono', monospace; font-size: 13px;
+              letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
 
-  header h1 {
-    font-family: 'Space Mono', monospace;
-    font-size: 13px;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: var(--accent);
-  }
-
-  .status-pill {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    padding: 4px 12px;
-    border-radius: 20px;
-    border: 1px solid var(--border);
-    color: var(--muted);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .status-pill .dot {
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--muted);
-    transition: background 0.3s;
-  }
-
+  .status-pill { font-family: 'Space Mono', monospace; font-size: 11px;
+                 padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border);
+                 color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .status-pill .dot { width: 6px; height: 6px; border-radius: 50%;
+                      background: var(--muted); transition: background 0.3s; }
   .status-pill.connected .dot { background: var(--success); }
   .status-pill.connected { color: var(--success); border-color: var(--success); }
 
-  /* --- Main Layout --- */
-  .workspace {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr auto;
-    gap: 1px;
-    background: var(--border);
-    flex: 1;
-    overflow: hidden;
-  }
+  .workspace { display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr auto;
+               gap: 1px; background: var(--border); flex: 1; overflow: hidden; }
+  .panel { background: var(--bg); position: relative; overflow: hidden; }
+  .panel-label { position: absolute; top: 12px; left: 16px;
+                 font-family: 'Space Mono', monospace; font-size: 10px;
+                 letter-spacing: 0.12em; text-transform: uppercase;
+                 color: var(--muted); z-index: 10; pointer-events: none; }
 
-  .panel {
-    background: var(--bg);
-    position: relative;
-    overflow: hidden;
-  }
+  #canvas3d { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #canvas3d.dragging { cursor: grabbing; }
 
-  .panel-label {
-    position: absolute;
-    top: 12px; left: 16px;
-    font-family: 'Space Mono', monospace;
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--muted);
-    z-index: 10;
-    pointer-events: none;
-  }
-
-  /* --- 3D View --- */
-  #canvas3d {
-    width: 100%;
-    height: 100%;
-    display: block;
-    cursor: grab;
-  }
-  #canvas3d:active { cursor: grabbing; }
-
-  /* --- 2D View --- */
-  #canvas2d {
-    width: 100%;
-    height: 100%;
-    display: block;
-    cursor: crosshair;
-  }
-
-  /* --- Bottom Bar --- */
-  .bottom-bar {
-    grid-column: 1 / -1;
-    background: var(--panel);
-    padding: 14px 24px;
-    display: flex;
-    align-items: center;
-    gap: 24px;
-    border-top: 1px solid var(--border);
-  }
-
-  .coords {
-    display: flex;
-    gap: 20px;
-    flex: 1;
-  }
-
-  .coord-item {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .coord-item label {
-    font-family: 'Space Mono', monospace;
-    font-size: 9px;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    text-transform: uppercase;
-  }
-
-  .coord-item span {
-    font-family: 'Space Mono', monospace;
-    font-size: 16px;
-    color: var(--accent);
-    min-width: 80px;
-  }
-
+  .bottom-bar { background: var(--panel); padding: 14px 24px;
+                display: flex; align-items: center; gap: 24px; border-top: 1px solid var(--border); }
+  .coords { display: flex; gap: 20px; flex: 1; }
+  .coord-item { display: flex; flex-direction: column; gap: 2px; }
+  .coord-item label { font-family: 'Space Mono', monospace; font-size: 9px;
+                      letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .coord-item span { font-family: 'Space Mono', monospace; font-size: 16px;
+                     color: var(--accent); min-width: 80px; }
   .coord-item span.empty { color: var(--muted); }
 
-  /* Orientation slider */
-  .orient-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
+  .orient-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .orient-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
+                       letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .orient-row { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { -webkit-appearance: none; width: 140px; height: 2px;
+                      background: var(--border); outline: none; border-radius: 2px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none;
+                                            width: 14px; height: 14px; border-radius: 50%;
+                                            background: var(--accent); cursor: pointer; }
+  .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
+                color: var(--accent); min-width: 48px; }
 
-  .orient-wrap label {
-    font-family: 'Space Mono', monospace;
-    font-size: 9px;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    text-transform: uppercase;
-  }
+  .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
+              text-transform: uppercase; padding: 10px 28px; background: transparent;
+              border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
+              border-radius: 2px; transition: all 0.2s; }
+  .send-btn:hover:not(:disabled) { background: var(--accent); color: var(--bg); }
+  .send-btn:disabled { border-color: var(--muted); color: var(--muted); cursor: not-allowed; }
+  .send-btn.sent { border-color: var(--success); color: var(--success); }
 
-  .orient-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
+  .toast { position: fixed; bottom: 80px; left: 50%;
+           transform: translateX(-50%) translateY(20px); background: var(--panel);
+           border: 1px solid var(--success); color: var(--success);
+           font-family: 'Space Mono', monospace; font-size: 11px; padding: 10px 20px;
+           border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  input[type=range] {
-    -webkit-appearance: none;
-    width: 140px;
-    height: 2px;
-    background: var(--border);
-    outline: none;
-    border-radius: 2px;
-  }
-
-  input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 14px; height: 14px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-  }
-
-  .orient-val {
-    font-family: 'Space Mono', monospace;
-    font-size: 14px;
-    color: var(--accent);
-    min-width: 48px;
-  }
-
-  /* Send button */
-  .send-btn {
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    padding: 10px 28px;
-    background: transparent;
-    border: 1px solid var(--accent);
-    color: var(--accent);
-    cursor: pointer;
-    border-radius: 2px;
-    transition: all 0.2s;
-  }
-
-  .send-btn:hover:not(:disabled) {
-    background: var(--accent);
-    color: var(--bg);
-  }
-
-  .send-btn:disabled {
-    border-color: var(--muted);
-    color: var(--muted);
-    cursor: not-allowed;
-  }
-
-  .send-btn.sent {
-    border-color: var(--success);
-    color: var(--success);
-  }
-
-  /* Toast */
-  .toast {
-    position: fixed;
-    bottom: 80px;
-    left: 50%;
-    transform: translateX(-50%) translateY(20px);
-    background: var(--panel);
-    border: 1px solid var(--success);
-    color: var(--success);
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    padding: 10px 20px;
-    border-radius: 2px;
-    opacity: 0;
-    transition: all 0.3s;
-    pointer-events: none;
-    z-index: 100;
-  }
-
-  .toast.show {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-  }
-
-  /* Loading overlay */
-  .loading {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--bg);
-    z-index: 50;
-    font-family: 'Space Mono', monospace;
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 0.1em;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .spinner {
-    width: 24px; height: 24px;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
+  .loading { position: absolute; inset: 0; display: flex; align-items: center;
+             justify-content: center; background: var(--bg); z-index: 50;
+             font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+             letter-spacing: 0.1em; flex-direction: column; gap: 12px; }
+  .spinner { width: 24px; height: 24px; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
@@ -302,10 +111,8 @@
 </header>
 
 <div class="workspace">
-
-  <!-- 3D View -->
   <div class="panel" id="panel3d">
-    <div class="panel-label">3D Environment — Drag to rotate · Scroll to zoom</div>
+    <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
     <div class="loading" id="loading3d">
       <div class="spinner"></div>
       <span>Loading point cloud...</span>
@@ -313,31 +120,15 @@
     <canvas id="canvas3d"></canvas>
   </div>
 
-  <!-- 2D View -->
-  <div class="panel" id="panel2d">
-    <div class="panel-label">2D Top-Down — Click to set destination</div>
-    <canvas id="canvas2d"></canvas>
-  </div>
-
-  <!-- Bottom Bar -->
   <div class="bottom-bar">
     <div class="coords">
-      <div class="coord-item">
-        <label>X (m)</label>
-        <span id="valX" class="empty">—</span>
-      </div>
-      <div class="coord-item">
-        <label>Y (m)</label>
-        <span id="valY" class="empty">—</span>
-      </div>
-      <div class="coord-item">
-        <label>Z (m)</label>
-        <span id="valZ" class="empty">—</span>
-      </div>
+      <div class="coord-item"><label>X (m)</label><span id="valX" class="empty">—</span></div>
+      <div class="coord-item"><label>Y (m)</label><span id="valY" class="empty">—</span></div>
+      <div class="coord-item"><label>Z (m)</label><span id="valZ" class="empty">—</span></div>
     </div>
 
     <div class="orient-wrap">
-      <label>Orientation (Yaw)</label>
+      <label>Orientation (Yaw, deg, 0=+X, CCW+)</label>
       <div class="orient-row">
         <input type="range" id="orientSlider" min="0" max="359" value="0">
         <span class="orient-val" id="orientVal">0°</span>
@@ -346,681 +137,299 @@
 
     <button class="send-btn" id="sendBtn" disabled>Send Goal</button>
   </div>
-
 </div>
 
 <div class="toast" id="toast"></div>
 
-<!-- Three.js -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<!-- OBJ + MTL loaders for the mesh-vs-pointcloud comparison overlay -->
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
-<!-- roslibjs — bridges browser to ROS 2 via rosbridge WebSocket -->
 <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
 
 <script>
-// ================================================
-// STATE
-// ================================================
-let mapData     = null;
-let goal        = null;  // { x, y, z, orientation }
-let marker3d    = null;
-let markerGroup = null;
+// =======================================================================
+// Robot Mission Planner — 3D-only build
+//
+//   • Z-up world frame from the .db (REP-103).
+//   • Single THREE.Scene rendered into one canvas.
+//   • Click on the canvas → raycast against the math floor plane at
+//     world Z = floor_z → world (X, Y, Z) coordinate of the click.
+//   • That coordinate is shown in the bottom bar and is what gets
+//     published to ROS as a goal.
+//   • Orbit controls: drag to rotate, scroll to zoom, double-click to
+//     refit the camera. A short click (no significant drag) sets a
+//     goal — drags are filtered out.
+// =======================================================================
 
-// ================================================
-// 3D SETUP
-// ================================================
-const canvas3d  = document.getElementById("canvas3d");
-const panel3d   = document.getElementById("panel3d");
-const renderer  = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
+const ROSBRIDGE_URL    = "ws://localhost:9090";
+const ROBOT_POSE_TOPIC = "/tb3_0/pose";
+const GOAL_TOPIC       = "/goal_pose";
+
+// =======================================================================
+// State
+// =======================================================================
+let mapData     = null;
+let goal        = null;
+let robotPose   = null;
+
+let cloudObj    = null;
+let goalGroup   = null;
+let robotGroup  = null;
+
+let cloudCenter = new THREE.Vector3();
+let cloudFitR   = 8;
+
+// =======================================================================
+// Scene + camera + renderer (Z-up, REP-103)
+// =======================================================================
+THREE.Object3D.DefaultUp = new THREE.Vector3(0, 0, 1);
+const scene = new THREE.Scene();
+
+const panel3d  = document.getElementById("panel3d");
+const canvas3d = document.getElementById("canvas3d");
+const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x0a0c10, 1);
 
-const scene  = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
-camera.position.set(0, 5, 8);
-camera.lookAt(0, 0, 0);
+camera.up.set(0, 0, 1);
 
-// Default view: slight tilt from top-down. Same orientation every refresh
-// so you and I always see the map the same way (no rotation = no
-// communication ambiguity). Double-click the 3D panel to snap back here.
-const DEFAULT_VIEW = { theta: 0.0, phi: 0.45 };   // phi=0 is straight down
-let cloudFitRadius = 8;                           // updated by fitCameraToCloud()
+let camSpherical = { theta: 0, phi: 0.85, radius: 8 };
 
-// Orbit controls (manual — no import needed)
-let isDragging = false, prevMouse = { x: 0, y: 0 };
-let spherical  = { theta: DEFAULT_VIEW.theta, phi: DEFAULT_VIEW.phi, radius: 8 };
+function updateCamera() {
+  const r  = camSpherical.radius;
+  const ph = camSpherical.phi;
+  const th = camSpherical.theta;
+  camera.position.set(
+    cloudCenter.x +  r * Math.sin(ph) * Math.sin(th),
+    cloudCenter.y + -r * Math.sin(ph) * Math.cos(th),
+    cloudCenter.z +  r * Math.cos(ph)
+  );
+  camera.lookAt(cloudCenter);
+}
+updateCamera();
 
-canvas3d.addEventListener("mousedown", e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
-window.addEventListener("mouseup",    () => isDragging = false);
-window.addEventListener("mousemove",  e => {
-  if (!isDragging) return;
-  const dx = (e.clientX - prevMouse.x) * 0.005;
-  const dy = (e.clientY - prevMouse.y) * 0.005;
-  spherical.theta -= dx;
-  spherical.phi    = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi + dy));
-  prevMouse = { x: e.clientX, y: e.clientY };
+function fitCamera() {
+  const fovV = camera.fov * Math.PI / 180;
+  const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
+  const fov  = Math.min(fovV, fovH);
+  camSpherical.radius = (cloudFitR / Math.sin(fov / 2)) * 1.18;
+  updateCamera();
+}
+
+// Orbit controls + click vs drag detection
+let dragging       = false;
+let dragMoved      = false;
+let dragStartPos   = { x: 0, y: 0 };
+const DRAG_THRESH  = 5;            // pixels of movement before we count a press as a drag
+
+canvas3d.addEventListener("mousedown", e => {
+  dragging     = true;
+  dragMoved    = false;
+  dragStartPos = { x: e.clientX, y: e.clientY };
+  canvas3d.classList.add("dragging");
+});
+window.addEventListener("mouseup", () => {
+  dragging = false;
+  canvas3d.classList.remove("dragging");
+});
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  if (!dragMoved) {
+    const dx = e.clientX - dragStartPos.x;
+    const dy = e.clientY - dragStartPos.y;
+    if (Math.hypot(dx, dy) > DRAG_THRESH) dragMoved = true;
+  }
+  if (!dragMoved) return;          // movement below threshold — could still become a click
+  const dx = (e.clientX - dragStartPos.x) * 0.005;
+  const dy = (e.clientY - dragStartPos.y) * 0.005;
+  camSpherical.theta -= dx;
+  camSpherical.phi   = Math.max(0.05, Math.min(Math.PI - 0.05, camSpherical.phi - dy));
+  dragStartPos = { x: e.clientX, y: e.clientY };
   updateCamera();
 });
 canvas3d.addEventListener("wheel", e => {
-  spherical.radius = Math.max(1, Math.min(50, spherical.radius + e.deltaY * 0.01));
+  camSpherical.radius = Math.max(0.5, Math.min(60, camSpherical.radius + e.deltaY * 0.01));
   updateCamera();
 });
+canvas3d.addEventListener("dblclick", () => fitCamera());
 
-function updateCamera() {
-  camera.position.set(
-    spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta),
-    spherical.radius * Math.cos(spherical.phi),
-    spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta)
-  );
-  camera.lookAt(scene.position);
-}
+// =======================================================================
+// Click → world (X, Y) via raycasting against the floor plane
+// =======================================================================
+const raycaster = new THREE.Raycaster();
+const ndc       = new THREE.Vector2();
+const hitPoint  = new THREE.Vector3();
 
-// Resize handler — re-fit the camera so the cloud always fills the panel.
-function resizeRenderers() {
-  const w = panel3d.clientWidth, h = panel3d.clientHeight;
-  renderer.setSize(w, h);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  fitCameraToCloud();   // re-fit on every resize so window resize stays clean
-  draw2D();
-}
-window.addEventListener("resize", resizeRenderers);
-
-// Fit the camera so the entire cloud is just visible, with a small margin.
-// Called on map load and on every window resize.
-function fitCameraToCloud() {
-  const fovV  = camera.fov * Math.PI / 180;       // vertical FOV (rad)
-  const fovH  = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
-  const fov   = Math.min(fovV, fovH);             // tighter axis decides distance
-  const distance = (cloudFitRadius / Math.sin(fov / 2)) * 1.15;   // 15% margin
-  spherical.radius = distance;
-  updateCamera();
-}
-
-// Double-click the 3D panel to snap back to the default view.
-canvas3d.addEventListener("dblclick", () => {
-  spherical.theta = DEFAULT_VIEW.theta;
-  spherical.phi   = DEFAULT_VIEW.phi;
-  fitCameraToCloud();
-});
-
-// Animate
-function animate() {
-  requestAnimationFrame(animate);
-  renderer.render(scene, camera);
-}
-animate();
-
-// ================================================
-// LOAD MAP
-// ================================================
-async function loadMap() {
-  try {
-    const res  = await fetch("/map");
-    mapData    = await res.json();
-
-    buildPointCloud();
-    offscreen = buildOffscreenGrid(mapData.metadata, mapData.grid);
-    resizeRenderers();
-    draw2D();
-
-    document.getElementById("loading3d").style.display = "none";
-    setStatus(true, `${mapData.metadata.point_count.toLocaleString()} points loaded`);
-
-    // Optional A/B overlay (e.g. Scaniverse .obj baseline). 204 → no overlay.
-    try {
-      const ov = await fetch("/map_overlay");
-      if (ov.ok && ov.status !== 204) {
-        const overlayData = await ov.json();
-        buildOverlayCloud(overlayData);
-        console.log(`overlay loaded: ${overlayData.metadata.point_count} points`);
-      }
-    } catch (oe) { /* no overlay configured — fine */ }
-  } catch (e) {
-    document.getElementById("loading3d").innerHTML =
-      `<span style="color:var(--accent2)">Failed to load map</span>`;
-    console.error(e);
-  }
-}
-
-let overlayCloudObj = null;
-function buildOverlayCloud(overlayData) {
-  // Render the overlay as small semi-transparent white-grey points so the
-  // colorful primary cloud reads on top. Use the same centering as the
-  // primary cloud so they align in world frame.
-  const pts = overlayData.points;
-  if (!pts || !pts.length) return;
-
-  const positions = new Float32Array(pts.length * 3);
-  for (let i = 0; i < pts.length; i++) {
-    positions[i*3]   = pts[i][0];
-    positions[i*3+1] = pts[i][1];
-    positions[i*3+2] = pts[i][2];
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-
-  // Match the primary cloud's centering — read its current offset.
-  const primary = scene.children.find(c => c instanceof THREE.Points);
-  const offset  = primary ? primary.position.clone() : new THREE.Vector3();
-
-  const mat = new THREE.PointsMaterial({
-    size: 0.025,
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.18,         // ghost overlay
-    sizeAttenuation: true,
-    depthWrite: false,
-  });
-  const cloud = new THREE.Points(geo, mat);
-  cloud.position.copy(offset);
-  scene.add(cloud);
-  overlayCloudObj = cloud;
-}
-
-// Keyboard toggle: press 'o' to show/hide the overlay
-window.addEventListener("keydown", e => {
-  if (e.key === "o" || e.key === "O") {
-    if (overlayCloudObj) overlayCloudObj.visible = !overlayCloudObj.visible;
-  }
-});
-
-// ================================================
-// MESH-vs-POINTCLOUD COMPARISON  (diagnostic overlay)
-// ================================================
-// The mesh is RTAB-Map's "smoothed" reconstruction (Poisson-style triangles).
-// The point cloud is the raw observations. Comparing them tells you:
-//   - Ghost walls in the cloud not reflected in the mesh -> odometry drift
-//   - Holes / blobby spots in the mesh -> noisy underlying cloud
-//
-// Keys:
-//   P  ->  point cloud only
-//   M  ->  mesh only
-//   B  ->  both (default after load)
-let meshObj = null;     // THREE.Object3D for the mesh
-
-function loadMeshOverlay(objUrl) {
-  if (typeof THREE.MTLLoader === 'undefined' || typeof THREE.OBJLoader === 'undefined') {
-    console.warn("OBJ/MTL loaders not available — skipping mesh overlay.");
-    return;
-  }
-  // Try to load the .mtl alongside the .obj (same base name, .mtl extension).
-  const mtlUrl = objUrl.replace(/\.obj$/, '.mtl');
-  const mtlLoader = new THREE.MTLLoader();
-  mtlLoader.load(mtlUrl,
-    (materials) => {
-      materials.preload();
-      const objLoader = new THREE.OBJLoader();
-      objLoader.setMaterials(materials);
-      objLoader.load(objUrl, (object) => placeMesh(object),
-        undefined, () => loadMeshObjOnly(objUrl));   // fall back if obj fails
-    },
-    undefined,
-    () => loadMeshObjOnly(objUrl)                    // fall back if mtl missing
-  );
-}
-
-function loadMeshObjOnly(objUrl) {
-  const objLoader = new THREE.OBJLoader();
-  objLoader.load(objUrl, placeMesh, undefined,
-    (e) => console.warn("mesh load failed:", e));
-}
-
-function placeMesh(object) {
-  // RTAB-Map mesh is in Z-up world frame; our point cloud was already
-  // remapped to Y-up by db_to_map_json.py. Rotate the mesh -90° around X
-  // so its Z (up) lines up with our Y (up).
-  object.rotation.x = -Math.PI / 2;
-
-  // Match the primary cloud's centering offset so they overlay correctly.
-  const primary = scene.children.find(c => c instanceof THREE.Points);
-  if (primary) object.position.copy(primary.position);
-
-  // Make the mesh slightly transparent so the colored point cloud reads
-  // on top of it. Apply to every material in the loaded object.
-  object.traverse((child) => {
-    if (child.isMesh && child.material) {
-      const mats = Array.isArray(child.material) ? child.material : [child.material];
-      for (const m of mats) {
-        m.transparent = true;
-        m.opacity = 0.55;
-        m.depthWrite = false;
-      }
-    }
-  });
-
-  meshObj = object;
-  scene.add(meshObj);
-  console.log("mesh overlay loaded; default = both visible");
-}
-
-// P / M / B toggle keys
-window.addEventListener("keydown", e => {
-  const primary = scene.children.find(c => c instanceof THREE.Points);
-  if (e.key === 'p' || e.key === 'P') {
-    if (primary) primary.visible = true;
-    if (meshObj) meshObj.visible = false;
-    console.log("view: point cloud only");
-  } else if (e.key === 'm' || e.key === 'M') {
-    if (primary) primary.visible = false;
-    if (meshObj) meshObj.visible = true;
-    console.log("view: mesh only");
-  } else if (e.key === 'b' || e.key === 'B') {
-    if (primary) primary.visible = true;
-    if (meshObj) meshObj.visible = true;
-    console.log("view: both");
-  }
-});
-
-// Mesh auto-load DISABLED — only the current db's point cloud is shown.
-// Press M or B to manually load the mesh overlay if/when one is regenerated.
-window.addEventListener("load", () => {
-  // loadMeshOverlay("/tb3_1_room_from_db_mesh.obj");
-});
-
-// Map a normalized height t∈[0,1] to a blue→cyan→green→yellow→red gradient.
-// Low heights (floor) appear cool; high heights (walls/objects) warm. Makes
-// 3D structure instantly readable without depending on the camera's RGB.
-function heightToColor(t) {
-  return [
-    Math.max(0, Math.min(1, 2 * t)),                       // R
-    Math.max(0, Math.min(1, 2 * (1 - Math.abs(t - 0.5)))), // G
-    Math.max(0, Math.min(1, 2 * (1 - t))),                 // B
-  ];
-}
-
-let referenceHelpers = [];   // grid + axes; rebuilt each map load
-
-function buildPointCloud() {
-  // Clear previous reference helpers if reloading
-  for (const h of referenceHelpers) scene.remove(h);
-  referenceHelpers = [];
-
-  const pts    = mapData.points;
-  const cols   = mapData.colors;
-  const count  = pts.length;
-
-  const positions = new Float32Array(count * 3);
-  const colors    = new Float32Array(count * 3);
-
-  // Still compute Y range — the floor grid placement (further down) needs it.
-  let yMin = Infinity, yMax = -Infinity;
-  for (let i = 0; i < count; i++) {
-    if (pts[i][1] < yMin) yMin = pts[i][1];
-    if (pts[i][1] > yMax) yMax = pts[i][1];
-  }
-
-  for (let i = 0; i < count; i++) {
-    positions[i*3]   = pts[i][0];
-    positions[i*3+1] = pts[i][1];
-    positions[i*3+2] = pts[i][2];
-    // Original RGB from the OAK-D capture (reverted from height gradient).
-    colors[i*3]   = cols[i][0] / 255;
-    colors[i*3+1] = cols[i][1] / 255;
-    colors[i*3+2] = cols[i][2] / 255;
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute("color",    new THREE.BufferAttribute(colors,    3));
-
-  // Larger points so the cloud reads as solid in 3D (was 0.03)
-  const mat = new THREE.PointsMaterial({ size: 0.05, vertexColors: true,
-                                         sizeAttenuation: true });
-  const cloud = new THREE.Points(geo, mat);
-
-  // Center the point cloud on the world origin.
-  geo.computeBoundingBox();
-  const center = new THREE.Vector3();
-  geo.boundingBox.getCenter(center);
-  cloud.position.sub(center);
-
-  // Compute the cloud's bounding sphere RADIUS in centered coordinates.
-  geo.computeBoundingSphere();
-  cloudFitRadius = geo.boundingSphere.radius;
-
-  scene.add(cloud);
-
-  // ---- Visual references for verifying 3D map quality ----
-  // Floor grid: 1m spacing, sized to fit the cloud's footprint with margin.
-  const xSpan = (geo.boundingBox.max.x - geo.boundingBox.min.x);
-  const zSpan = (geo.boundingBox.max.z - geo.boundingBox.min.z);
-  const gridSize = Math.ceil(Math.max(xSpan, zSpan, 4)) + 2;   // meters, even
-  const grid = new THREE.GridHelper(gridSize, gridSize, 0x44aaff, 0x223344);
-  // Place at floor height (yMin in centered coords)
-  grid.position.y = yMin - center.y;
-  scene.add(grid);
-  referenceHelpers.push(grid);
-
-  // World-axes marker at origin so you can always tell which way is +X/+Y/+Z.
-  // Length = 1 m so it doesn't overpower the scene.
-  const axes = new THREE.AxesHelper(1.0);
-  axes.position.y = yMin - center.y;   // at floor level
-  scene.add(axes);
-  referenceHelpers.push(axes);
-
-  // Reset to default angle + auto-fit on every map load (i.e. every refresh).
-  spherical.theta = DEFAULT_VIEW.theta;
-  spherical.phi   = DEFAULT_VIEW.phi;
-  fitCameraToCloud();
-
-  // Marker group (destination indicator)
-  markerGroup = new THREE.Group();
-  scene.add(markerGroup);
-}
-
-// ================================================
-// 2D MAP (Occupancy Grid)
-// ================================================
-const canvas2d = document.getElementById("canvas2d");
-const ctx2d    = canvas2d.getContext("2d");
-let   clickPos = null;
-let   offscreen = null;  // pre-rendered grid image
-
-// Convert grid cell to canvas pixel
-function gridToCanvas(col, row, meta, cw, ch, padding=20) {
-  const scaleX = (cw - padding*2) / meta.grid_width;
-  const scaleY = (ch - padding*2) / meta.grid_height;
-  return {
-    cx: padding + col * scaleX + scaleX * 0.5,
-    cy: padding + row * scaleY + scaleY * 0.5
-  };
-}
-
-// Convert canvas pixel to grid cell
-function canvasToGrid(cx, cy, meta, cw, ch, padding=20) {
-  const scaleX = (cw - padding*2) / meta.grid_width;
-  const scaleY = (ch - padding*2) / meta.grid_height;
-  return {
-    col: Math.floor((cx - padding) / scaleX),
-    row: Math.floor((cy - padding) / scaleY)
-  };
-}
-
-// Convert grid cell to world coords
-function gridToWorld(col, row, meta) {
-  const wx = meta.min_x + col * meta.resolution + meta.resolution * 0.5;
-  const wz = meta.min_z + row * meta.resolution + meta.resolution * 0.5;
-  return { wx, wy: meta.floor_y, wz };
-}
-
-// Pre-render the static grid onto an offscreen canvas
-function buildOffscreenGrid(meta, grid) {
-  const oc  = document.createElement("canvas");
-  oc.width  = meta.grid_width;
-  oc.height = meta.grid_height;
-  const octx = oc.getContext("2d");
-  const img  = octx.createImageData(meta.grid_width, meta.grid_height);
-
-  for (let row = 0; row < meta.grid_height; row++) {
-    for (let col = 0; col < meta.grid_width; col++) {
-      const cell = grid[row][col];
-      const idx  = (row * meta.grid_width + col) * 4;
-      if (cell === 1) {
-        // Ground — dark teal
-        img.data[idx]   = 18;
-        img.data[idx+1] = 38;
-        img.data[idx+2] = 38;
-        img.data[idx+3] = 255;
-      } else if (cell === 2) {
-        // Obstacle — bright wall color
-        img.data[idx]   = 52;
-        img.data[idx+1] = 73;
-        img.data[idx+2] = 94;
-        img.data[idx+3] = 255;
-      } else {
-        // Unknown — near black
-        img.data[idx]   = 10;
-        img.data[idx+1] = 12;
-        img.data[idx+2] = 16;
-        img.data[idx+3] = 255;
-      }
-    }
-  }
-  octx.putImageData(img, 0, 0);
-  return oc;
-}
-
-function draw2D() {
-  const panel = document.getElementById("panel2d");
-  const cw = panel.clientWidth, ch = panel.clientHeight;
-  canvas2d.width = cw; canvas2d.height = ch;
-
-  // Background
-  ctx2d.fillStyle = "#0a0c10";
-  ctx2d.fillRect(0, 0, cw, ch);
-
-  if (!mapData || !offscreen) return;
-
-  const meta    = mapData.metadata;
-  const padding = 20;
-
-  // Draw the pre-rendered grid scaled to canvas
-  ctx2d.imageSmoothingEnabled = false;
-  ctx2d.drawImage(offscreen, padding, padding, cw - padding*2, ch - padding*2);
-
-  // Grid border
-  ctx2d.strokeStyle = "#1e2330";
-  ctx2d.lineWidth   = 1;
-  ctx2d.strokeRect(padding, padding, cw - padding*2, ch - padding*2);
-
-  // Draw destination marker
-  if (clickPos) {
-    const { cx, cy } = gridToCanvas(clickPos.col, clickPos.row, meta, cw, ch, padding);
-
-    // Pulse ring
-    ctx2d.beginPath();
-    ctx2d.arc(cx, cy, 14, 0, Math.PI * 2);
-    ctx2d.strokeStyle = "rgba(0,229,255,0.25)";
-    ctx2d.lineWidth   = 1;
-    ctx2d.stroke();
-
-    // Inner dot
-    ctx2d.beginPath();
-    ctx2d.arc(cx, cy, 5, 0, Math.PI * 2);
-    ctx2d.fillStyle = "#00e5ff";
-    ctx2d.fill();
-
-    // Direction arrow
-    const angle   = (parseFloat(document.getElementById("orientSlider").value) * Math.PI) / 180;
-    const arrowLen = 22;
-    const tx = cx + Math.sin(angle) * arrowLen;
-    const ty = cy - Math.cos(angle) * arrowLen;
-
-    ctx2d.beginPath();
-    ctx2d.moveTo(cx, cy);
-    ctx2d.lineTo(tx, ty);
-    ctx2d.strokeStyle = "#00e5ff";
-    ctx2d.lineWidth   = 2;
-    ctx2d.stroke();
-
-    // Arrowhead
-    ctx2d.beginPath();
-    ctx2d.moveTo(tx, ty);
-    ctx2d.lineTo(tx - Math.sin(angle - 0.4) * 6, ty + Math.cos(angle - 0.4) * 6);
-    ctx2d.lineTo(tx - Math.sin(angle + 0.4) * 6, ty + Math.cos(angle + 0.4) * 6);
-    ctx2d.closePath();
-    ctx2d.fillStyle = "#00e5ff";
-    ctx2d.fill();
-
-    // Coords label
-    ctx2d.fillStyle = "rgba(0,229,255,0.8)";
-    ctx2d.font      = "10px 'Space Mono', monospace";
-    ctx2d.fillText(`(${clickPos.wx.toFixed(2)}, ${clickPos.wz.toFixed(2)})`, cx + 12, cy - 8);
-  }
-}
-
-// 2D click handler — only allow clicks on ground cells
-canvas2d.addEventListener("click", e => {
+canvas3d.addEventListener("click", e => {
   if (!mapData) return;
+  if (dragMoved) return;           // ignore the click that ended a drag
 
-  const rect    = canvas2d.getBoundingClientRect();
-  const cx      = e.clientX - rect.left;
-  const cy      = e.clientY - rect.top;
-  const meta    = mapData.metadata;
-  const { col, row } = canvasToGrid(cx, cy, meta, canvas2d.width, canvas2d.height);
+  const rect = canvas3d.getBoundingClientRect();
+  ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+  ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
 
-  // Bounds check
-  if (col < 0 || col >= meta.grid_width || row < 0 || row >= meta.grid_height) return;
+  // Math plane at world Z = floor_z, normal pointing up
+  const floorZ = mapData.metadata.floor_z || 0;
+  const floorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -floorZ);
+  if (!raycaster.ray.intersectPlane(floorPlane, hitPoint)) return;
 
-  const cell = mapData.grid[row][col];
-
-  // Only allow clicking ground cells (1), reject obstacles (2) and unknown (0)
-  if (cell !== 1) {
-    showToast("Cannot place goal on obstacle or unknown area");
+  // Optional: ignore clicks far outside the mapped area
+  const meta = mapData.metadata;
+  const margin = 0.5;              // 50 cm tolerance outside the bbox
+  if (hitPoint.x < meta.min_x - margin || hitPoint.x > meta.max_x + margin ||
+      hitPoint.y < meta.min_y - margin || hitPoint.y > meta.max_y + margin) {
+    showToast("Click is outside the mapped area");
     return;
   }
 
-  const { wx, wy, wz } = gridToWorld(col, row, meta);
-  clickPos = { col, row, wx, wz };
-  goal     = { x: wx, y: wy, z: wz, orientation: parseFloat(document.getElementById("orientSlider").value) };
+  goal = {
+    x: hitPoint.x,
+    y: hitPoint.y,
+    z: floorZ,
+    orientation: parseFloat(document.getElementById("orientSlider").value),
+  };
 
-  document.getElementById("valX").textContent = wx.toFixed(3);
+  document.getElementById("valX").textContent = hitPoint.x.toFixed(3);
   document.getElementById("valX").className   = "";
-  document.getElementById("valY").textContent = wy.toFixed(3);
+  document.getElementById("valY").textContent = hitPoint.y.toFixed(3);
   document.getElementById("valY").className   = "";
-  document.getElementById("valZ").textContent = wz.toFixed(3);
+  document.getElementById("valZ").textContent = floorZ.toFixed(3);
   document.getElementById("valZ").className   = "";
   document.getElementById("sendBtn").disabled = false;
 
-  update3DMarker(wx, wy, wz);
-  draw2D();
+  updateGoalMarker();
 });
 
-// ================================================
-// 3D MARKER
-// ================================================
-function update3DMarker(x, y, z) {
-  if (!markerGroup) return;
-  while (markerGroup.children.length) markerGroup.remove(markerGroup.children[0]);
+// =======================================================================
+// Animation loop
+// =======================================================================
+(function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+})();
 
-  // Center offset
-  const pts = mapData.points;
-  let sumX = 0, sumY = 0, sumZ = 0;
-  for (const p of pts) { sumX += p[0]; sumY += p[1]; sumZ += p[2]; }
-  const n = pts.length;
-  const ox = sumX/n, oy = sumY/n, oz = sumZ/n;
+// =======================================================================
+// Cloud
+// =======================================================================
+function buildCloud(points, colors) {
+  if (cloudObj) {
+    scene.remove(cloudObj);
+    cloudObj.geometry.dispose();
+    cloudObj.material.dispose();
+  }
+
+  const N = points.length;
+  const positions = new Float32Array(N * 3);
+  const cols      = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    positions[i*3]     = points[i][0];
+    positions[i*3 + 1] = points[i][1];
+    positions[i*3 + 2] = points[i][2];
+    const c = colors[i] || [150, 150, 150];
+    cols[i*3]     = c[0] / 255;
+    cols[i*3 + 1] = c[1] / 255;
+    cols[i*3 + 2] = c[2] / 255;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("color",    new THREE.BufferAttribute(cols,      3));
+
+  const mat = new THREE.PointsMaterial({
+    size: 0.02, vertexColors: true, sizeAttenuation: true
+  });
+  cloudObj = new THREE.Points(geo, mat);
+
+  geo.computeBoundingBox();
+  geo.boundingBox.getCenter(cloudCenter);
+  geo.computeBoundingSphere();
+  cloudFitR = geo.boundingSphere.radius;
+
+  scene.add(cloudObj);
+
+  // Reference helpers — a floor-aligned grid and an axes gnomon
+  const xs = geo.boundingBox.max.x - geo.boundingBox.min.x;
+  const ys = geo.boundingBox.max.y - geo.boundingBox.min.y;
+  const sz = Math.ceil(Math.max(xs, ys, 4)) + 2;
+
+  const floorZ = mapData.metadata.floor_z || 0;
+  const grid   = new THREE.GridHelper(sz, sz, 0x44aaff, 0x223344);
+  grid.rotation.x = Math.PI / 2;          // GridHelper is XZ → make XY
+  grid.position.set(cloudCenter.x, cloudCenter.y, floorZ);
+  scene.add(grid);
+
+  const axes = new THREE.AxesHelper(1.0);
+  axes.position.set(cloudCenter.x, cloudCenter.y, floorZ);
+  scene.add(axes);
+}
+
+// =======================================================================
+// Markers
+// =======================================================================
+function buildArrow(start, end, color) {
+  const geo = new THREE.BufferGeometry().setFromPoints([start, end]);
+  return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+}
+
+function updateGoalMarker() {
+  if (goalGroup) scene.remove(goalGroup);
+  if (!goal) return;
+  goalGroup = new THREE.Group();
 
   const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.08, 12, 12),
+    new THREE.SphereGeometry(0.10, 16, 12),
     new THREE.MeshBasicMaterial({ color: 0x00e5ff })
   );
-  sphere.position.set(x - ox, y - oy, z - oz);
-  markerGroup.add(sphere);
+  const center = new THREE.Vector3(goal.x, goal.y, (goal.z || 0) + 0.05);
+  sphere.position.copy(center);
+  goalGroup.add(sphere);
 
-  // Vertical line
-  const lineMat = new THREE.LineBasicMaterial({ color: 0x00e5ff, opacity: 0.4, transparent: true });
-  const lineGeo = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(x - ox, y - oy - 0.5, z - oz),
-    new THREE.Vector3(x - ox, y - oy + 0.5, z - oz)
-  ]);
-  markerGroup.add(new THREE.Line(lineGeo, lineMat));
+  const yawRad = goal.orientation * Math.PI / 180;
+  const tip    = new THREE.Vector3(
+    center.x + Math.cos(yawRad) * 0.50,
+    center.y + Math.sin(yawRad) * 0.50,
+    center.z
+  );
+  goalGroup.add(buildArrow(center, tip, 0x00e5ff));
+
+  scene.add(goalGroup);
 }
 
-// ================================================
-// ORIENTATION SLIDER
-// ================================================
+function updateRobotMarker(pose) {
+  if (robotGroup) scene.remove(robotGroup);
+  robotGroup = new THREE.Group();
+
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 16, 12),
+    new THREE.MeshBasicMaterial({ color: 0x00e5a0 })
+  );
+  const center = new THREE.Vector3(pose.x, pose.y, (pose.z || 0) + 0.05);
+  sphere.position.copy(center);
+  robotGroup.add(sphere);
+
+  const tip = new THREE.Vector3(
+    center.x + Math.cos(pose.yaw) * 0.50,
+    center.y + Math.sin(pose.yaw) * 0.50,
+    center.z
+  );
+  robotGroup.add(buildArrow(center, tip, 0x00e5a0));
+
+  scene.add(robotGroup);
+}
+
+// =======================================================================
+// Slider + Send Goal
+// =======================================================================
 document.getElementById("orientSlider").addEventListener("input", e => {
   document.getElementById("orientVal").textContent = e.target.value + "°";
-  if (goal) goal.orientation = parseFloat(e.target.value);
-  draw2D();
+  if (goal) {
+    goal.orientation = parseFloat(e.target.value);
+    updateGoalMarker();
+  }
 });
 
-// ================================================
-// ROSBRIDGE CONNECTION
-// ================================================
-const ROSBRIDGE_URL = "ws://localhost:9090";
-
-// Robot pose state
-let robotPose    = null;   // { x, y, z, yaw } in world coords
-let robotGroup3d = null;   // Three.js group for robot marker
-
-const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
-
-ros.on("connection", () => {
-  console.log("rosbridge connected");
-  setRosStatus(true);
-  subscribeToRobotPose();
-});
-
-ros.on("error", err => {
-  console.warn("rosbridge error:", err);
-  setRosStatus(false);
-});
-
-ros.on("close", () => {
-  console.warn("rosbridge closed");
-  setRosStatus(false);
-  // Retry connection every 3 seconds
-  setTimeout(() => ros.connect(ROSBRIDGE_URL), 3000);
-});
-
-// ================================================
-// SUBSCRIBE — Robot Pose from EKF node
-// ================================================
-function subscribeToRobotPose() {
-  const poseTopic = new ROSLIB.Topic({
-    ros,
-    name       : "/tb3_0/pose",          // matches your ekf_node output topic
-    messageType: "geometry_msgs/PoseStamped"
-  });
-
-  poseTopic.subscribe(msg => {
-    const p   = msg.pose.position;
-    const q   = msg.pose.orientation;
-
-    // Convert quaternion to yaw (rotation around Y axis in ROS = Z in Three.js)
-    const yaw = Math.atan2(
-      2 * (q.w * q.z + q.x * q.y),
-      1 - 2 * (q.y * q.y + q.z * q.z)
-    );
-
-    robotPose = { x: p.x, y: p.y, z: p.z, yaw };
-
-    update3DRobotMarker(robotPose);
-    draw2D();  // redraws 2D with updated robot position
-  });
-}
-
-// ================================================
-// PUBLISH — Goal to Navigation Node
-// ================================================
-const goalTopic = new ROSLIB.Topic({
-  ros,
-  name       : "/goal_pose",            // Nav2 standard goal topic
-  messageType: "geometry_msgs/PoseStamped"
-});
-
-function publishGoalToROS(goal) {
-  // Convert orientation degrees to quaternion (yaw only)
-  const yawRad = (goal.orientation * Math.PI) / 180;
-  const qz     = Math.sin(yawRad / 2);
-  const qw     = Math.cos(yawRad / 2);
-
-  const msg = new ROSLIB.Message({
-    header: {
-      frame_id: "map",
-      stamp   : { secs: 0, nsecs: 0 }
-    },
-    pose: {
-      position   : { x: goal.x, y: goal.y, z: goal.z },
-      orientation: { x: 0, y: 0, z: qz, w: qw }
-    }
-  });
-
-  goalTopic.publish(msg);
-  console.log("Goal published to ROS:", goal);
-}
-
-// ================================================
-// SEND GOAL (publishes to ROS directly)
-// ================================================
 document.getElementById("sendBtn").addEventListener("click", () => {
   if (!goal) return;
-
   const btn = document.getElementById("sendBtn");
   btn.disabled    = true;
   btn.textContent = "Sending...";
@@ -1029,7 +438,7 @@ document.getElementById("sendBtn").addEventListener("click", () => {
     publishGoalToROS(goal);
     btn.textContent = "Sent ✓";
     btn.classList.add("sent");
-    showToast(`Goal → X:${goal.x.toFixed(2)} Z:${goal.z.toFixed(2)} θ:${goal.orientation}°`);
+    showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
     setTimeout(() => {
       btn.textContent = "Send Goal";
       btn.classList.remove("sent");
@@ -1039,110 +448,27 @@ document.getElementById("sendBtn").addEventListener("click", () => {
     btn.textContent = "Failed";
     btn.style.borderColor = "var(--accent2)";
     btn.style.color       = "var(--accent2)";
-    setTimeout(() => { btn.textContent = "Send Goal"; btn.style = ""; btn.disabled = false; }, 2000);
+    setTimeout(() => {
+      btn.textContent = "Send Goal";
+      btn.style       = "";
+      btn.disabled    = false;
+    }, 2000);
   }
 });
 
-// ================================================
-// 3D ROBOT MARKER (green = robot, cyan = goal)
-// ================================================
-function update3DRobotMarker(pose) {
-  if (!markerGroup) return;
-
-  // Lazy init robot group
-  if (!robotGroup3d) {
-    robotGroup3d = new THREE.Group();
-    scene.add(robotGroup3d);
-  }
-  while (robotGroup3d.children.length) robotGroup3d.remove(robotGroup3d.children[0]);
-
-  const pts = mapData.points;
-  let sumX = 0, sumY = 0, sumZ = 0;
-  for (const p of pts) { sumX += p[0]; sumY += p[1]; sumZ += p[2]; }
-  const n = pts.length;
-  const ox = sumX/n, oy = sumY/n, oz = sumZ/n;
-
-  // Robot body sphere
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.1, 12, 12),
-    new THREE.MeshBasicMaterial({ color: 0x00e5a0 })
-  );
-  sphere.position.set(pose.x - ox, pose.y - oy, pose.z - oz);
-  robotGroup3d.add(sphere);
-
-  // Direction arrow (heading)
-  const arrowLen = 0.4;
-  const arrowGeo = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(pose.x - ox, pose.y - oy, pose.z - oz),
-    new THREE.Vector3(
-      pose.x - ox + Math.sin(pose.yaw) * arrowLen,
-      pose.y - oy,
-      pose.z - oz + Math.cos(pose.yaw) * arrowLen
-    )
-  ]);
-  robotGroup3d.add(new THREE.Line(arrowGeo,
-    new THREE.LineBasicMaterial({ color: 0x00e5a0, linewidth: 2 })));
-}
-
-// ================================================
-// 2D ROBOT MARKER (drawn in draw2D)
-// ================================================
-// Patch draw2D to also draw robot position
-const _draw2D_original = draw2D;
-draw2D = function() {
-  _draw2D_original();
-  if (!mapData || !robotPose) return;
-
-  const meta    = mapData.metadata;
-  const cw      = canvas2d.width, ch = canvas2d.height;
-  const padding = 20;
-
-  // Convert robot world pos to grid cell
-  const col = Math.floor((robotPose.x - meta.min_x) / meta.resolution);
-  const row = Math.floor((robotPose.z - meta.min_z) / meta.resolution);
-  const { cx, cy } = gridToCanvas(col, row, meta, cw, ch, padding);
-
-  // Robot circle
-  ctx2d.beginPath();
-  ctx2d.arc(cx, cy, 7, 0, Math.PI * 2);
-  ctx2d.fillStyle   = "#00e5a0";
-  ctx2d.fill();
-  ctx2d.strokeStyle = "#0a0c10";
-  ctx2d.lineWidth   = 2;
-  ctx2d.stroke();
-
-  // Heading arrow
-  const arrowLen = 18;
-  const tx = cx + Math.sin(robotPose.yaw) * arrowLen;
-  const ty = cy - Math.cos(robotPose.yaw) * arrowLen;
-  ctx2d.beginPath();
-  ctx2d.moveTo(cx, cy);
-  ctx2d.lineTo(tx, ty);
-  ctx2d.strokeStyle = "#00e5a0";
-  ctx2d.lineWidth   = 2;
-  ctx2d.stroke();
-
-  // Label
-  ctx2d.fillStyle = "rgba(0,229,160,0.8)";
-  ctx2d.font      = "9px 'Space Mono', monospace";
-  ctx2d.fillText("ROBOT", cx + 10, cy - 10);
-};
-
-// ================================================
-// HELPERS
-// ================================================
+// =======================================================================
+// Status helpers
+// =======================================================================
 function setStatus(connected, text) {
   const pill = document.getElementById("statusPill");
   document.getElementById("statusText").textContent = text;
   pill.className = "status-pill" + (connected ? " connected" : "");
 }
-
 function setRosStatus(connected) {
   const pill = document.getElementById("rosPill");
-  pill.className    = "status-pill" + (connected ? " connected" : "");
+  pill.className = "status-pill" + (connected ? " connected" : "");
   pill.querySelector(".ros-text").textContent = connected ? "ROS Connected" : "ROS Disconnected";
 }
-
 function showToast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg;
@@ -1150,13 +476,85 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove("show"), 3000);
 }
 
-// ================================================
-// INIT
-// ================================================
+// =======================================================================
+// Rosbridge
+// =======================================================================
+const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
+ros.on("connection", () => { setRosStatus(true); subscribeToRobotPose(); });
+ros.on("error", () => setRosStatus(false));
+ros.on("close", () => {
+  setRosStatus(false);
+  setTimeout(() => ros.connect(ROSBRIDGE_URL), 3000);
+});
+
+function subscribeToRobotPose() {
+  const t = new ROSLIB.Topic({ ros, name: ROBOT_POSE_TOPIC, messageType: "geometry_msgs/PoseStamped" });
+  t.subscribe(msg => {
+    const p = msg.pose.position;
+    const q = msg.pose.orientation;
+    const yaw = Math.atan2(2 * (q.w * q.z + q.x * q.y),
+                           1 - 2 * (q.y * q.y + q.z * q.z));
+    robotPose = { x: p.x, y: p.y, z: p.z, yaw };
+    updateRobotMarker(robotPose);
+  });
+}
+
+const goalTopic = new ROSLIB.Topic({ ros, name: GOAL_TOPIC, messageType: "geometry_msgs/PoseStamped" });
+
+function publishGoalToROS(g) {
+  const yawRad = g.orientation * Math.PI / 180;
+  const qz = Math.sin(yawRad / 2);
+  const qw = Math.cos(yawRad / 2);
+  const msg = new ROSLIB.Message({
+    header: { frame_id: "map", stamp: { secs: 0, nsecs: 0 } },
+    pose:   { position:    { x: g.x, y: g.y, z: g.z },
+              orientation: { x: 0,    y: 0,    z: qz, w: qw } }
+  });
+  goalTopic.publish(msg);
+}
+
+// =======================================================================
+// Resize, load, init
+// =======================================================================
+function onResize() {
+  const w = panel3d.clientWidth, h = panel3d.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", onResize);
+
+async function loadMap() {
+  try {
+    const res  = await fetch("/map", { cache: "no-store" });
+    mapData    = await res.json();
+
+    if (mapData.metadata.axis_convention &&
+        mapData.metadata.axis_convention !== "z-up") {
+      console.warn("Unexpected axis_convention:", mapData.metadata.axis_convention);
+    }
+
+    buildCloud(mapData.points, mapData.colors);
+
+    onResize();
+    fitCamera();
+
+    document.getElementById("loading3d").style.display = "none";
+    setStatus(true,
+      `${mapData.metadata.point_count.toLocaleString()} pts · ` +
+      `floor ${mapData.metadata.floor_z.toFixed(2)} m · ` +
+      `bounds X[${mapData.metadata.min_x.toFixed(1)},${mapData.metadata.max_x.toFixed(1)}] ` +
+      `Y[${mapData.metadata.min_y.toFixed(1)},${mapData.metadata.max_y.toFixed(1)}]`);
+  } catch (e) {
+    console.error(e);
+    document.getElementById("loading3d").innerHTML =
+      `<span style="color:var(--accent2)">Failed to load map: ${e.message}</span>`;
+  }
+}
+
 window.addEventListener("load", () => {
-  resizeRenderers();
+  onResize();
   loadMap();
-  // rosbridge connects automatically via ros.on("connection")
 });
 </script>
 </body>
