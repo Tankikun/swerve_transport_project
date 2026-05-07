@@ -89,6 +89,18 @@
   .orient-val { font-family: 'Space Mono', monospace; font-size: 14px;
                 color: var(--accent); min-width: 48px; }
 
+  .size-wrap { display: flex; flex-direction: column; gap: 4px; }
+  .size-wrap label { font-family: 'Space Mono', monospace; font-size: 9px;
+                     letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .size-wrap input[type=number] {
+    width: 90px; background: transparent; border: 1px solid var(--border);
+    color: var(--accent); font-family: 'Space Mono', monospace; font-size: 14px;
+    padding: 6px 10px; border-radius: 2px; outline: none;
+  }
+  .size-wrap input[type=number]:focus { border-color: var(--accent); }
+  .size-hint { font-family: 'Space Mono', monospace; font-size: 9px;
+               color: var(--muted); letter-spacing: 0.05em; margin-top: 2px; }
+
   .send-btn { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 0.12em;
               text-transform: uppercase; padding: 10px 28px; background: transparent;
               border: 1px solid var(--accent); color: var(--accent); cursor: pointer;
@@ -162,6 +174,11 @@
       </div>
     </div>
 
+    <button id="simPoseBtn" class="set-pose-btn"
+            title="Toggle a simulated pose feed at (x=-4.0, y=-1.3) — bypasses /pose polling for visualisation testing">
+      &#127919; Sim Pose
+    </button>
+
     <button class="send-btn" id="sendBtn" disabled>Send Goal</button>
   </div>
 </div>
@@ -209,10 +226,44 @@ let pendingPoseGroup = null;   // visual during Set Initial Pose
 let cloudCenter = new THREE.Vector3();
 let cloudFitR   = 8;
 
-// Set-initial-pose state machine
-const POSE_MODE = { IDLE: 'idle', PLACING: 'placing', SETTING_YAW: 'setting_yaw' };
+// Click-to-place state machine. Two flows share the same "anchor + drag-yaw
+// + click-to-confirm" pattern:
+//   • Initial pose:  IDLE -[btn]→ PLACING -[click]→ SETTING_YAW -[click]→ POST
+//   • Goal:          IDLE -[click]→ GOAL_YAW -[click]→ confirm goal
+const POSE_MODE = {
+  IDLE:        'idle',
+  PLACING:     'placing',      // initial-pose: waiting for the first floor click
+  SETTING_YAW: 'setting_yaw',  // initial-pose: yaw being set by mouse
+  GOAL_YAW:    'goal_yaw',     // goal: anchor placed, yaw being set by mouse
+};
 let poseMode    = POSE_MODE.IDLE;
 let pendingPose = null;        // { x, y, yaw_rad } in world (ROS map) frame
+
+// Robot footprint visualisation. Fixed dimensions: the system is a
+// multi-robot pair separated by 50 cm, with each module 35 cm wide and
+// 10 cm tall. Width / height are hardware-fixed; length is set at the
+// system level (passed in here as ROBOT_LENGTH_M, not user-editable).
+// The wireframe box is added as a child of livePoseGroup so it
+// inherits the live pose's position + yaw automatically.
+const ROBOT_LENGTH_M = 0.50;   // metres, transverse extent — the "front side" length
+const ROBOT_WIDTH_M  = 0.35;   // metres, depth along forward direction
+const ROBOT_HEIGHT_M = 0.10;   // metres, vertical
+
+// Simulated-pose mode — when ON, the /pose polling loop ignores the HTTP
+// response and feeds these values to the GUI instead. Lets us check that
+// the marker + envelope render correctly without the full ROS stack.
+const SIM_POSE = Object.freeze({
+  available:          true,
+  localized:          true,
+  robot_id:           'sim',
+  frame:              'map',
+  x:                  -4.0,
+  y:                  -1.3,
+  yaw_rad:            0.0,
+  yaw_deg:            0.0,
+  last_match_age_sec: 0.0,
+});
+let simModeActive = false;
 
 // =======================================================================
 // Scene + camera + renderer (Z-up, REP-103)
@@ -270,7 +321,8 @@ window.addEventListener("mouseup", () => {
 });
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
-  if (poseMode === POSE_MODE.SETTING_YAW) return;   // free mouse for yaw setting
+  // Free the mouse for yaw-setting in either flow.
+  if (poseMode === POSE_MODE.SETTING_YAW || poseMode === POSE_MODE.GOAL_YAW) return;
   if (!dragMoved) {
     const dx = e.clientX - dragStartPos.x;
     const dy = e.clientY - dragStartPos.y;
@@ -327,7 +379,7 @@ canvas3d.addEventListener("click", e => {
   const inside = hit.x >= meta.min_x - margin && hit.x <= meta.max_x + margin &&
                  hit.y >= meta.min_y - margin && hit.y <= meta.max_y + margin;
 
-  // ---- Pose-tool path: PLACING (1st click) ----
+  // ---- Initial-pose: PLACING (1st click anchors) ----
   if (poseMode === POSE_MODE.PLACING) {
     if (!inside) return;
     pendingPose = { x: hit.x, y: hit.y, yaw_rad: 0 };
@@ -337,30 +389,36 @@ canvas3d.addEventListener("click", e => {
     return;
   }
 
-  // ---- Pose-tool path: SETTING_YAW (2nd click confirms + POSTs) ----
+  // ---- Initial-pose: SETTING_YAW (2nd click confirms + POSTs) ----
   if (poseMode === POSE_MODE.SETTING_YAW) {
     postInitialPose(pendingPose);
     return;
   }
 
-  // ---- IDLE: regular goal-setting ----
+  // ---- Goal: GOAL_YAW (2nd click confirms placement) ----
+  if (poseMode === POSE_MODE.GOAL_YAW) {
+    confirmGoal(pendingPose);
+    return;
+  }
+
+  // ---- IDLE: 1st click anchors a new goal; mouse will drive the yaw ----
   if (!inside) {
     showToast("Click is outside the mapped area");
     return;
   }
-  const floorZ = meta.floor_z || 0;
-  goal = { x: hit.x, y: hit.y, z: floorZ,
-           orientation: parseFloat(document.getElementById("orientSlider").value) };
-
+  const initialYawRad = parseFloat(document.getElementById("orientSlider").value) * Math.PI / 180;
+  pendingPose = { x: hit.x, y: hit.y, yaw_rad: initialYawRad };
+  poseMode    = POSE_MODE.GOAL_YAW;
+  // Show the click coords in the bottom bar so the user has immediate
+  // feedback; confirmGoal() will keep them and enable Send Goal on the
+  // second click.
   document.getElementById("valX").textContent = hit.x.toFixed(3);
   document.getElementById("valX").className   = "";
   document.getElementById("valY").textContent = hit.y.toFixed(3);
   document.getElementById("valY").className   = "";
-  document.getElementById("valZ").textContent = floorZ.toFixed(3);
+  document.getElementById("valZ").textContent = (meta.floor_z || 0).toFixed(3);
   document.getElementById("valZ").className   = "";
-  document.getElementById("sendBtn").disabled = false;
-
-  updateGoalMarker();
+  updatePendingPoseMarker();
 });
 
 // =======================================================================
@@ -368,7 +426,10 @@ canvas3d.addEventListener("click", e => {
 // computes yaw as the angle from the anchor to the cursor.
 // =======================================================================
 canvas3d.addEventListener("mousemove", e => {
-  if (poseMode !== POSE_MODE.SETTING_YAW || !pendingPose) return;
+  // Both initial-pose SETTING_YAW and GOAL_YAW use the same logic:
+  // project the cursor onto the floor and aim the arrow at it.
+  if ((poseMode !== POSE_MODE.SETTING_YAW && poseMode !== POSE_MODE.GOAL_YAW)
+      || !pendingPose) return;
   const hit = raycastFloor(e);
   if (!hit) return;
   pendingPose.yaw_rad = Math.atan2(hit.y - pendingPose.y, hit.x - pendingPose.x);
@@ -379,14 +440,26 @@ canvas3d.addEventListener("mousemove", e => {
 // Set Initial Pose — button + state-machine helpers
 // =======================================================================
 document.getElementById("setPoseBtn").addEventListener("click", () => {
-  if (poseMode === POSE_MODE.IDLE) {
-    poseMode = POSE_MODE.PLACING;
-    const btn = document.getElementById("setPoseBtn");
-    btn.classList.add("active");
-    btn.textContent = "\u{1F4CD} Click on map to anchor";
-  } else {
+  // Toggle off if we're already in the initial-pose flow.
+  if (poseMode === POSE_MODE.PLACING || poseMode === POSE_MODE.SETTING_YAW) {
     cancelInitialPose();
+    return;
   }
+  // If the user was mid-goal-placement, drop the pending preview before
+  // we hijack the state machine for the initial-pose flow.
+  if (poseMode === POSE_MODE.GOAL_YAW) {
+    poseMode    = POSE_MODE.IDLE;
+    pendingPose = null;
+    removePendingPoseMarker();
+  }
+  // Wipe any existing goal marker — starting a fresh Set Initial Pose
+  // means the 3D map should be clean for the new pose.
+  clearGoal();
+  // Enter the placing state and update the button.
+  poseMode = POSE_MODE.PLACING;
+  const btn = document.getElementById("setPoseBtn");
+  btn.classList.add("active");
+  btn.textContent = "\u{1F4CD} Click on map to anchor";
 });
 
 function cancelInitialPose() {
@@ -441,6 +514,31 @@ function flashConfirmation() {
 
 document.addEventListener("keydown", ev => {
   if (ev.key === "Escape" && poseMode !== POSE_MODE.IDLE) cancelInitialPose();
+});
+
+// Sim Pose toggle — bypasses /pose polling and feeds the GUI a fixed
+// (x, y, yaw) from SIM_POSE so we can verify the marker + envelope render
+// correctly without ROS / RTAB-Map running.
+document.getElementById("simPoseBtn").addEventListener("click", () => {
+  simModeActive = !simModeActive;
+  const btn = document.getElementById("simPoseBtn");
+  if (simModeActive) {
+    btn.classList.add("active");
+    btn.textContent = "\u{1F3AF} Sim ON (-4.0, -1.3)";
+    // Immediately push one frame so feedback is instant; the polling
+    // loop will keep refreshing it on its tick.
+    const simData = { ...SIM_POSE, age_sec: 0,
+                      wall_clock_iso: new Date().toISOString() };
+    livePose = simData;
+    updateLocPill(simData);
+    updateLivePoseMarker(simData);
+  } else {
+    btn.classList.remove("active");
+    btn.textContent = "\u{1F3AF} Sim Pose";
+    // Force the polling loop to re-evaluate from the real /pose endpoint
+    // on the next tick (it'll either restore live data or show NO BRIDGE).
+    livePose = null;
+  }
 });
 
 // =======================================================================
@@ -514,29 +612,87 @@ function buildArrow(start, end, color) {
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
 }
 
-// Goal marker — cyan sphere + arrow at goal pose.
+// Goal marker — uses the same shared cone+disk+envelope visual as the
+// live pose and Set-Initial-Pose preview, so the user sees a consistent
+// "robot here" rendering regardless of which mode produced the pose.
 function updateGoalMarker() {
-  if (goalGroup) scene.remove(goalGroup);
+  if (goalGroup) {
+    scene.remove(goalGroup);
+    goalGroup.traverse(c => {
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) {
+        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+        else c.material.dispose();
+      }
+    });
+    goalGroup = null;
+  }
   if (!goal) return;
-  goalGroup = new THREE.Group();
-
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.10, 16, 12),
-    new THREE.MeshBasicMaterial({ color: 0x00e5ff })
-  );
-  const center = new THREE.Vector3(goal.x, goal.y, (goal.z || 0) + 0.05);
-  sphere.position.copy(center);
-  goalGroup.add(sphere);
 
   const yawRad = goal.orientation * Math.PI / 180;
-  const tip = new THREE.Vector3(
-    center.x + Math.cos(yawRad) * 0.50,
-    center.y + Math.sin(yawRad) * 0.50,
-    center.z
-  );
-  goalGroup.add(buildArrow(center, tip, 0x00e5ff));
-
+  goalGroup = buildLivePoseVisual();
+  goalGroup.position.set(goal.x, goal.y, (goal.z || 0) + 0.02);
+  goalGroup.rotation.z = yawRad;
   scene.add(goalGroup);
+}
+
+// Wipe the goal: visual, state, bottom-bar readout, Send Goal button. Used
+// when the user starts a fresh Set Initial Pose flow ("starting over").
+function clearGoal() {
+  if (goalGroup) {
+    scene.remove(goalGroup);
+    goalGroup.traverse(c => {
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) {
+        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+        else c.material.dispose();
+      }
+    });
+    goalGroup = null;
+  }
+  goal = null;
+  ['valX', 'valY', 'valZ'].forEach(id => {
+    const el = document.getElementById(id);
+    el.textContent = '—';
+    el.className   = 'empty';
+  });
+  document.getElementById('sendBtn').disabled = true;
+}
+
+// Promote a pending goal pose into the actual `goal`: replace the preview
+// marker with the goal marker, sync the slider, and enable Send Goal.
+// Called from the click handler on the second floor click in GOAL_YAW.
+function confirmGoal(p) {
+  if (!mapData) return;
+  const meta   = mapData.metadata;
+  const floorZ = meta.floor_z || 0;
+
+  // Normalise yaw to 0..359° (slider domain) and store on the goal.
+  const yawDeg = ((p.yaw_rad * 180 / Math.PI) % 360 + 360) % 360;
+  goal = { x: p.x, y: p.y, z: floorZ, orientation: yawDeg };
+
+  // Sync the orientation slider to whatever yaw the user dragged.
+  const slider = document.getElementById('orientSlider');
+  const slVal  = document.getElementById('orientVal');
+  slider.value      = String(Math.round(yawDeg) % 360);
+  slVal.textContent = slider.value + '°';
+
+  // Bottom-bar coords were already filled in on the first click; refresh
+  // them just in case, and enable Send Goal now that the goal is final.
+  document.getElementById('valX').textContent = p.x.toFixed(3);
+  document.getElementById('valX').className   = '';
+  document.getElementById('valY').textContent = p.y.toFixed(3);
+  document.getElementById('valY').className   = '';
+  document.getElementById('valZ').textContent = floorZ.toFixed(3);
+  document.getElementById('valZ').className   = '';
+  document.getElementById('sendBtn').disabled = false;
+
+  // Reset the placement state machine and replace the pending preview
+  // with the final goal marker.
+  poseMode    = POSE_MODE.IDLE;
+  pendingPose = null;
+  removePendingPoseMarker();
+  updateGoalMarker();
 }
 
 // Robot marker (green) — driven by rosbridge /tb3_0/pose subscription
@@ -572,35 +728,126 @@ function updateLivePoseMarker(p) {
     return;
   }
   const floorZ = mapData.metadata.floor_z || 0;
-
   if (!livePoseGroup) {
-    livePoseGroup = new THREE.Group();
-    // Cone: ConeGeometry default points along +Y. Rotate -90° about Z so
-    // the apex points along +X (ROS forward) when group rotation.z = 0.
-    const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.10, 0.30, 12),
-      new THREE.MeshBasicMaterial({ color: 0x00e5ff })
-    );
-    cone.rotation.z = -Math.PI / 2;
-    cone.position.x = 0.15;          // base at group origin, apex at +0.30
-    livePoseGroup.add(cone);
-
-    // Translucent disk on the floor under the marker — readable from above
-    const disk = new THREE.Mesh(
-      new THREE.CircleGeometry(0.13, 24),
-      new THREE.MeshBasicMaterial({
-        color: 0x00e5ff, transparent: true, opacity: 0.5, depthWrite: false
-      })
-    );
-    livePoseGroup.add(disk);
+    livePoseGroup = buildLivePoseVisual();
     scene.add(livePoseGroup);
   }
   livePoseGroup.visible = true;
-
   // Z-up direct: ROS map (x, y, floor_z) → scene (x, y, z). +0.02 lifts
   // the disk slightly above the floor grid to avoid z-fighting.
   livePoseGroup.position.set(p.x, p.y, floorZ + 0.02);
   livePoseGroup.rotation.z = p.yaw_rad;
+}
+
+// Shared "robot here" visual — small heading cone + translucent floor disk
+// + thick-edge multi-robot envelope. Returned as a Group with origin at
+// the robot's centre on the floor; the caller sets position + yaw.
+//
+// Used by BOTH the live pose marker (livePoseGroup, fed from /pose) AND
+// the pending pose marker shown during the Set Initial Pose flow, so the
+// preview looks identical to what gets rendered once the hint is accepted.
+function buildLivePoseVisual() {
+  const grp = new THREE.Group();
+
+  // Heading arrow — slim shaft + small head along +X (ROS forward).
+  // CylinderGeometry / ConeGeometry both default-point along +Y; rotating
+  // -π/2 about Z aligns the axis with +X.
+  //   Shaft: 32 cm long, 1.2 cm radius, ending where the head starts.
+  //   Head : 8 cm long cone, 3.5 cm radius, base at 0.32, apex at 0.40.
+  // Total arrow length 0.40 — sticks past the envelope's front face so
+  // heading reads at a glance even when looking straight down.
+  const headColor = 0x00e5ff;
+
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.012, 0.012, 0.32, 12),
+    new THREE.MeshBasicMaterial({ color: headColor })
+  );
+  shaft.rotation.z = -Math.PI / 2;
+  shaft.position.x = 0.16;
+  grp.add(shaft);
+
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.035, 0.08, 12),
+    new THREE.MeshBasicMaterial({ color: headColor })
+  );
+  head.rotation.z = -Math.PI / 2;
+  head.position.x = 0.36;
+  grp.add(head);
+
+  // Translucent floor disk
+  const disk = new THREE.Mesh(
+    new THREE.CircleGeometry(0.07, 24),
+    new THREE.MeshBasicMaterial({
+      color: 0x00e5ff, transparent: true, opacity: 0.5, depthWrite: false
+    })
+  );
+  grp.add(disk);
+
+  // Multi-robot envelope (thick wireframe + end caps)
+  grp.add(buildRobotEnvelopeMesh());
+
+  return grp;
+}
+
+// The multi-robot envelope as its own subgroup. Box dimensions:
+//   X (depth, forward)   = ROBOT_WIDTH_M    (35 cm)
+//   Y (transverse, left) = ROBOT_LENGTH_M   (50 cm — the "front side" length)
+//   Z (vertical)         = ROBOT_HEIGHT_M   (10 cm)
+// The 12 edges are built as thin solid Box meshes (not LineSegments)
+// because LineBasicMaterial.linewidth is ignored on most browsers.
+function buildRobotEnvelopeMesh() {
+  const env = new THREE.Group();
+
+  const sx = ROBOT_WIDTH_M;
+  const sy = ROBOT_LENGTH_M;
+  const sz = ROBOT_HEIGHT_M;
+  const t  = 0.012;             // edge thickness in metres
+  const edgeMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
+
+  // 4 edges along X (+t so they overlap the perpendicular edges at corners)
+  for (const ys of [-sy/2, sy/2]) {
+    for (const zs of [-sz/2, sz/2]) {
+      const e = new THREE.Mesh(new THREE.BoxGeometry(sx + t, t, t), edgeMat);
+      e.position.set(0, ys, zs);
+      env.add(e);
+    }
+  }
+  // 4 edges along Y (the long edges — front and back, top and bottom)
+  for (const xs of [-sx/2, sx/2]) {
+    for (const zs of [-sz/2, sz/2]) {
+      const e = new THREE.Mesh(new THREE.BoxGeometry(t, sy + t, t), edgeMat);
+      e.position.set(xs, 0, zs);
+      env.add(e);
+    }
+  }
+  // 4 vertical edges along Z
+  for (const xs of [-sx/2, sx/2]) {
+    for (const ys of [-sy/2, sy/2]) {
+      const e = new THREE.Mesh(new THREE.BoxGeometry(t, t, sz + t), edgeMat);
+      e.position.set(xs, ys, 0);
+      env.add(e);
+    }
+  }
+
+  // Lift the envelope so its bottom sits on the floor.
+  env.position.z = sz / 2;
+
+  // Per-robot transverse caps at ±length/2 along Y (the two robots' positions).
+  // PlaneGeometry default lies in XY plane, normal +Z. Rotate -π/2 about X
+  // to make it lie in XZ plane with normal +Y (so it's an end cap).
+  const endRect = new THREE.PlaneGeometry(sx, sz);
+  const endMat  = new THREE.MeshBasicMaterial({
+    color: 0x00e5ff, transparent: true, opacity: 0.18,
+    side: THREE.DoubleSide, depthWrite: false
+  });
+  for (const offY of [-sy/2, sy/2]) {
+    const cap = new THREE.Mesh(endRect, endMat.clone());
+    cap.position.set(0, offY, 0);
+    cap.rotation.x = -Math.PI / 2;
+    env.add(cap);
+  }
+
+  return env;
 }
 
 // Pending-pose marker shown during PLACING/SETTING_YAW so the user sees
@@ -608,28 +855,23 @@ function updateLivePoseMarker(p) {
 function updatePendingPoseMarker() {
   if (pendingPoseGroup) {
     scene.remove(pendingPoseGroup);
+    pendingPoseGroup.traverse(c => {
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) {
+        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+        else c.material.dispose();
+      }
+    });
     pendingPoseGroup = null;
   }
   if (!pendingPose || !mapData) return;
 
+  // Build the same cone + disk + envelope visual as the live marker, so
+  // the user sees exactly what will be rendered once the hint is accepted.
   const floorZ = mapData.metadata.floor_z || 0;
-  pendingPoseGroup = new THREE.Group();
-
-  // Anchor sphere
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.08, 16, 12),
-    new THREE.MeshBasicMaterial({ color: 0x00e5ff })
-  );
-  sphere.position.set(pendingPose.x, pendingPose.y, floorZ + 0.03);
-  pendingPoseGroup.add(sphere);
-
-  // Yaw arrow (only meaningful in SETTING_YAW; in PLACING the yaw is 0)
-  const tx = pendingPose.x + Math.cos(pendingPose.yaw_rad) * 0.50;
-  const ty = pendingPose.y + Math.sin(pendingPose.yaw_rad) * 0.50;
-  const a  = new THREE.Vector3(pendingPose.x, pendingPose.y, floorZ + 0.03);
-  const b  = new THREE.Vector3(tx, ty, floorZ + 0.03);
-  pendingPoseGroup.add(buildArrow(a, b, 0x00e5ff));
-
+  pendingPoseGroup = buildLivePoseVisual();
+  pendingPoseGroup.position.set(pendingPose.x, pendingPose.y, floorZ + 0.02);
+  pendingPoseGroup.rotation.z = pendingPose.yaw_rad;
   scene.add(pendingPoseGroup);
 }
 
@@ -752,6 +994,15 @@ function publishGoalToROS(g) {
 // down, as long as ros_pose_bridge.py is POSTing to the Flask server.
 // =======================================================================
 async function pollPose() {
+  // Sim mode: ignore the network entirely and feed the GUI a frozen pose.
+  if (simModeActive) {
+    const simData = { ...SIM_POSE, age_sec: 0,
+                      wall_clock_iso: new Date().toISOString() };
+    livePose = simData;
+    updateLocPill(simData);
+    updateLivePoseMarker(simData);
+    return;
+  }
   try {
     const res  = await fetch("/pose");
     const data = await res.json();
