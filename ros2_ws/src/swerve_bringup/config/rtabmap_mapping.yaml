@@ -31,21 +31,21 @@
     Kp/MaxFeatures: "800"             # higher than localization
     
     # Image quality: full resolution for mapping
-    Mem/ImagePreDecimation: "1"       # no decimation, laptop can handle it
-    Mem/DepthDecimation: "1"
+    Mem/ImagePreDecimation: "2"       # no decimation, laptop can handle it
+    Mem/DepthDecimation: "2"
     
     # Keyframe density
     RGBD/LinearUpdate: "0.1"          # add keyframe every 10 cm
     RGBD/AngularUpdate: "0.1"         # or every ~6 degrees
     
     # Loop closure: stricter inlier requirement during mapping
-    Vis/MinInliers: "20"              # higher than localization (15)
+    Vis/MinInliers: "12"              # higher than localization (15)
     Vis/EstimationType: "1"           # PnP
     Reg/Force3DoF: "true"             # ground plane constraint
     
     # Loop closure detection
     Rtabmap/LoopThr: "0.11"           # default Bayesian threshold
-    Rtabmap/DetectionRate: "1.0"      # 1 Hz; mapping doesn't need fast updates
+    Rtabmap/DetectionRate: "5.0"      # 1 Hz; mapping doesn't need fast updates
     
     # Memory management
     Mem/STMSize: "10"                 # short-term memory size
