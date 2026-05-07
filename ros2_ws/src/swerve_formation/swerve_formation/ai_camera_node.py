@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
 import numpy as np
@@ -28,11 +29,14 @@ class AICameraNode(Node):
         self._size_pub = self.create_publisher(
             Float32, f'/{robot_id}/camera/object_size', 10
         )
+        # depthai_ros_driver publishes images with sensor_data QoS
+        # (BEST_EFFORT). A RELIABLE subscription will silently fail to
+        # match, so we use sensor_data here to be compatible.
         self._depth_sub = self.create_subscription(
             Image,
             f'/{robot_id}/camera/depth/image_raw',
             self._depth_cb,
-            10,
+            qos_profile_sensor_data,
         )
 
         self.get_logger().info(

@@ -6,6 +6,7 @@ import rclpy
 from geometry_msgs.msg import Pose, PoseArray, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
@@ -64,11 +65,13 @@ class AlignmentNode(Node):
                 lambda msg, n=neighbor: self._neighbor_odom_cb(msg, n),
                 10,
             )
+        # depthai_ros_driver publishes with sensor_data QoS (BEST_EFFORT);
+        # a RELIABLE subscription would silently fail to match.
         self.create_subscription(
             Image,
             f'/{self._robot_id}/camera/depth/image_raw',
             self._depth_cb,
-            10,
+            qos_profile_sensor_data,
         )
         for neighbor in self._neighbors:
             self.create_subscription(

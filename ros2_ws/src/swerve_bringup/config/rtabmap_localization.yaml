@@ -18,6 +18,14 @@
     subscribe_odom: true
     approx_sync: true
     queue_size: 10
+
+    # QoS for image inputs. depthai_ros_driver publishes with sensor_data
+    # QoS (BEST_EFFORT). rtabmap defaults to RELIABLE on these inputs and
+    # would silently fail to subscribe, so override to BEST_EFFORT (=2).
+    # Odom stays on the default (RELIABLE) because ekf_node publishes that
+    # way. Convention: 0=SystemDefault, 1=Reliable, 2=BestEffort.
+    qos_image: 2
+    qos_camera_info: 2
     
     # Feature detector: GFTT + ORB for swerve rotation robustness
     Kp/DetectorStrategy: "6"
