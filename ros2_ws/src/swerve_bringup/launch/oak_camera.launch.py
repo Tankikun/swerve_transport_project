@@ -78,6 +78,23 @@ def launch_setup(context, *args, **kwargs):
                         'rgb.i_fps': float(fps),
                         'stereo.i_fps': float(fps),
                     }],
+                    # depthai_ros_driver publishes under
+                    #   <ns>/<node_name>/<sensor>/image_raw — i.e.
+                    #   /{robot_id}/camera/oak/rgb/image_raw
+                    #   /{robot_id}/camera/oak/stereo/image_raw
+                    # Strip the 'oak/' segment and rename 'stereo' → 'depth'
+                    # so downstream subscribers (rtabmap, ai_camera_node,
+                    # alignment_node) see the schema documented in CLAUDE.md.
+                    remappings=[
+                        (f'/{robot_id}/camera/oak/rgb/image_raw',
+                         f'/{robot_id}/camera/rgb/image_raw'),
+                        (f'/{robot_id}/camera/oak/rgb/camera_info',
+                         f'/{robot_id}/camera/rgb/camera_info'),
+                        (f'/{robot_id}/camera/oak/stereo/image_raw',
+                         f'/{robot_id}/camera/depth/image_raw'),
+                        (f'/{robot_id}/camera/oak/stereo/camera_info',
+                         f'/{robot_id}/camera/depth/camera_info'),
+                    ],
                 ),
             ],
             output='screen',

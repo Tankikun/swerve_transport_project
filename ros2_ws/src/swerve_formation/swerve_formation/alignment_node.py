@@ -66,7 +66,7 @@ class AlignmentNode(Node):
             )
         self.create_subscription(
             Image,
-            f'/{self._robot_id}/camera/depth',
+            f'/{self._robot_id}/camera/depth/image_raw',
             self._depth_cb,
             10,
         )

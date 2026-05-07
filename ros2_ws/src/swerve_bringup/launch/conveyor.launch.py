@@ -163,7 +163,7 @@ def generate_launch_description():
         DeclareLaunchArgument('neighbors',        default_value=''),
         DeclareLaunchArgument('my_offset',        default_value='0.0,0.0'),
         DeclareLaunchArgument('neighbor_offsets', default_value='0.0,0.0'),
-        DeclareLaunchArgument('offset_init_mode', default_value='manual'),
+        DeclareLaunchArgument('offset_init_mode', default_value='odometry'),
         DeclareLaunchArgument('db_path',          default_value='~/maps/room.db',
                               description='RTAB-Map database built by rtabmap_mapping.launch.py.'),
         DeclareLaunchArgument('fps',              default_value='15',
