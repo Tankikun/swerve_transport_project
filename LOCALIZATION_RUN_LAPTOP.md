@@ -64,6 +64,46 @@ of locators, all required:
 
 ---
 
+## 0.5. Single-Laptop Simulation Mode (SHORTCUT — skip the rest of this doc)
+
+If you only need to verify the **GUI ↔ bridge ↔ Flask server** chain (no
+Pi, no real robot, no RTAB-Map), do this instead and stop after Step 0.5:
+
+> **Do NOT export `FASTRTPS_DEFAULT_PROFILES_FILE` in this mode.** The
+> XML hardcodes `192.168.1.114` and the Pi peers; on a laptop with a
+> different LAN IP it will bind to a non-existent interface. Default
+> Fast-DDS multicast handles same-host discovery just fine.
+
+```bash
+# Every terminal:
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+source /opt/ros/humble/setup.bash
+source ~/swerve_transport_project/ros2_ws/install/setup.bash
+
+# T1 — fake the map -> base_link TF that RTAB-Map would normally publish:
+ros2 run tf2_ros static_transform_publisher \
+    --x 1.0 --y 2.0 --z 0.0 --yaw 0.5 \
+    --frame-id map --child-frame-id tb3_1_base_link
+
+# T2 — Flask server:
+cd ~/swerve_transport_project/interface && python3 server.py --map map.json --port 5002
+
+# T3 — bridge:
+cd ~/swerve_transport_project/interface && python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1
+
+# Browser: http://localhost:5002 — cyan cone should appear at (1.0, 2.0).
+```
+
+For a step-by-step version with the full GUI walkthrough (Set Initial
+Pose, slam/pose heartbeat to turn the LOC pill green, etc.) see
+`interface/RUN_LOCALIZATION_VIEWER.md` → Step 0 alt.
+
+For the cross-host workflow (real Pi + laptop), continue with §1 below
+and copy `interface/fastdds_peers.xml.example` to `~/fastdds_peers.xml`,
+filling in your laptop's LAN IP per the comment at the top of that file.
+
+---
+
 ## 1. Pre-flight
 
 Before starting:
@@ -146,7 +186,7 @@ Wait for these lines to appear:
 In a NEW laptop terminal (not SSH):
 
 ```bash
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (§0.5)
 export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
@@ -215,7 +255,7 @@ Expected log behaviour:
 In a NEW laptop terminal (env exports as Step 4):
 
 ```bash
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (§0.5)
 export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
