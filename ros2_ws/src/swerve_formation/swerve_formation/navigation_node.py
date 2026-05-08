@@ -72,8 +72,9 @@ class NavigationNode(Node):
     # ── Heading control ───────────────────────────────────────────────────────
     K_HEADING = 3.0    # gain for aligning heading with velocity direction
 
-    # ── Goal tolerance ────────────────────────────────────────────────────────
-    GOAL_TOL = 0.05    # m
+    # ── Goal tolerance (two-phase arrival: XY first, then in-place rotation) ─
+    GOAL_TOL = 0.05    # m   — XY arrival tolerance
+    YAW_TOL  = 0.05    # rad — yaw arrival tolerance (~3°)
 
     # ── Default formation safety margin (overridden by /formation/footprint_radius)
     DEFAULT_SAFETY = 0.45   # m  (≈ robot half-width + payload margin)
@@ -99,6 +100,10 @@ class NavigationNode(Node):
         # Velocity state (for ramp smoothing)
         self._vel_actual   = np.zeros(2)   # [vx, vy] in world frame
         self._omega_actual = 0.0
+
+        # Two-phase arrival state: 'DRIVE' (chasing waypoint XY) →
+        # 'ROTATE' (XY reached, spinning to goal yaw in place) → 'DONE'.
+        self._phase = 'DRIVE'
 
         # ── Subscriptions ────────────────────────────────────────────────────
         self.create_subscription(
@@ -157,6 +162,7 @@ class NavigationNode(Node):
         self._waypoints.clear()
         self._current_wp = np.array([msg.linear.x, msg.linear.y, msg.angular.z])
         self._reset_ramp()
+        self._phase = 'DRIVE'
         self.get_logger().info(
             f'New goal: x={msg.linear.x:.2f} y={msg.linear.y:.2f} θ={msg.angular.z:.2f}'
         )
@@ -176,6 +182,7 @@ class NavigationNode(Node):
         self._waypoints    = new_wps[1:]
         self._current_wp   = new_wps[0]
         self._reset_ramp()
+        self._phase = 'DRIVE'
         self.get_logger().info(f'Waypoint sequence loaded: {len(new_wps)} points.')
 
     def _obstacles_cb(self, msg: PoseArray):
@@ -282,26 +289,60 @@ class NavigationNode(Node):
         if not self._is_leader or self._current_wp is None:
             return
 
-        # Check if current waypoint is reached
         pos = self._pose[:2]
-        if np.linalg.norm(self._current_wp[:2] - pos) < self.GOAL_TOL:
+        d_xy = np.linalg.norm(self._current_wp[:2] - pos)
+
+        # ── Waypoint advance / phase transition (only while DRIVE-ing) ─────
+        if self._phase == 'DRIVE' and d_xy < self.GOAL_TOL:
             if self._waypoints:
+                # More waypoints to follow — advance immediately, no rotate.
                 self._current_wp = self._waypoints.pop(0)
                 self.get_logger().info(
-                    f'Waypoint reached — moving to next ({len(self._waypoints)} remaining).'
+                    f'Waypoint reached — moving to next '
+                    f'({len(self._waypoints)} remaining).'
                 )
                 self._reset_ramp()
             else:
-                self.get_logger().info('Final goal reached — stopping.')
+                # FINAL waypoint XY reached — switch to in-place rotation
+                # so the robot ends at the exact yaw the user requested.
+                self._phase = 'ROTATE'
+                self._vel_actual = np.zeros(2)
+                self.get_logger().info(
+                    f'Reached XY ({pos[0]:.2f}, {pos[1]:.2f}) — '
+                    f'rotating to {np.rad2deg(self._current_wp[2]):.0f}°.'
+                )
+
+        # ── ROTATE phase: zero linear velocity, spin to goal yaw ───────────
+        if self._phase == 'ROTATE':
+            yaw_err = _wrap(self._current_wp[2] - self._pose[2])
+            if abs(yaw_err) < self.YAW_TOL:
+                self.get_logger().info(
+                    f'✓ ARRIVED — pose ({pos[0]:.2f}, {pos[1]:.2f}, '
+                    f'{np.rad2deg(self._pose[2]):.0f}°) aligned at goal.'
+                )
                 self._current_wp = None
+                self._phase = 'DONE'
                 self._publish_stop()
                 self._publish_status('REACHED')
                 return
 
-        # APF → desired world-frame velocity
-        v_des, omega_des = self._apf_velocity()
+            omega_des = float(np.clip(
+                self.K_HEADING * yaw_err,
+                -self.MAX_ANGULAR, self.MAX_ANGULAR
+            ))
+            # Use the same ramp on angular velocity, but force linear to zero.
+            self._apply_ramp(np.zeros(2), omega_des)
+            cmd = Twist()
+            cmd.linear.x  = 0.0
+            cmd.linear.y  = 0.0
+            cmd.angular.z = float(np.clip(self._omega_actual,
+                                          -self.MAX_ANGULAR, self.MAX_ANGULAR))
+            self._cmd_pub.publish(cmd)
+            self._publish_status('ROTATING')
+            return
 
-        # Velocity ramp
+        # ── DRIVE phase: existing APF + ramp + body-frame transform ────────
+        v_des, omega_des = self._apf_velocity()
         self._apply_ramp(v_des, omega_des)
 
         # World frame → body frame (holonomic robot)
