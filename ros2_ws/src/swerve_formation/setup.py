@@ -41,6 +41,7 @@ setup(
             # ── Markerless / mapless demo nodes (feature/depth-obstacle-avoid) ─
             'obstacle_avoidance_node = swerve_formation.obstacle_avoidance_node:main',
             'goal_driver_node = swerve_formation.goal_driver_node:main',
+            'fake_depth_publisher_node = swerve_formation.fake_depth_publisher_node:main',
             # ── Simulation helpers ──────────────────────────────────────────
             'static_leader_publisher = swerve_formation.static_leader_publisher:main',
             'send_goal_node = swerve_formation.send_goal_node:main',

@@ -9,6 +9,42 @@ one obstacle in the path, stop at goal distance.
 
 ---
 
+## Fast path — three commands per machine
+
+```
+On laptop (one-time, after pulling the branch):
+    source /opt/ros/humble/setup.bash
+    source ~/ros2_ws/install/setup.bash
+    source <repo>/tools/demo_aliases.sh
+    demo_help                        # see what's available
+
+On the laptop BEFORE going to the lab (no robots needed):
+    demo_dryrun                      # fake camera + obstacle node;
+                                     # watch /obstacle_avoidance/state
+
+In the lab, one terminal per machine:
+    pi1 (follower):     demo_follower
+    pi2 (leader):       demo_leader
+    laptop:             demo_preflight    # green light = safe to run
+                        demo_run          # 2.5 m forward, then stops
+                        demo_replay       # re-arm for another run
+                        demo_estop        # publish zeros (kill switch)
+```
+
+Every command above lives in `tools/demo_aliases.sh`. The aliases
+pre-bake the long `ros2 launch` lines, network env, formation offsets,
+and camera mount values from the `feature/two-robot-test-seven`
+verified setup (HANDOFF_TO_TAN.md §6).
+
+If a parameter needs to change, set it once before sourcing the
+aliases:
+
+    DEMO_GOAL_M=1.5 DEMO_AVOID_RANGE_MM=900 source tools/demo_aliases.sh
+
+Full list in `demo_help`.
+
+---
+
 ## What this demo is (and isn't)
 
 **It is** the simplest possible end-to-end pipeline that exercises both
@@ -45,8 +81,13 @@ SLAM back.
 
 **Components added on this branch:**
 - `obstacle_avoidance_node` — depth-image swathe → modified twist
+- `obstacle_avoidance_lib` — pure-numpy math (unit-tested, 14/14 pass)
 - `goal_driver_node` — odometry-integrating forward driver
+- `fake_depth_publisher_node` — synthetic depth for laptop dry-run
 - `demo_robot.launch.py` — minimal per-robot launch
+- `tools/test_obstacle_logic.py` — pytest (run before deploy)
+- `tools/preflight.sh` — preflight sanity checks (run before demo)
+- `tools/demo_aliases.sh` — one named command per terminal role
 
 ---
 
@@ -303,15 +344,47 @@ ros2 service call /goal_driver/start std_srvs/srv/Trigger
 
 ---
 
+## Pre-deploy verification on the laptop (no robots needed)
+
+Before going to the lab, run the unit tests AND the dry-run end-to-end:
+
+```bash
+# 1. Pure-logic unit tests for the avoidance math (numpy only, no ROS).
+PYTHONPATH=ros2_ws/src/swerve_formation python tools/test_obstacle_logic.py
+# Expect: All 14 tests passed.
+
+# 2. Live dry-run on the laptop. Two terminals:
+#    Terminal A:
+source tools/demo_aliases.sh
+demo_dryrun
+#    Terminal B (in another shell, source aliases first):
+ros2 topic echo /obstacle_avoidance/state    # should sweep clear ↔ AVOID
+ros2 topic echo /virtual_center/cmd_vel      # linear.y oscillates
+```
+
+If terminal B shows `AVOID  closest=0.70m  col_u=+...  push_y=+0.025…`
+then flips to `col_u=-...  push_y=-0.025…` over ~6 s, the sign of the
+avoidance push is correct end-to-end. **This is the same code path that
+runs in the lab.** Ship it.
+
+If the unit tests fail on the laptop, do NOT deploy. Investigate first.
+
+---
+
 ## Files added on `feature/depth-obstacle-avoid`
 
 ```
+ros2_ws/src/swerve_formation/swerve_formation/obstacle_avoidance_lib.py
 ros2_ws/src/swerve_formation/swerve_formation/obstacle_avoidance_node.py
 ros2_ws/src/swerve_formation/swerve_formation/goal_driver_node.py
+ros2_ws/src/swerve_formation/swerve_formation/fake_depth_publisher_node.py
 ros2_ws/src/swerve_formation/setup.py             (entry_points updated)
+ros2_ws/src/swerve_formation/package.xml          (deps updated)
 ros2_ws/src/swerve_bringup/launch/demo_robot.launch.py
-MARKERLESS_DEMO_RUNBOOK.md                         (this file)
-INVESTIGATION.md                                   (Agent B's reuse/drop/risk report)
+tools/test_obstacle_logic.py
+tools/preflight.sh
+tools/demo_aliases.sh
+MARKERLESS_DEMO_RUNBOOK.md                        (this file)
 ```
 
 Nothing on the existing main branch is modified or removed. The full

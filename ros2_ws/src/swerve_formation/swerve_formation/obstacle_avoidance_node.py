@@ -25,36 +25,26 @@ Why this approach (vs ArUco / SLAM):
   * Depth processing is cheap on the Pi (one slice + masked min per
     frame), well below the camera publish rate.
 
-Algorithm (~20 lines of math, repeated at depth-frame rate):
-  1. Crop the depth image to a horizontal forward "swathe" (40–60 % of
-     image height). This skips floor and ceiling without needing TF
-     transforms.
-  2. Mask invalid depths (< MIN_VALID_MM, > MAX_VALID_MM).
-  3. Find the closest valid pixel inside the swathe; remember its
-     (column, depth_mm).
-  4. If closest_mm > AVOID_RANGE_MM → no obstacle near. Pass the raw
-     Twist through unchanged.
-  5. Otherwise compute a lateral push:
-        u_horiz = (col - W/2) / (W/2)        ∈ [-1, +1]
-        push_dir = -sign(u_horiz)            (away from obstacle col)
-        urgency  = 1 - clamp(closest_mm / AVOID_RANGE_MM)
-        v_y_add  = LATERAL_GAIN * push_dir * urgency
-        scale    = 1 - 0.6 * urgency         (slow down when close)
-     Final Twist:
-        linear.x  = raw.linear.x  * scale
-        linear.y  = raw.linear.y  + v_y_add
-        angular.z = raw.angular.z * scale     (don't fight rotation,
-                                               just attenuate)
-  6. Watchdog: if no depth frame in DEPTH_STALE_S, pass through raw
-     (the formation is then operator-only).
+Algorithm (extracted into pure functions for testability — see
+`tools/test_obstacle_logic.py`):
+  1. `find_closest_in_swathe`: crop the depth image to a horizontal
+     forward swathe (40–65 % of image height by default), mask invalid
+     depths, return (closest_mm, col_u) where col_u ∈ [-1, +1] is the
+     normalised column of the closest pixel (sign matches camera
+     optical +x).
+  2. `compute_avoidance`: given (closest_mm, col_u) and the operator's
+     raw Twist + params, return the modified Twist plus a
+     human-readable state string. If no obstacle within `avoid_range_mm`,
+     pass through unchanged.
 
 Coordinate convention:
   +y = ROS body left. The lateral push sign assumes the camera optical
   +x (image column right) maps to body -y (body right). For a forward-
   facing camera mounted with the standard ROS optical-from-body
   rotation (roll = -π/2, yaw = -π/2, used in `oak_camera.launch.py`),
-  this is correct: an obstacle on the right side of the image is on the
-  robot's right; pushing in +y moves the formation left, away from it.
+  this is correct: an obstacle on the right side of the image is on
+  the robot's right; pushing in +y moves the formation left, away
+  from it.
 
 Parameters (declared and tunable at runtime via ros2 param):
   leader_robot_id   str   robot whose camera we use     (default tb3_1)
@@ -71,7 +61,6 @@ Parameters (declared and tunable at runtime via ros2 param):
 
 from __future__ import annotations
 
-import math
 import threading
 import time
 
@@ -79,12 +68,23 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, String
 
+# Pure-numpy math lives in obstacle_avoidance_lib so it can be unit-tested
+# without ROS — see tools/test_obstacle_logic.py.
+from swerve_formation.obstacle_avoidance_lib import (
+    AvoidanceParams,
+    compute_avoidance,
+    find_closest_in_swathe,
+)
 
-def _depth_image_to_uint16_mm(msg: Image) -> np.ndarray | None:
+
+# ─── ROS message helper ─────────────────────────────────────────────────────
+
+
+def depth_image_to_uint16_mm(msg: Image):
     """
     Convert an Image message to a uint16 mm depth array.
 
@@ -98,15 +98,16 @@ def _depth_image_to_uint16_mm(msg: Image) -> np.ndarray | None:
     try:
         h, w = msg.height, msg.width
         if msg.encoding == '16UC1':
-            arr = np.frombuffer(msg.data, dtype=np.uint16).reshape(h, w)
-            return arr
+            return np.frombuffer(msg.data, dtype=np.uint16).reshape(h, w)
         if msg.encoding == '32FC1':
             arr = np.frombuffer(msg.data, dtype=np.float32).reshape(h, w)
-            mm = (arr * 1000.0).clip(0, 65535).astype(np.uint16)
-            return mm
+            return (arr * 1000.0).clip(0, 65535).astype(np.uint16)
     except Exception:
         return None
     return None
+
+
+# ─── Node ───────────────────────────────────────────────────────────────────
 
 
 class ObstacleAvoidanceNode(Node):
@@ -125,27 +126,26 @@ class ObstacleAvoidanceNode(Node):
         self.declare_parameter('pub_rate_hz',       20.0)
         self.declare_parameter('depth_stale_s',     0.7)
 
-        self._leader_id        = str(self.get_parameter('leader_robot_id').value)
-        self._swathe_top_frac  = float(self.get_parameter('swathe_top_frac').value)
-        self._swathe_bot_frac  = float(self.get_parameter('swathe_bot_frac').value)
-        self._min_valid_mm     = int(self.get_parameter('min_valid_mm').value)
-        self._max_valid_mm     = int(self.get_parameter('max_valid_mm').value)
-        self._avoid_range_mm   = int(self.get_parameter('avoid_range_mm').value)
-        self._lateral_gain     = float(self.get_parameter('lateral_gain').value)
-        self._scale_floor      = float(self.get_parameter('speed_scale_floor').value)
-        self._pub_rate_hz      = float(self.get_parameter('pub_rate_hz').value)
-        self._depth_stale_s    = float(self.get_parameter('depth_stale_s').value)
+        self._leader_id     = str(self.get_parameter('leader_robot_id').value)
+        self._pub_rate_hz   = float(self.get_parameter('pub_rate_hz').value)
+        self._depth_stale_s = float(self.get_parameter('depth_stale_s').value)
 
-        # Cached state — operator twist + most recent obstacle reading.
+        self._params = AvoidanceParams(
+            swathe_top_frac   = float(self.get_parameter('swathe_top_frac').value),
+            swathe_bot_frac   = float(self.get_parameter('swathe_bot_frac').value),
+            min_valid_mm      = int(self.get_parameter('min_valid_mm').value),
+            max_valid_mm      = int(self.get_parameter('max_valid_mm').value),
+            avoid_range_mm    = int(self.get_parameter('avoid_range_mm').value),
+            lateral_gain      = float(self.get_parameter('lateral_gain').value),
+            speed_scale_floor = float(self.get_parameter('speed_scale_floor').value),
+        )
+
         self._lock          = threading.Lock()
-        self._raw_twist     = Twist()        # zero by default → safe
-        self._raw_t         = 0.0
-        self._closest_mm    = None           # None → no valid obstacle
-        self._closest_col_u = 0.0            # normalised column ∈ [-1, +1]
+        self._raw_twist     = Twist()
+        self._closest_mm    = None
+        self._closest_col_u = 0.0
         self._depth_t       = 0.0
 
-        # Sensor data is best-effort; commands stay reliable so we don't
-        # silently drop them under WiFi loss.
         sensor_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -164,8 +164,6 @@ class ObstacleAvoidanceNode(Node):
         self._cmd_pub = self.create_publisher(
             Twist, '/virtual_center/cmd_vel', 10,
         )
-        # Debug: closest depth (m) and a one-line state summary so the
-        # operator can sanity-check from `ros2 topic echo`.
         self._closest_pub = self.create_publisher(
             Float32, '/obstacle_avoidance/closest_m', 5,
         )
@@ -177,57 +175,24 @@ class ObstacleAvoidanceNode(Node):
 
         self.get_logger().info(
             f'obstacle_avoidance_node ready  leader={self._leader_id}  '
-            f'avoid_range={self._avoid_range_mm}mm  '
-            f'lateral_gain={self._lateral_gain:.2f} m/s  '
+            f'avoid_range={self._params.avoid_range_mm}mm  '
+            f'lateral_gain={self._params.lateral_gain:.2f} m/s  '
             f'pub_rate={self._pub_rate_hz:.0f} Hz'
         )
-
-    # ── callbacks ─────────────────────────────────────────────────────────
 
     def _raw_cmd_cb(self, msg: Twist) -> None:
         with self._lock:
             self._raw_twist = msg
-            self._raw_t = time.time()
 
     def _depth_cb(self, msg: Image) -> None:
-        arr = _depth_image_to_uint16_mm(msg)
+        arr = depth_image_to_uint16_mm(msg)
         if arr is None:
             return
-        h, w = arr.shape
-        if h < 4 or w < 4:
-            return
-
-        top = int(self._swathe_top_frac * h)
-        bot = int(self._swathe_bot_frac * h)
-        if bot <= top + 1:
-            return
-        swathe = arr[top:bot, :]
-
-        # Mask invalid depths (zeros from the driver, plus our range gate).
-        valid = (swathe >= self._min_valid_mm) & (swathe <= self._max_valid_mm)
-        if not valid.any():
-            with self._lock:
-                self._closest_mm = None
-                self._depth_t    = time.time()
-            return
-
-        # Argmin over valid pixels only.
-        masked = np.where(valid, swathe, np.uint16(self._max_valid_mm + 1))
-        flat_idx = int(masked.argmin())
-        row = flat_idx // w
-        col = flat_idx %  w
-        depth = int(masked[row, col])
-
-        # Normalised column ∈ [-1, +1]; sign matches camera optical +x
-        # (image right). +1 = obstacle on the right side of the image.
-        col_u = (col - (w / 2.0)) / max(w / 2.0, 1.0)
-
+        closest_mm, col_u = find_closest_in_swathe(arr, self._params)
         with self._lock:
-            self._closest_mm    = depth
-            self._closest_col_u = float(col_u)
+            self._closest_mm    = closest_mm
+            self._closest_col_u = col_u
             self._depth_t       = time.time()
-
-    # ── publish loop ──────────────────────────────────────────────────────
 
     def _pub_loop(self) -> None:
         with self._lock:
@@ -236,34 +201,23 @@ class ObstacleAvoidanceNode(Node):
             col_u      = self._closest_col_u
             depth_age  = time.time() - self._depth_t if self._depth_t > 0 else 1e9
 
-        out = Twist()
-        out.linear.x  = float(raw.linear.x)
-        out.linear.y  = float(raw.linear.y)
-        out.angular.z = float(raw.angular.z)
-        state = 'pass-through'
-
         depth_fresh = depth_age < self._depth_stale_s
         if not depth_fresh:
+            out_x, out_y, out_wz = (
+                float(raw.linear.x), float(raw.linear.y), float(raw.angular.z)
+            )
             state = 'depth-stale'
-        elif closest_mm is None:
-            state = 'no-valid-depth'
-        elif closest_mm >= self._avoid_range_mm:
-            state = f'clear  closest={closest_mm/1000.0:.2f}m'
         else:
-            urgency = 1.0 - (float(closest_mm) / float(self._avoid_range_mm))
-            urgency = max(0.0, min(1.0, urgency))
-            push_dir = -math.copysign(1.0, col_u) if abs(col_u) > 1e-3 else 1.0
-            v_y_add = self._lateral_gain * push_dir * urgency
-            scale = 1.0 - (1.0 - self._scale_floor) * urgency
-            out.linear.x  = float(raw.linear.x) * scale
-            out.linear.y  = float(raw.linear.y) + v_y_add
-            out.angular.z = float(raw.angular.z) * scale
-            state = (
-                f'AVOID  closest={closest_mm/1000.0:.2f}m  '
-                f'col_u={col_u:+.2f}  push_y={v_y_add:+.2f}  '
-                f'scale={scale:.2f}'
+            out_x, out_y, out_wz, state = compute_avoidance(
+                closest_mm, col_u,
+                float(raw.linear.x), float(raw.linear.y), float(raw.angular.z),
+                self._params,
             )
 
+        out = Twist()
+        out.linear.x  = out_x
+        out.linear.y  = out_y
+        out.angular.z = out_wz
         self._cmd_pub.publish(out)
 
         if closest_mm is not None and depth_fresh:
