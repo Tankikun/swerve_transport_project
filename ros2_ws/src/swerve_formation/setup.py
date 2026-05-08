@@ -38,6 +38,9 @@ setup(
             'slam_pose_relay_node = swerve_formation.slam_pose_relay_node:main',
             'slam_3d_node = swerve_formation.slam_3d_node:main',
             'alignment_node = swerve_formation.alignment_node:main',
+            # ── Markerless / mapless demo nodes (feature/depth-obstacle-avoid) ─
+            'obstacle_avoidance_node = swerve_formation.obstacle_avoidance_node:main',
+            'goal_driver_node = swerve_formation.goal_driver_node:main',
             # ── Simulation helpers ──────────────────────────────────────────
             'static_leader_publisher = swerve_formation.static_leader_publisher:main',
             'send_goal_node = swerve_formation.send_goal_node:main',
