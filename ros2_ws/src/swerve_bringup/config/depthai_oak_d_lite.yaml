@@ -26,7 +26,7 @@
     # ===== RGB camera =====
     rgb:
       i_resolution: "1080P"            # 1920x1080 native (IMX214 does not support 720P);
-                                       # ISP scale 1/2 below brings the stream to 960x540
+                                       # ISP scale 1/2 will produce 960x540 output, which is a good balance of quality and CPU load for RTAB-Map
       i_fps: 15.0                      # comfortably above 5 Hz RTAB-Map rate
       i_interleaved: false             # planar output, what ROS expects
       i_max_q_size: 10                 # output queue depth
@@ -55,10 +55,7 @@
       i_max_q_size: 10
       i_resolution: "400P"             # 640x400 stereo native; matches OAK-D Lite
       i_fps: 15.0                      # match RGB rate
-      i_board_socket_id: 2             # CAM_C (right mono) on OAK-D Lite
-      i_left_socket_id: 1              # CAM_B (left mono) on OAK-D Lite
-      i_height: 400
-      i_width: 640
+
       
       # Postprocessing filters (improve depth quality, slight CPU cost)
       i_enable_spatial_filter: true
@@ -80,7 +77,3 @@
       i_resolution: "400P"
       i_fps: 15.0
       i_board_socket_id: 2
-    
-    # ===== USB =====
-    # NOTE: top-level `use_usb_3` was the legacy flag; in 2.12.x the link
-    # speed is configured via `camera.i_usb_speed` (set above).
