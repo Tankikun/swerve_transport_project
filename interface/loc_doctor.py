@@ -22,6 +22,9 @@ location because picking up the robot doesn't move the encoders.
     ekf, rtabmap/info, slam/pose, localization_pose).
   - Live counts of `slam/pose` / `localization_pose` messages — these
     are 0 if RTAB-Map never matched.
+  - Motion delta: did the robot move since last tick? Helps catch
+    "I'm pressing teleop keys but nothing is happening" early.
+  - Localization-pose covariance (last visual match's confidence).
   - The actual `map -> {rid}_odom` TF translation. If it's identity
     (0,0,0), RTAB-Map has never corrected wheel odom.
   - Most recent inliers/matches from `/{rid}/rtabmap/info`. If
@@ -40,8 +43,12 @@ Outputs
   - stdout : color-coded human-readable block, one per `print_period_sec`
   - jsonl  : one record per print, written to
              `~/loc_doctor_logs/loc_doctor_{robot_id}_{stamp}.jsonl`
-             (disable with `-p no_log:=true` or override path with
-             `-p log_dir:=...`)
+  - log    : ANSI-stripped human-readable copy of stdout, written to
+             `~/loc_doctor_logs/loc_doctor_{robot_id}_{stamp}.log`
+             (so you can `less` / grep without parsing JSON)
+
+Disable file output with `-p no_log:=true`. Override path with
+`-p log_dir:=...`.
 
 Run
 ---
@@ -58,6 +65,9 @@ Run
 import json
 import math
 import os
+import re
+import socket
+import sys
 import time
 from collections import deque
 from datetime import datetime
@@ -85,14 +95,21 @@ except ImportError:                     # pragma: no cover
 # ── ANSI palette (off if stdout isn't a TTY, e.g. piped to a file) ────────
 def _supports_color():
     return os.environ.get('NO_COLOR') is None and \
-           hasattr(os.sys.stdout, 'isatty') and os.sys.stdout.isatty()
+           hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 
 
 if _supports_color():
-    GREEN, YELLOW, RED, DIM, BOLD, END = (
-        '\033[92m', '\033[93m', '\033[91m', '\033[2m', '\033[1m', '\033[0m')
+    GREEN, YELLOW, RED, DIM, BOLD, CYAN, END = (
+        '\033[92m', '\033[93m', '\033[91m', '\033[2m',
+        '\033[1m', '\033[36m', '\033[0m')
 else:
-    GREEN = YELLOW = RED = DIM = BOLD = END = ''
+    GREEN = YELLOW = RED = DIM = BOLD = CYAN = END = ''
+
+ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def strip_ansi(s):
+    return ANSI_RE.sub('', s)
 
 
 def quat_to_yaw(qx, qy, qz, qw):
@@ -140,18 +157,25 @@ class LocDoctor(Node):
         self.no_log       = bool(self.get_parameter('no_log').value)
         log_dir           = str(self.get_parameter('log_dir').value)
 
-        # ── jsonl log file ────────────────────────────────────────────────
-        self.log_file = None
+        # ── log files (jsonl + plain-text) ────────────────────────────────
+        self.jsonl_file    = None
+        self.text_file     = None
+        self.jsonl_path    = None
+        self.text_path     = None
         if not self.no_log:
             try:
                 os.makedirs(log_dir, exist_ok=True)
                 stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                log_path = os.path.join(
-                    log_dir, f'loc_doctor_{self.rid}_{stamp}.jsonl')
-                self.log_file = open(log_path, 'w', buffering=1)  # line-buffered
-                self.get_logger().info(f'JSONL log -> {log_path}')
+                base = os.path.join(log_dir, f'loc_doctor_{self.rid}_{stamp}')
+                self.jsonl_path = base + '.jsonl'
+                self.text_path  = base + '.log'
+                # Line-buffered so a kill -9 still leaves the latest line.
+                self.jsonl_file = open(self.jsonl_path, 'w', buffering=1)
+                self.text_file  = open(self.text_path,  'w', buffering=1)
+                self.get_logger().info(f'JSONL  -> {self.jsonl_path}')
+                self.get_logger().info(f'TEXT   -> {self.text_path}')
             except OSError as e:
-                self.get_logger().warn(f'Could not open log file: {e}')
+                self.get_logger().warn(f'Could not open log file(s): {e}')
 
         # ── Hz trackers ───────────────────────────────────────────────────
         self.hz_cam_rgb   = HzTracker()
@@ -162,10 +186,16 @@ class LocDoctor(Node):
         self.hz_slam_pose = HzTracker()
         self.hz_loc_pose  = HzTracker()
 
-        # ── Last-seen state (for value display & change detection) ────────
-        self.last_odom_pose = None       # (x, y, yaw_rad)
-        self.last_ekf_pose  = None
-        self.last_info      = {}         # parsed from rtabmap_msgs/Info
+        # ── Last-seen state ───────────────────────────────────────────────
+        self.last_odom_pose         = None  # (x, y, yaw_rad)  most recent msg
+        self.last_ekf_pose          = None
+        self.last_info              = {}    # parsed from rtabmap_msgs/Info
+        self.last_loc_pose          = None  # (x, y, yaw_rad)  from /localization_pose
+        self.last_loc_cov_diag      = None  # (var_x, var_y, var_yaw)
+        # For motion delta: the values at the previous _tick() invocation.
+        self._odom_pose_prev_tick   = None
+        self._ekf_pose_prev_tick    = None
+        self._tick_prev_t           = None
 
         # ── Subscriptions ─────────────────────────────────────────────────
         # Camera topics use sensor-data QoS (BEST_EFFORT, KEEP_LAST 5) — if
@@ -188,7 +218,7 @@ class LocDoctor(Node):
         self.create_subscription(
             PoseWithCovarianceStamped,
             f'/{rid}/rtabmap/localization_pose',
-            lambda m: self.hz_loc_pose.tick(), 10)
+            self._loc_pose_cb, 10)
         if HAVE_RTAB_INFO:
             self.create_subscription(
                 RtabInfo, f'/{rid}/rtabmap/info', self._info_cb, 10)
@@ -197,16 +227,107 @@ class LocDoctor(Node):
         self.tf_buffer   = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # ── Print timer ───────────────────────────────────────────────────
+        # ── Session bookkeeping + print timer ─────────────────────────────
         self.start_time = time.time()
+        self.tick_n     = 0
+        self._print_session_header()
         self.create_timer(self.print_period, self._tick)
 
-        msg_extras = ('rtabmap_msgs available: yes'
-                      if HAVE_RTAB_INFO
-                      else f'{RED}rtabmap_msgs MISSING — info will be silent{END}')
-        self.get_logger().info(
-            f'loc_doctor watching /{rid}/* every {self.print_period:.1f}s '
-            f'({msg_extras})')
+    # ── session-level prints ─────────────────────────────────────────────
+    def _print_session_header(self):
+        """Printed once at startup (and to text/jsonl logs as a header line).
+
+        Captures the env this run is observing — useful when you scroll
+        back through a log days later and need to remember WHICH robot,
+        WHICH ROS_DOMAIN, WHICH peers file you were on.
+        """
+        env = {
+            'ROS_DOMAIN_ID':   os.environ.get('ROS_DOMAIN_ID', '(unset)'),
+            'RMW_IMPL':        os.environ.get('RMW_IMPLEMENTATION', '(default)'),
+            'FASTRTPS_FILE':   os.environ.get(
+                'FASTRTPS_DEFAULT_PROFILES_FILE', '(unset)'),
+            'RMW_ZENOH_CONF':  os.environ.get('RMW_ZENOH_CONFIG_FILE', '(unset)'),
+        }
+        rtab_status = ('yes' if HAVE_RTAB_INFO
+                       else 'MISSING (rtabmap_msgs not in PYTHONPATH)')
+
+        bar = '═' * 78
+        lines = [
+            f'{CYAN}{BOLD}╔{bar}╗{END}',
+            f'{CYAN}{BOLD}║ loc_doctor session{END}',
+            f'{CYAN}║   robot_id           : {self.rid}',
+            f'{CYAN}║   hostname           : {socket.gethostname()}',
+            f'{CYAN}║   ROS_DOMAIN_ID      : {env["ROS_DOMAIN_ID"]}',
+            f'{CYAN}║   RMW_IMPLEMENTATION : {env["RMW_IMPL"]}',
+            f'{CYAN}║   FastDDS profiles   : {env["FASTRTPS_FILE"]}',
+            f'{CYAN}║   rtabmap_msgs       : {rtab_status}',
+            f'{CYAN}║   print period       : {self.print_period:.1f}s',
+            f'{CYAN}║   jsonl log          : {self.jsonl_path or "(disabled)"}',
+            f'{CYAN}║   text log           : {self.text_path  or "(disabled)"}',
+            f'{CYAN}║   started            : {datetime.now().isoformat(timespec="seconds")}',
+            f'{CYAN}{BOLD}╚{bar}╝{END}',
+        ]
+        for ln in lines:
+            print(ln)
+        # Mirror header into log files (without ANSI).
+        if self.text_file:
+            for ln in lines:
+                self.text_file.write(strip_ansi(ln) + '\n')
+        if self.jsonl_file:
+            self.jsonl_file.write(json.dumps({
+                'kind': 'session_start',
+                't': time.time(),
+                'robot_id': self.rid,
+                'hostname': socket.gethostname(),
+                'env': env,
+                'rtabmap_msgs_available': HAVE_RTAB_INFO,
+                'print_period_sec': self.print_period,
+                'started_iso': datetime.now().isoformat(),
+            }) + '\n')
+
+    def _print_session_footer(self):
+        """Printed at clean exit (Ctrl-C / SIGTERM). Summarizes what happened."""
+        elapsed = time.time() - self.start_time
+        bar = '─' * 78
+        ever_localized = self.hz_slam_pose.count > 0
+        status_blurb = (f'{GREEN}EVER LOCALIZED (slam/pose received {self.hz_slam_pose.count} '
+                        f'msgs total){END}'
+                        if ever_localized
+                        else f'{RED}NEVER LOCALIZED — slam/pose stayed silent the whole run{END}')
+        lines = [
+            f'\n{BOLD}{bar}{END}',
+            f'{BOLD}loc_doctor session ended after {elapsed:.1f}s ({self.tick_n} ticks){END}',
+            f'  total camera frames     : rgb={self.hz_cam_rgb.count}  depth={self.hz_cam_depth.count}',
+            f'  total odom / ekf msgs   : {self.hz_odom.count} / {self.hz_ekf.count}',
+            f'  total rtabmap/info msgs : {self.hz_info.count}',
+            f'  total slam/pose msgs    : {self.hz_slam_pose.count}',
+            f'  total loc_pose msgs     : {self.hz_loc_pose.count}',
+            f'  status                  : {status_blurb}',
+        ]
+        if self.jsonl_path:
+            lines.append(f'  logs                    : {self.jsonl_path}')
+            lines.append(f'                            {self.text_path}')
+        lines.append(f'{BOLD}{bar}{END}')
+        for ln in lines:
+            print(ln)
+        if self.text_file:
+            for ln in lines:
+                self.text_file.write(strip_ansi(ln) + '\n')
+        if self.jsonl_file:
+            self.jsonl_file.write(json.dumps({
+                'kind': 'session_end',
+                't': time.time(),
+                'elapsed_sec': elapsed,
+                'tick_count': self.tick_n,
+                'cam_rgb_count': self.hz_cam_rgb.count,
+                'cam_depth_count': self.hz_cam_depth.count,
+                'odom_count': self.hz_odom.count,
+                'ekf_count': self.hz_ekf.count,
+                'info_count': self.hz_info.count,
+                'slam_pose_count': self.hz_slam_pose.count,
+                'loc_pose_count': self.hz_loc_pose.count,
+                'ever_localized': ever_localized,
+            }) + '\n')
 
     # ── callbacks ─────────────────────────────────────────────────────────
     def _odom_cb(self, msg: Odometry):
@@ -225,6 +346,18 @@ class LocDoctor(Node):
             quat_to_yaw(p.orientation.x, p.orientation.y,
                         p.orientation.z, p.orientation.w))
 
+    def _loc_pose_cb(self, msg: PoseWithCovarianceStamped):
+        self.hz_loc_pose.tick()
+        p = msg.pose.pose
+        self.last_loc_pose = (
+            p.position.x, p.position.y,
+            quat_to_yaw(p.orientation.x, p.orientation.y,
+                        p.orientation.z, p.orientation.w))
+        # Covariance is row-major 6x6: indices 0,7,35 are var(x), var(y), var(yaw).
+        cov = msg.pose.covariance
+        if cov and len(cov) >= 36:
+            self.last_loc_cov_diag = (cov[0], cov[7], cov[35])
+
     def _info_cb(self, msg):
         self.hz_info.tick()
         # rtabmap_msgs/Info ships a parallel list of stats keys/values
@@ -242,16 +375,30 @@ class LocDoctor(Node):
                     return stats[key]
             return None
 
+        # map_correction is the actual transform rtabmap proposes from
+        # map -> odom this iteration. Useful to see even when slam/pose
+        # hasn't published yet — it shows whether matching is happening
+        # at all even without crossing the publish threshold.
+        try:
+            mc = msg.mapCorrection
+            mc_x   = float(mc.translation.x)
+            mc_y   = float(mc.translation.y)
+            mc_yaw = math.degrees(quat_to_yaw(
+                mc.rotation.x, mc.rotation.y, mc.rotation.z, mc.rotation.w))
+        except Exception:
+            mc_x = mc_y = mc_yaw = None
+
         self.last_info = {
-            'ref_id':         msg.ref_id,
-            'loop_id':        msg.loop_closure_id,
-            'proximity_id':   msg.proximity_detection_id,
-            # Loop closure visual stats (the actual match attempt)
-            'loop_inliers':   _stat('Loop/Inliers/', 'Loop/VisualInliers/'),
-            'loop_matches':   _stat('Loop/Matches/', 'Loop/VisualMatches/'),
-            # Most-recent visual-registration attempt (per-frame)
-            'reg_inliers':    _stat('RegistrationVis/Inliers/'),
-            'reg_matches':    _stat('RegistrationVis/Matches/'),
+            'ref_id':              msg.ref_id,
+            'loop_id':             msg.loop_closure_id,
+            'proximity_id':        msg.proximity_detection_id,
+            'loop_inliers':        _stat('Loop/Inliers/', 'Loop/VisualInliers/'),
+            'loop_matches':        _stat('Loop/Matches/', 'Loop/VisualMatches/'),
+            'reg_inliers':         _stat('RegistrationVis/Inliers/'),
+            'reg_matches':         _stat('RegistrationVis/Matches/'),
+            'map_correction_x':    mc_x,
+            'map_correction_y':    mc_y,
+            'map_correction_yaw':  mc_yaw,
         }
 
     # ── helpers ───────────────────────────────────────────────────────────
@@ -278,41 +425,82 @@ class LocDoctor(Node):
         x, y, yaw_deg = tf
         return abs(x) < 1e-4 and abs(y) < 1e-4 and abs(yaw_deg) < 1e-2
 
+    @staticmethod
+    def _motion_delta(curr, prev, dt):
+        """Returns (dx, dy, dyaw_deg, vx_mps, vy_mps, vyaw_dps) or None."""
+        if curr is None or prev is None or dt <= 0:
+            return None
+        dx   = curr[0] - prev[0]
+        dy   = curr[1] - prev[1]
+        dyaw = curr[2] - prev[2]
+        # Wrap into [-pi, pi].
+        while dyaw >  math.pi: dyaw -= 2 * math.pi
+        while dyaw < -math.pi: dyaw += 2 * math.pi
+        return (dx, dy, math.degrees(dyaw),
+                dx / dt, dy / dt, math.degrees(dyaw) / dt)
+
+    @staticmethod
+    def _moving(delta, lin_thresh=0.005, ang_thresh=0.5):
+        """delta from _motion_delta. Threshold defaults: 5 mm / 0.5 deg per tick."""
+        if delta is None:
+            return False
+        dx, dy, dyaw_deg, *_ = delta
+        return (math.hypot(dx, dy) > lin_thresh) or (abs(dyaw_deg) > ang_thresh)
+
     # ── tick: collect → diagnose → print → log ────────────────────────────
     def _tick(self):
         rid = self.rid
-        elapsed = time.time() - self.start_time
+        now = time.time()
+        elapsed = now - self.start_time
+        self.tick_n += 1
+
+        dt = (now - self._tick_prev_t) if self._tick_prev_t else self.print_period
+        odom_delta = self._motion_delta(
+            self.last_odom_pose, self._odom_pose_prev_tick, dt)
+        ekf_delta  = self._motion_delta(
+            self.last_ekf_pose,  self._ekf_pose_prev_tick,  dt)
 
         snap = {
-            'cam_rgb_hz':   self.hz_cam_rgb.hz(),
-            'cam_depth_hz': self.hz_cam_depth.hz(),
-            'odom_hz':      self.hz_odom.hz(),
-            'ekf_hz':       self.hz_ekf.hz(),
-            'info_hz':      self.hz_info.hz(),
-            'slam_pose_hz': self.hz_slam_pose.hz(),
-            'loc_pose_hz':  self.hz_loc_pose.hz(),
-            'slam_pose_count': self.hz_slam_pose.count,
-            'loc_pose_count':  self.hz_loc_pose.count,
+            'cam_rgb_hz':        self.hz_cam_rgb.hz(),
+            'cam_depth_hz':      self.hz_cam_depth.hz(),
+            'odom_hz':           self.hz_odom.hz(),
+            'ekf_hz':            self.hz_ekf.hz(),
+            'info_hz':           self.hz_info.hz(),
+            'slam_pose_hz':      self.hz_slam_pose.hz(),
+            'loc_pose_hz':       self.hz_loc_pose.hz(),
+            'slam_pose_count':   self.hz_slam_pose.count,
+            'loc_pose_count':    self.hz_loc_pose.count,
             'tf_map_to_odom':       self._lookup_tf('map', f'{rid}_odom'),
             'tf_map_to_base_link':  self._lookup_tf('map', f'{rid}_base_link'),
             'tf_odom_to_base_link': self._lookup_tf(f'{rid}_odom',
                                                     f'{rid}_base_link'),
-            'last_odom_pose': self.last_odom_pose,
-            'last_ekf_pose':  self.last_ekf_pose,
-            'rtabmap_info':   dict(self.last_info),
+            'last_odom_pose':    self.last_odom_pose,
+            'last_ekf_pose':     self.last_ekf_pose,
+            'last_loc_pose':     self.last_loc_pose,
+            'last_loc_cov_diag': self.last_loc_cov_diag,
+            'odom_delta':        odom_delta,
+            'ekf_delta':         ekf_delta,
+            'odom_moving':       self._moving(odom_delta),
+            'ekf_moving':        self._moving(ekf_delta),
+            'rtabmap_info':      dict(self.last_info),
         }
         diagnosis = self._diagnose(snap)
 
         self._print_block(elapsed, snap, diagnosis)
 
-        if self.log_file:
-            record = {
-                't': time.time(), 't_rel': elapsed,
-                'diagnosis': diagnosis,
-                **snap,
-            }
+        # Snapshot for next tick's delta.
+        self._odom_pose_prev_tick = self.last_odom_pose
+        self._ekf_pose_prev_tick  = self.last_ekf_pose
+        self._tick_prev_t         = now
+
+        if self.jsonl_file:
             try:
-                self.log_file.write(json.dumps(record, default=str) + '\n')
+                self.jsonl_file.write(json.dumps({
+                    'kind': 'tick', 't': now, 't_rel': elapsed,
+                    'tick_n': self.tick_n,
+                    'diagnosis': diagnosis,
+                    **snap,
+                }, default=str) + '\n')
             except Exception as e:                          # pragma: no cover
                 self.get_logger().warn(f'JSONL write failed: {e}')
 
@@ -400,36 +588,96 @@ class LocDoctor(Node):
         x, y, yaw = p
         return f'x={x:+7.3f} y={y:+7.3f} yaw={math.degrees(yaw):+6.1f}°'
 
+    @staticmethod
+    def _fmt_motion(delta, moving):
+        if delta is None:
+            return f'{DIM}(no delta yet){END}'
+        dx, dy, dyaw_deg, vx, vy, vyaw_dps = delta
+        tag = (f'{GREEN}MOVING{END}' if moving else f'{DIM}stationary{END}')
+        return (f'{tag}  Δ=({dx:+.3f}m,{dy:+.3f}m,{dyaw_deg:+.1f}°) '
+                f'v=({vx:+.2f},{vy:+.2f}) m/s, {vyaw_dps:+.1f}°/s')
+
+    @staticmethod
+    def _fmt_cov(cov):
+        if cov is None:
+            return f'{DIM}(no msgs){END}'
+        var_x, var_y, var_yaw = cov
+        sx, sy = math.sqrt(max(0, var_x)), math.sqrt(max(0, var_y))
+        syaw = math.degrees(math.sqrt(max(0, var_yaw)))
+        # RViz default for "2D Pose Estimate" is std=0.5 m / 15° → coloured
+        # green if rtabmap thinks it's much tighter than the seed, yellow if
+        # similar, red if >1 m std.
+        worst = max(sx, sy)
+        col = GREEN if worst < 0.1 else (YELLOW if worst < 0.5 else RED)
+        return f'{col}σ_x={sx:.3f}m σ_y={sy:.3f}m σ_yaw={syaw:.2f}°{END}'
+
+    @staticmethod
+    def _fmt_map_correction(info):
+        mx = info.get('map_correction_x')
+        my = info.get('map_correction_y')
+        myaw = info.get('map_correction_yaw')
+        if mx is None:
+            return f'{DIM}(no info msgs){END}'
+        s = f'x={mx:+7.3f} y={my:+7.3f} yaw={myaw:+6.1f}°'
+        if abs(mx) < 1e-4 and abs(my) < 1e-4 and abs(myaw) < 1e-2:
+            return f'{YELLOW}{s}  [IDENTITY]{END}'
+        return s
+
     def _print_block(self, elapsed, s, diag):
+        """Print one block to stdout AND mirror into the .log file."""
         sev, msg = diag
         ts = datetime.now().strftime('%H:%M:%S')
         rid = self.rid
         info = s['rtabmap_info']
 
-        print(f'\n{BOLD}[loc_doctor {ts}  T+{elapsed:6.1f}s  /{rid}/]{END}')
-        print(f'  camera   rgb={self._fmt_hz(s["cam_rgb_hz"], 10)}  '
-              f'depth={self._fmt_hz(s["cam_depth_hz"], 10)}')
-        print(f'  odom     wheel={self._fmt_hz(s["odom_hz"], 20)} '
-              f'{self._fmt_pose(s["last_odom_pose"])}')
-        print(f'  ekf      out  ={self._fmt_hz(s["ekf_hz"], 20)} '
-              f'{self._fmt_pose(s["last_ekf_pose"])}')
-        print(f'  rtabmap  info ={self._fmt_hz(s["info_hz"], 0.5)}  '
-              f'inliers={info.get("loop_inliers") or info.get("reg_inliers") or "-"}  '
-              f'matches={info.get("loop_matches") or info.get("reg_matches") or "-"}  '
-              f'ref_id={info.get("ref_id", "-")}  '
-              f'loop_id={info.get("loop_id", "-")}')
-        print(f'  outputs  slam/pose={self._fmt_hz(s["slam_pose_hz"], 0.5)} '
-              f'{self._fmt_count(s["slam_pose_count"])}  '
-              f'loc_pose={self._fmt_hz(s["loc_pose_hz"], 0.5)} '
-              f'{self._fmt_count(s["loc_pose_count"])}')
-        print(f'  TF  map        -> {rid}_odom        {self._fmt_tf(s["tf_map_to_odom"], identity_warn=True)}')
-        print(f'  TF  map        -> {rid}_base_link   {self._fmt_tf(s["tf_map_to_base_link"])}')
-        print(f'  TF  {rid}_odom -> {rid}_base_link   {self._fmt_tf(s["tf_odom_to_base_link"])}')
+        lines = []
+        lines.append(f'\n{BOLD}┌─[loc_doctor {ts}  T+{elapsed:6.1f}s  '
+                     f'tick #{self.tick_n}  /{rid}/]{END}')
 
+        # ── SENSORS ───────────────────────────────────────────────────
+        lines.append(f'│ {BOLD}SENSORS{END}')
+        lines.append(f'│   camera        rgb={self._fmt_hz(s["cam_rgb_hz"], 10)}  '
+                     f'depth={self._fmt_hz(s["cam_depth_hz"], 10)}')
+        lines.append(f'│   wheel odom    {self._fmt_hz(s["odom_hz"], 20)} '
+                     f'{self._fmt_pose(s["last_odom_pose"])}')
+        lines.append(f'│                 {self._fmt_motion(s["odom_delta"], s["odom_moving"])}')
+        lines.append(f'│   ekf out       {self._fmt_hz(s["ekf_hz"], 20)} '
+                     f'{self._fmt_pose(s["last_ekf_pose"])}')
+        lines.append(f'│                 {self._fmt_motion(s["ekf_delta"], s["ekf_moving"])}')
+
+        # ── PROCESSING ────────────────────────────────────────────────
+        lines.append(f'│ {BOLD}PROCESSING (rtabmap){END}')
+        lines.append(f'│   info rate     {self._fmt_hz(s["info_hz"], 0.5)}')
+        lines.append(f'│   inliers       {info.get("loop_inliers") or info.get("reg_inliers") or "-"}'
+                     f'  matches={info.get("loop_matches") or info.get("reg_matches") or "-"}'
+                     f'  ref_id={info.get("ref_id", "-")}'
+                     f'  loop_id={info.get("loop_id", "-")}')
+        lines.append(f'│   map_correction {self._fmt_map_correction(info)}')
+
+        # ── OUTPUTS ───────────────────────────────────────────────────
+        lines.append(f'│ {BOLD}OUTPUTS{END}')
+        lines.append(f'│   /slam/pose    {self._fmt_hz(s["slam_pose_hz"], 0.5)} '
+                     f'{self._fmt_count(s["slam_pose_count"])}')
+        lines.append(f'│   /loc_pose     {self._fmt_hz(s["loc_pose_hz"],  0.5)} '
+                     f'{self._fmt_count(s["loc_pose_count"])}')
+        lines.append(f'│   loc_pose σ    {self._fmt_cov(s["last_loc_cov_diag"])}')
+
+        # ── TF ────────────────────────────────────────────────────────
+        lines.append(f'│ {BOLD}TF (the chain the GUI follows){END}')
+        lines.append(f'│   map        -> {rid}_odom         {self._fmt_tf(s["tf_map_to_odom"], identity_warn=True)}')
+        lines.append(f'│   map        -> {rid}_base_link    {self._fmt_tf(s["tf_map_to_base_link"])}')
+        lines.append(f'│   {rid}_odom -> {rid}_base_link    {self._fmt_tf(s["tf_odom_to_base_link"])}')
+
+        # ── DIAGNOSIS ─────────────────────────────────────────────────
         color = {'ok': GREEN, 'warn': YELLOW, 'err': RED}[sev]
-        prefix = {'ok': '✓', 'warn': '⚠', 'err': '✗'}[sev]
-        # Wrap long diagnosis at ~78 cols for readability.
-        print(f'  {color}{prefix} {msg}{END}')
+        prefix = {'ok': '✓ OK', 'warn': '⚠ WARN', 'err': '✗ ERROR'}[sev]
+        lines.append(f'└ {color}{BOLD}{prefix}{END}{color}: {msg}{END}')
+
+        for ln in lines:
+            print(ln)
+        if self.text_file:
+            for ln in lines:
+                self.text_file.write(strip_ansi(ln) + '\n')
 
 
 def main(args=None):
@@ -443,11 +691,16 @@ def main(args=None):
         # every time they stop the script.
         pass
     finally:
-        if node.log_file:
-            try:
-                node.log_file.close()
-            except Exception:
-                pass
+        try:
+            node._print_session_footer()
+        except Exception:
+            pass
+        for f in (node.jsonl_file, node.text_file):
+            if f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
         node.destroy_node()
         try:
             rclpy.shutdown()
