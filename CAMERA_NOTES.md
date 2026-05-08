@@ -6,6 +6,29 @@ complete on pi2. Step 4 (`rtabmap_ros` install) blocked on the lab
 apt mirror; workaround documented below. Step 6 (mapping run) is
 yours to execute, then localization launch closes the EKF loop.
 
+> ## ⚠️ Outdated since the depthai migration
+>
+> Most of this document describes the **old** custom Python camera
+> node (`swerve_formation/oak_camera_node.py`), which was **deleted**
+> in commit `2550c7a` and replaced by the official `depthai_ros_driver`
+> Camera component (commit `9182217`). Today the camera runs as a
+> ComposableNode loaded by `swerve_bringup/launch/oak_camera.launch.py`,
+> configured via `swerve_bringup/config/depthai_oak_d_lite.yaml`, with
+> `<exec_depend>depthai_ros_driver</exec_depend>` in the `swerve_bringup`
+> package.xml.
+>
+> **Architecture facts that still apply**: the OAK-D Lite still allows
+> only one host connection at a time — the depthai_ros_driver Camera
+> component owns the device exclusively, and `ai_camera_node` /
+> `alignment_node` must subscribe to the published topics rather than
+> opening their own depthai handle. The published topic names are
+> unchanged: `/{robot_id}/camera/{rgb,depth}/{image_raw,camera_info}`.
+>
+> **What's stale below**: anything about `oak_camera_node.py`'s internal
+> implementation, depthai SDK version notes, and the apt-package
+> tradeoffs. For the runtime contract (topics, frames, mount TF,
+> rebuild flow) see `CLAUDE.md` and `oak_camera.launch.py`.
+
 ## What works today on pi2
 
 - **OAK-D Lite camera** plugged in, depthai 3.5.0 SDK working from

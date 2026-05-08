@@ -176,18 +176,31 @@ ros2 launch swerve_bringup rtabmap_pi_sensors.launch.py \
     cam_x:=0.128  cam_y:=0.000  cam_z:=-0.0175
 ```
 
-**Wait for these lines** (in roughly this order, ~10–15 s total):
-```
-[oak_camera_node-1]    ... oak_camera_node ready (tb3_1) — depthai=3.5.0
-[oak_camera_node-1]    ... pipeline running. device=OAK-D-LITE
-[static_transform_publisher-2] ... Spinning until stopped
-                                  translation: (0.128, 0.000, -0.018)
-                                  from 'tb3_1_base_link' to
-                                  'tb3_1_oak_rgb_camera_optical_frame'
-[conveyor_base_node-3] ... Serial /dev/ttyACM0 @ 115200 opened.
-[conveyor_base_node-3] ... ConveyorBaseNode activated
-[ekf_node-4]           ... EKF node ready for tb3_1
-```
+**Wait for these signals** (in roughly this order, ~10–15 s total):
+
+1. A `component_container` line that confirms the `depthai_ros_driver::Camera` plugin loaded inside the `oak_container_tb3_1` container, plus the OAK-D being opened. Exact wording varies with the depthai_ros_driver version, but you'll see the container name and the OAK device. **If you see a `USB-speed` error here, the cable / port / hub is USB 2 and must be physically swapped** — do NOT downgrade `i_usb_speed` in `depthai_oak_d_lite.yaml`.
+2. ```
+   [static_transform_publisher-2] ... Spinning until stopped
+                                     translation: (0.128, 0.000, -0.018)
+                                     from 'tb3_1_base_link' to
+                                     'tb3_1_oak_rgb_camera_optical_frame'
+   [conveyor_base_node-3] ... Serial /dev/ttyACM0 @ 115200 opened.
+   [conveyor_base_node-3] ... ConveyorBaseNode activated
+   [ekf_node-4]           ... EKF node ready for tb3_1
+   ```
+
+> **Note (post-depthai-migration):** the new `depthai_ros_driver` Camera component logs much less than the old custom `oak_camera_node` — silence after launch is normal. Confirm the camera is healthy with a topic check from any **other** sourced terminal:
+>
+> ```bash
+> ros2 topic list | grep '/tb3_1/camera'
+> # Expect 4 lines:
+> #   /tb3_1/camera/depth/camera_info
+> #   /tb3_1/camera/depth/image_raw
+> #   /tb3_1/camera/rgb/camera_info
+> #   /tb3_1/camera/rgb/image_raw
+> ```
+>
+> If all 4 are present, the camera is publishing. If 0 or some are missing, the camera failed to initialize — restart T1 and check the container's stderr.
 
 **Leave T1 alone** for the rest of the session. The launch keeps
 publishing; do not Ctrl+C unless you intentionally restart.
