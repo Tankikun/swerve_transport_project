@@ -11,6 +11,32 @@ You'll end up with a browser window showing:
 **Time:** ~10 minutes from cold start (faster on subsequent runs).
 
 > **Architecture (what runs where).** RTAB-Map runs **on the Pi**, not on the laptop. The Pi has the `.db`, the camera, the wheels — it does the entire localization pipeline locally and publishes `map → tb3_1_base_link` over the LAN. The laptop only runs the **GUI server** (`server.py`) and the **TF→HTTP bridge** (`ros_pose_bridge.py`). This is faster and more reliable than the old split-mode where the laptop did the SLAM — no cross-network image streaming.
+>
+> **Where the pose actually goes** (relevant for multi-robot — see also [Multi-robot scaling](#multi-robot)):
+>
+> ```
+>                    pi2 (this robot)
+>                    ───────────────
+>                    rtabmap_localization.launch.py
+>                          │
+>                          ▼  /tb3_1/slam/pose, /tb3_1/ekf/odom, TF map→tb3_1_base_link
+>                          │
+>            ┌─────────────┼──────────────────────────┐
+>            │             │                          │
+>            ▼             ▼                          ▼
+>      laptop         pi1 (other robot,         (eventual leader)
+>      ros_pose_      laplacian_formation_      navigation_node →
+>      bridge.py      node consumes the         /virtual_center/cmd_vel
+>          │          peer's pose for
+>          ▼          consensus correction
+>      Flask /pose    + EKF on its OWN pose
+>          │
+>          ▼
+>      browser GUI
+>      (visualization)
+> ```
+>
+> Right now the test is **single-robot**: only pi2 is running, only the laptop sees its pose. But the architecture is already correct for multi-robot — pi2's outputs are namespaced (`/tb3_1/...`) and the FastDDS peer list discovery works robot-to-robot, robot-to-laptop, and laptop-to-laptop transparently. When pi1 comes online with the same launch (with `robot_id:=tb3_0`) and the same `.db`, formation control and Nav2 path planning slot in without changing this doc.
 
 ---
 
@@ -504,6 +530,69 @@ After fixing: restart T1, T2, T3, AND `ros2 daemon stop ; sleep 2 ; ros2 daemon 
 Symptoms in T1: rtabmap log shows huge `delay=` values, or "drops every frame."
 
 Re-do Step 3. If `systemd-timesyncd` keeps re-enabling itself, the disable command's `--now` should make it permanent across boots.
+
+---
+
+## <a name="multi-robot"></a>Multi-robot scaling (when you add tb3_0 on pi1)
+
+Right now you run only pi2 (`tb3_1`). The architecture already supports a second robot — when pi1 comes online, here's what changes and what doesn't.
+
+### What stays the same
+
+- The 4-terminal layout (T1 SSH'd into one pi + T2 server + T3 bridge + T4 teleop). You can SSH a **second** terminal into pi1 and run the same launch with `robot_id:=tb3_0` — that's it for the per-robot stack.
+- `interface/server.py`, `interface/ros_pose_bridge.py`, `index.html` — unchanged.
+- Per-robot topic prefixes (`/tb3_0/...` vs `/tb3_1/...`) and per-robot frame IDs (`tb3_0_base_link` vs `tb3_1_base_link`) keep the two robots' data streams separate. Both publish their own `map → {robot_id}_base_link` TF.
+
+### What you add on pi1
+
+```bash
+ssh pi1@192.168.1.101
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/pi1/fastdds_peers.xml
+export ROS_DOMAIN_ID=30
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch swerve_bringup rtabmap_localization.launch.py \
+    robot_id:=tb3_0 \
+    db_path:=~/maps/room.db \
+    cam_x:=0.128 cam_y:=0.000 cam_z:=-0.0175       # tb3_0's measured offsets if different
+```
+
+**The `.db` MUST be the same file as pi2's** (or rather, it must come from the same mapping run — different `.db` files mean different `map` frames, which silently breaks any inter-robot pose feedback). The recommended convention is to call it `~/maps/room.db` on every robot:
+
+```bash
+# From the laptop, distribute the canonical .db once after every remap:
+rsync ~/maps/tb3_1_room.db pi1@192.168.1.101:~/maps/room.db
+rsync ~/maps/tb3_1_room.db pi2@192.168.1.102:~/maps/room.db
+```
+
+### What pi1 does with pi2's pose (and vice versa)
+
+This is the point of the multi-robot architecture. Each robot's `laplacian_formation_node` subscribes to **both** robots' poses:
+
+- pi1 reads `/tb3_1/slam/pose` (from pi2) — used as the peer pose for consensus correction
+- pi2 reads `/tb3_0/slam/pose` (from pi1) — same thing, the other direction
+- Each robot's own EKF still fuses its OWN raw `/odom` + `/slam/pose`
+- The leader (whichever robot's `priority` is lowest) drives `/virtual_center/cmd_vel` for the formation centre; both robots' `laplacian_formation_node` instances translate that into per-robot `/cmd_vel`
+
+The laptop's bridge already listens to whichever `robot_id` it's parametrised with. To visualize **both** robots in the GUI:
+
+```bash
+# Two separate bridge instances on the laptop, one per robot:
+python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_0   # T3a
+python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1   # T3b
+```
+
+(`server.py` already accepts `/pose` POSTs from any source — but the current GUI renders only one cone. Adding a second cone is a frontend tweak: branch off the `pose` payload by `robot_id` and instantiate one cone per. Out of scope for this guide.)
+
+### When you turn on the laplacian consensus correction
+
+It's **off by default** on both robots (`enable_consensus:=false`). Don't enable it until:
+
+1. Both robots' `LOC: LIVE` pills are green at the same time (each is independently localized)
+2. You've verified `tf2_echo map tb3_0_base_link` and `tf2_echo map tb3_1_base_link` both show sane, drift-free poses
+3. The `.db` md5sums on pi1 and pi2 match (same map, same world frame)
+
+Then on each robot's `laplacian_formation_node` launch, set `enable_consensus:=true`. If any of the three preconditions fails, consensus correction will silently corrupt the formation — both robots will think they're in the wrong place and try to "correct" each other into a wall.
 
 ---
 
