@@ -279,7 +279,7 @@ const panel3d  = document.getElementById("panel3d");
 const canvas3d = document.getElementById("canvas3d");
 const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(0xffffff, 1);
+renderer.setClearColor(0x2a272b, 1);
 
 const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 1000);
 camera.up.set(0, 0, 1);
@@ -598,7 +598,7 @@ function buildCloud(points, colors) {
   const sz = Math.ceil(Math.max(xs, ys, 4)) + 2;
 
   const floorZ = mapData.metadata.floor_z || 0;
-  const grid   = new THREE.GridHelper(sz, sz, 0x44aaff, 0x223344);
+  const grid   = new THREE.GridHelper(sz, sz, 0xffeffe, 0xf4cdf1);
   grid.rotation.x = Math.PI / 2;
   grid.position.set(cloudCenter.x, cloudCenter.y, floorZ);
   scene.add(grid);
