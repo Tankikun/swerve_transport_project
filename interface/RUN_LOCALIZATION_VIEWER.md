@@ -42,7 +42,7 @@ You'll end up with a browser window showing:
 
 ## Terminal layout
 
-You'll need **4 terminals** + 1 browser. Arrange them ahead of time:
+You'll need **4 terminals** (5 with the optional doctor) + 1 browser. Arrange them ahead of time:
 
 | Terminal | Where | Role |
 |---|---|---|
@@ -50,6 +50,7 @@ You'll need **4 terminals** + 1 browser. Arrange them ahead of time:
 | **T2** | Laptop | Flask server (web GUI backend) |
 | **T3** | Laptop | ROS pose bridge (TF → HTTP, GUI hint → /initialpose) |
 | **T4** | Laptop | Teleop keyboard |
+| **T5** *(optional)* | SSH'd into pi2 | `loc_doctor.py` — live diagnostic readout when something looks wrong. See [Diagnosing a stuck pill](#loc-doctor) |
 | **Browser** | Laptop | Chrome/Firefox at `http://localhost:5002` |
 
 ---
@@ -474,17 +475,89 @@ The canonical pose flow:
 
 ## Troubleshooting
 
+### <a name="loc-doctor"></a>Diagnosing a stuck pill: `loc_doctor.py`
+
+Before guessing which subsection below applies, run the diagnostic monitor —
+it tells you which layer is broken in ~5 seconds.
+
+**Run it on pi2** (no FastDDS network dependency, sees every topic locally):
+
+```bash
+ssh pi2 "source ~/ros2_ws/install/setup.bash && \
+         python3 ~/swerve_transport_project/interface/loc_doctor.py \
+         --ros-args -p robot_id:=tb3_1"
+```
+
+What you'll see — one block every second:
+
+```
+[loc_doctor 14:32:01  T+   5.0s  /tb3_1/]
+  camera   rgb= 14.9Hz  depth= 14.7Hz
+  odom     wheel= 33.1Hz x=+0.470 y=-1.190 yaw= +12.3°
+  ekf      out  = 29.8Hz x=+0.470 y=-1.190 yaw= +12.3°
+  rtabmap  info =  1.0Hz  inliers=8  matches=12  ref_id=42  loop_id=0
+  outputs  slam/pose=  0.0Hz NEVER  loc_pose=  0.0Hz NEVER
+  TF  map        -> tb3_1_odom        x=+0.000 y=+0.000 yaw=  +0.0°  [IDENTITY]
+  TF  map        -> tb3_1_base_link   x=+0.470 y=-1.190 yaw= +12.3°
+  TF  tb3_1_odom -> tb3_1_base_link   x=+0.470 y=-1.190 yaw= +12.3°
+  ⚠ MATCHING ATTEMPTED but rejected (8 inliers, threshold likely 15). Lower
+    Vis/MinInliers in rtabmap_localization.yaml, or improve lighting / move
+    closer to a feature-rich wall.
+```
+
+How to read it:
+
+| What you see | What it means |
+|---|---|
+| `slam/pose: NEVER` + `TF map->odom: [IDENTITY]` | RTAB-Map publishing the chain but has never visually matched. GUI shows `LIVE` but the coordinate is just wheel odom. **This is the "stuck pill" symptom.** |
+| `inliers=0` repeatedly | No features found in current view. Move to feature-rich wall, or .db doesn't cover this area. |
+| `inliers=N` where 0 < N < 15 | Matching attempted, threshold rejected. Lower `Vis/MinInliers`. |
+| `cam_rgb_hz=0` | OAK-D not streaming. Check `lsusb | grep Movidius` on pi2. |
+| `info_hz=0` | `rtabmap` node not running or not getting RGBD pairs. Check `ros2 node list`. |
+| `slam/pose: n>0` + `TF map->odom: NOT identity` | Localization working as intended. |
+
+A JSONL log of every tick is written to `~/loc_doctor_logs/loc_doctor_<rid>_<stamp>.jsonl`
+on pi2 — useful for replaying a session offline. Disable with `-p no_log:=true`.
+
 ### <a name="searching"></a>SEARCHING never resolves
 
 After 60 sec of driving + a Set Initial Pose hint, the pill is still red.
 
-**Most likely causes (in order):**
+**Run [`loc_doctor`](#loc-doctor) first** — it'll tell you whether RTAB-Map
+is dead, starved of frames, or matching but rejecting. Then:
 
 1. **`.db` on pi2 doesn't match `map.json` on laptop.** Re-run the [New `.db`?](#new-db) prep — rsync the .db AND regenerate map.json.
 2. **Robot is in a part of the room you didn't map.** Drive it back to a known mapped area, click Set Initial Pose there.
 3. **Lighting changed since mapping.** Re-map under current lighting.
 4. **OAK-D wedged** — check on pi2: `ssh pi2@192.168.1.102 "lsusb | grep Movidius"`. If empty, replug the camera.
 5. **RTAB-Map didn't actually start.** Check T1's output for `RTAB-Map started`. If it crashed, scroll back for the error.
+
+### `LOC: LIVE x.xx,y.yy` is stuck — same coordinate no matter where the robot is
+
+The pill is green and shows a coordinate, but moving the robot (driving or
+picking it up) doesn't change it. This is the most confusing failure mode
+because the GUI looks healthy.
+
+**What's actually happening:** RTAB-Map publishes an *identity* `map -> {rid}_odom`
+TF from startup, before any visual match. So:
+
+- The TF chain `map -> base_link` is complete → bridge sees `localized: true`
+- The pose is just whatever the wheel-odometry integrator says (i.e. the
+  OpenCR's `POSE` line, integrated from when you last drove)
+- Picking the robot up doesn't move encoders → the odom-frame pose is frozen
+- RTAB-Map never corrects it because it's not visually matching
+
+**Diagnosis:** run [`loc_doctor`](#loc-doctor). The signature is:
+
+- `slam/pose` count = `NEVER`
+- `TF map -> {rid}_odom` shows `[IDENTITY]`
+- `rtabmap info` is publishing (so RTAB-Map is running, just not matching)
+
+**Fix:** same as [SEARCHING never resolves](#searching). The pill being green
+is a UI quirk — `LIVE` means "TF works AND no `/slam/pose` has aged out yet,"
+but if `/slam/pose` has *never* arrived there's no age to compare against, so
+the GUI falls through to `LIVE`. (Conceptually it should probably be a fourth
+state, "TRACKING-NO-MATCH" — but for now treat it identical to SEARCHING.)
 
 ### Browser shows "Awaiting map…" forever
 

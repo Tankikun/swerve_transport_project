@@ -30,6 +30,7 @@ do when you have a fresh `.db` (rsync to pi + regenerate `map.json`).
 | `index.html` | The web UI itself — Three.js 3D point cloud, click-to-goal floor raycast, "Set Initial Pose" tool, LOC status pill |
 | `server.py` | Flask backend serving `index.html`, `map.json`, and the `/pose` + `/set_initial_pose` mailbox endpoints |
 | `ros_pose_bridge.py` | rclpy node that streams `map → base_link` TF to the server every 100 ms and republishes GUI initial-pose hints to RTAB-Map's `/initialpose` |
+| `loc_doctor.py` | Read-only diagnostic monitor. Subscribes to every link in the localization chain (camera, odom, ekf, rtabmap/info, slam/pose, TF) and prints a one-block-per-second status with a plain-English diagnosis. Run on pi2 when `LOC: LIVE x,y` is stuck or `SEARCHING` won't resolve. Logs to `~/loc_doctor_logs/*.jsonl` for offline replay |
 | `db_to_map_json.py` | Preprocessing — converts an RTAB-Map `.db` into the `map.json` the GUI consumes |
 | `map.json` | Currently-served map (regenerate from your `.db` when needed) |
 | `RUN_LOCALIZATION_VIEWER.md` | Step-by-step runbook for the localization viewer |
