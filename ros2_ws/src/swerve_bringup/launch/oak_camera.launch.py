@@ -178,10 +178,10 @@ def generate_launch_description():
             'fps', default_value='15',
             description='Camera publish rate (Hz). 15 is OAK-D Lite USB2 sweet spot.'),
         DeclareLaunchArgument(
-            'rgb_size', default_value='640x400',
+            'rgb_size', default_value='960x540',
             description='RGB resolution (WxH).'),
         DeclareLaunchArgument(
-            'depth_size', default_value='640x400',
+            'depth_size', default_value='960x540',
             description='Depth resolution (WxH). Width MUST be a multiple of 16.'),
         OpaqueFunction(function=launch_setup),
     ])

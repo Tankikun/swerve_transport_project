@@ -88,8 +88,8 @@ def launch_setup(context, *args, **kwargs):
             'cam_x':      LaunchConfiguration('cam_x'),
             'cam_y':      LaunchConfiguration('cam_y'),
             'cam_z':      LaunchConfiguration('cam_z'),
-            'rgb_size':   '640x400',
-            'depth_size': '640x400',
+            'rgb_size':   '960x540',
+            'depth_size': '960x540',
         }.items(),
     ))
 

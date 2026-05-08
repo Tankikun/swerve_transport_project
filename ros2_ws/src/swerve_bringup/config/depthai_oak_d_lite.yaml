@@ -27,7 +27,7 @@
     rgb:
       i_resolution: "1080P"            # 1920x1080 native (IMX214 does not support 720P);
                                        # ISP scale 1/2 will produce 960x540 output, which is a good balance of quality and CPU load for RTAB-Map
-      i_fps: 15.0                      # comfortably above 5 Hz RTAB-Map rate
+      i_fps: 10.0                      # comfortably above 5 Hz RTAB-Map rate
       i_interleaved: false             # planar output, what ROS expects
       i_max_q_size: 10                 # output queue depth
       i_low_bandwidth: false           # MJPEG compression off; we want raw
@@ -38,7 +38,16 @@
       i_set_isp_scale: true            # enable ISP scaling for proper alignment
       i_isp_num: 1
       i_isp_den: 2                     # scales 1080P -> 960x540 at ISP level (VPU-side, no Pi CPU cost)
-    
+      # Set manual focus to avoid focus-hunting blur
+      i_keep_preview_aspect_ratio: true
+      i_set_man_focus: true
+      i_man_focus: 130
+      # Exposure cap
+      i_exposure: 8000
+      i_iso: 800
+      i_set_man_exposure: false
+
+
     # ===== Stereo depth =====
     stereo:
       i_align_depth: true              # align depth to RGB camera (CRITICAL)
@@ -54,7 +63,7 @@
       i_stereo_conf_threshold: 230     # confidence threshold; lower = more depths kept
       i_max_q_size: 10
       i_resolution: "400P"             # 640x400 stereo native; matches OAK-D Lite
-      i_fps: 15.0                      # match RGB rate
+      i_fps: 10.0                      # match RGB rate
 
       
       # Postprocessing filters (improve depth quality, slight CPU cost)
