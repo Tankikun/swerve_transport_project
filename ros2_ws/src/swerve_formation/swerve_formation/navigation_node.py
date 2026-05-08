@@ -35,6 +35,65 @@ def _wrap(a: float) -> float:
     return float((a + np.pi) % (2 * np.pi) - np.pi)
 
 
+def _pure_pursuit_target(path, robot_xy, lookahead):
+    """Pure-pursuit lookahead carrot (Coulter 1992).
+
+    Finds a point `lookahead` meters ahead of the robot's closest
+    projection onto the polyline `path`. Returns (tx, ty).
+
+    Pure-pursuit treats the path as a continuous curve rather than a
+    sequence of discrete waypoints, so motion is smooth regardless of
+    waypoint density. This kills the ballistic line-to-line motion that
+    happens when conic attraction targets one waypoint at a time.
+
+    Args:
+        path:       list of (x, y) tuples, ordered start → goal
+        robot_xy:   current (x, y)
+        lookahead:  meters ahead on the path to aim at
+
+    Returns:
+        (tx, ty) world-frame target. Falls back to path[-1] when the
+        lookahead walks past the end of the path.
+    """
+    if len(path) < 2:
+        return path[-1]
+    rx, ry = float(robot_xy[0]), float(robot_xy[1])
+
+    # Step A — find closest projection onto the polyline
+    best_seg, best_t, best_d2 = 0, 0.0, float("inf")
+    for i in range(len(path) - 1):
+        ax, ay = float(path[i][0]),     float(path[i][1])
+        bx, by = float(path[i + 1][0]), float(path[i + 1][1])
+        dx, dy = bx - ax, by - ay
+        seg_len2 = dx * dx + dy * dy
+        if seg_len2 < 1e-9:
+            t = 0.0
+        else:
+            t = ((rx - ax) * dx + (ry - ay) * dy) / seg_len2
+            t = max(0.0, min(1.0, t))
+        px, py = ax + t * dx, ay + t * dy
+        d2 = (rx - px) ** 2 + (ry - py) ** 2
+        if d2 < best_d2:
+            best_d2, best_seg, best_t = d2, i, t
+
+    # Step B — walk forward `lookahead` meters from (best_seg, best_t)
+    remaining = float(lookahead)
+    seg, t = best_seg, best_t
+    while seg < len(path) - 1:
+        ax, ay = float(path[seg][0]),     float(path[seg][1])
+        bx, by = float(path[seg + 1][0]), float(path[seg + 1][1])
+        dx, dy = bx - ax, by - ay
+        seg_len = float(np.hypot(dx, dy))
+        rem_in_seg = (1.0 - t) * seg_len
+        if remaining <= rem_in_seg:
+            new_t = t + remaining / seg_len if seg_len > 1e-9 else 0.0
+            return (ax + new_t * dx, ay + new_t * dy)
+        remaining -= rem_in_seg
+        seg += 1
+        t = 0.0
+    return (float(path[-1][0]), float(path[-1][1]))
+
+
 def _rot2d(h: float) -> np.ndarray:
     c, s = np.cos(h), np.sin(h)
     return np.array([[c, -s], [s, c]])
@@ -72,8 +131,22 @@ class NavigationNode(Node):
     # ── Heading control ───────────────────────────────────────────────────────
     K_HEADING = 3.0    # gain for aligning heading with velocity direction
 
+    # ── Pure-pursuit follower (Coulter 1992) ─────────────────────────────────
+    LOOKAHEAD = 0.20    # m   — distance ahead on the polyline to aim at.
+                        # Smooths through corners and pulls the robot back to
+                        # the line if it drifts. Should be >= GOAL_TOL_INTERMEDIATE
+                        # and roughly equal to the planner's target_spacing
+                        # so the carrot stays on a real segment.
+
     # ── Goal tolerance (two-phase arrival: XY first, then in-place rotation) ─
-    GOAL_TOL = 0.05    # m   — XY arrival tolerance
+    GOAL_TOL              = 0.05    # m   — FINAL XY arrival tolerance
+    GOAL_TOL_INTERMEDIATE = 0.20    # m   — intermediate-waypoint pop tolerance.
+                                    # apf_refine_path produces ~5–30 cm spaced
+                                    # waypoints; 0.05 m tol pops each in 1 tick
+                                    # and the planner's curve collapses into
+                                    # ballistic point-to-point hops. 0.20 m
+                                    # lets the controller actually trace the
+                                    # polyline.
     YAW_TOL  = 0.05    # rad — yaw arrival tolerance (~3°)
 
     # ── Default formation safety margin (overridden by /formation/footprint_radius)
@@ -168,7 +241,14 @@ class NavigationNode(Node):
         )
 
     def _waypoints_cb(self, msg: PoseArray):
-        """Ordered waypoint sequence — each pose: position x/y = target, yaw = θ."""
+        """Ordered waypoint sequence — each pose: position x/y = target, yaw = θ.
+
+        The laptop-side planner runs A* + an APF refinement pass: waypoints
+        are densified near obstacles and pre-shifted away from walls, so by
+        the time they arrive here the line is already smooth and safe. The
+        on-board APF in _apf_velocity() acts as a local safety layer in
+        case sensor data picks up something the map missed.
+        """
         new_wps = []
         for p in msg.poses:
             q = p.orientation
@@ -178,12 +258,28 @@ class NavigationNode(Node):
             )
             new_wps.append(np.array([p.position.x, p.position.y, yaw]))
         if not new_wps:
+            self.get_logger().warn('Empty waypoint sequence — ignoring.')
             return
         self._waypoints    = new_wps[1:]
         self._current_wp   = new_wps[0]
         self._reset_ramp()
         self._phase = 'DRIVE'
-        self.get_logger().info(f'Waypoint sequence loaded: {len(new_wps)} points.')
+
+        # Distance to first / last waypoint and total path length, for
+        # quick sanity-checking on the Pi terminal.
+        first = new_wps[0][:2]; last = new_wps[-1][:2]
+        d_to_first = float(np.linalg.norm(first - self._pose[:2]))
+        total = 0.0
+        for i in range(len(new_wps) - 1):
+            total += float(np.linalg.norm(new_wps[i + 1][:2] - new_wps[i][:2]))
+        self.get_logger().info(
+            f'Plan received: {len(new_wps)} waypoints, '
+            f'total {total:.2f} m. '
+            f'First: ({first[0]:.2f}, {first[1]:.2f})  '
+            f'Last: ({last[0]:.2f}, {last[1]:.2f}, '
+            f'{np.rad2deg(new_wps[-1][2]):.0f}°). '
+            f'd_to_first = {d_to_first:.2f} m.'
+        )
 
     def _obstacles_cb(self, msg: PoseArray):
         """Obstacle list: pose.position.x/y = centre, z = radius."""
@@ -200,64 +296,92 @@ class NavigationNode(Node):
 
     def _apf_velocity(self) -> tuple[np.ndarray, float]:
         """
-        Compute desired (v_world [2], omega) for the virtual centre using APF.
+        Compute desired (v_world [2], omega) for the virtual centre.
 
-        Layer 1 — APF (global, obstacle-aware):
-          f_att  = K_ATT * (goal - pos) / ||goal - pos||   ← conic: constant magnitude
-          f_rep  = K_REP * (1/d - 1/D_REP) / d² * n̂       ← Khatib, inflated radius
+        Pure-pursuit (Coulter 1992) + Khatib repulsion + velocity ramp.
 
-        Layer 2 — velocity ramp (local smoothing, applied in control loop).
+        Layer 1 — pure-pursuit lookahead:
+          target = a point LOOKAHEAD m ahead on the polyline {current_wp, *_waypoints}
+          f_att  = K_ATT * unit(target - pos)
+          This treats the path as a continuous curve, so densification
+          density doesn't cause line-to-line ballistic hops.
+
+        Layer 2 — Khatib repulsion (only against /navigation/obstacles
+                  — runtime dynamic objects, NOT the static map walls
+                  which the planner already inflated around).
+
+        Layer 3 — velocity ramp (applied by _apply_ramp in the control loop).
 
         Returns (v_des [2], omega_des) in world frame.
-        Caller applies the ramp before publishing.
         """
-        pos  = self._pose[:2]
-        goal = self._current_wp[:2]
+        pos = self._pose[:2]
 
-        to_goal = goal - pos
-        d_goal  = np.linalg.norm(to_goal)
-
-        if d_goal < self.GOAL_TOL:
+        # ── Build the polyline ahead of the robot ─────────────────────────
+        # [current_wp, then each remaining waypoint]. We do NOT prepend pos
+        # itself; pure_pursuit_target's projection step handles where the
+        # robot is on this polyline.
+        polyline: list[tuple[float, float]] = []
+        if self._current_wp is not None:
+            polyline.append((float(self._current_wp[0]),
+                             float(self._current_wp[1])))
+        for wp in self._waypoints:
+            polyline.append((float(wp[0]), float(wp[1])))
+        if len(polyline) == 0:
             return np.zeros(2), 0.0
 
-        # ── Attractive force (conic: unit vector, constant magnitude) ─────
-        f_att = self.K_ATT * to_goal / d_goal
+        # ── Distance to the FINAL goal (used for slowdown only) ───────────
+        final_xy = np.array(polyline[-1])
+        d_final  = float(np.linalg.norm(final_xy - pos))
+        if d_final < self.GOAL_TOL and len(self._waypoints) == 0:
+            return np.zeros(2), 0.0
 
-        # ── Repulsive forces (Khatib, safety-inflated obstacle radius) ────
+        # ── Pure-pursuit lookahead carrot ─────────────────────────────────
+        target = _pure_pursuit_target(polyline, pos, self.LOOKAHEAD)
+        to_target = np.array(target) - pos
+        d_target  = float(np.linalg.norm(to_target))
+        if d_target < 1e-6:
+            return np.zeros(2), 0.0
+
+        # ── Attractive force toward the carrot ────────────────────────────
+        f_att = self.K_ATT * to_target / d_target
+
+        # ── Khatib repulsion from runtime obstacles ───────────────────────
         f_rep = np.zeros(2)
         for (ox, oy, r) in self._obstacles:
             r_eff = r + self._safety
             diff  = pos - np.array([ox, oy])
-            d_raw = np.linalg.norm(diff)
-            d     = max(d_raw - r_eff, 0.01)   # clear-distance to inflated surface
+            d_raw = float(np.linalg.norm(diff))
+            d     = max(d_raw - r_eff, 0.01)
             if d < self.D_REP:
                 n_hat  = diff / max(d_raw, 1e-6)
-                mag    = self.K_REP * (1.0/d - 1.0/self.D_REP) / (d ** 2)
+                mag    = self.K_REP * (1.0 / d - 1.0 / self.D_REP) / (d ** 2)
                 f_rep += mag * n_hat
 
         f_total = f_att + f_rep
-        f_mag   = np.linalg.norm(f_total)
-
+        f_mag   = float(np.linalg.norm(f_total))
         if f_mag < 1e-6:
             return np.zeros(2), 0.0
 
-        # Speed: scale by force magnitude up to MAX_LINEAR, slow near goal
+        # ── Speed: scale by force magnitude; slow only at the FINAL goal ──
+        # SLOW_RADIUS gating to the final waypoint avoids stop-go-stop-go
+        # at every densified intermediate point.
         speed = min(self.MAX_LINEAR, f_mag)
-        if d_goal < self.SLOW_RADIUS:
-            speed *= d_goal / self.SLOW_RADIUS
+        is_final_wp = (len(self._waypoints) == 0)
+        if is_final_wp and d_final < self.SLOW_RADIUS:
+            speed *= d_final / self.SLOW_RADIUS
 
-        v_des = (speed / f_mag) * f_total   # world-frame velocity
+        v_des = (speed / f_mag) * f_total
 
-        # Heading: align with velocity direction when moving fast enough
-        if np.linalg.norm(v_des) > 0.05:
-            desired_heading = np.arctan2(v_des[1], v_des[0])
+        # ── Heading: aim at motion direction when fast, goal yaw when slow.
+        if float(np.linalg.norm(v_des)) > 0.05:
+            desired_heading = float(np.arctan2(v_des[1], v_des[0]))
         else:
-            desired_heading = self._current_wp[2]   # use goal heading when nearly stopped
+            desired_heading = float(self._current_wp[2])
 
-        omega_des = np.clip(
+        omega_des = float(np.clip(
             self.K_HEADING * _wrap(desired_heading - self._pose[2]),
-            -self.MAX_ANGULAR, self.MAX_ANGULAR
-        )
+            -self.MAX_ANGULAR, self.MAX_ANGULAR,
+        ))
 
         return v_des, omega_des
 
@@ -293,7 +417,11 @@ class NavigationNode(Node):
         d_xy = np.linalg.norm(self._current_wp[:2] - pos)
 
         # ── Waypoint advance / phase transition (only while DRIVE-ing) ─────
-        if self._phase == 'DRIVE' and d_xy < self.GOAL_TOL:
+        # Loose tolerance for intermediate waypoints (so the controller
+        # actually tracks the planner's curve), tight tolerance for the
+        # final waypoint (so XY arrival is precise).
+        wp_tol = self.GOAL_TOL_INTERMEDIATE if self._waypoints else self.GOAL_TOL
+        if self._phase == 'DRIVE' and d_xy < wp_tol:
             if self._waypoints:
                 # More waypoints to follow — advance immediately, no rotate.
                 self._current_wp = self._waypoints.pop(0)
