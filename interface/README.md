@@ -14,10 +14,12 @@ right now is the one to use).
 
 ## Operator runbook
 
-To actually run the localization viewer end-to-end (5 terminals + a
-browser), open **[`RUN_LOCALIZATION_VIEWER.md`](RUN_LOCALIZATION_VIEWER.md)**.
+To actually run the localization viewer end-to-end (4 terminals + a
+browser — RTAB-Map runs **on the Pi**, the laptop only hosts the GUI),
+open **[`RUN_LOCALIZATION_VIEWER.md`](RUN_LOCALIZATION_VIEWER.md)**.
 It's a self-contained, step-by-step guide that takes you from a powered-off
-robot to a green `LOC: LIVE` pill in ~10 minutes.
+robot to a green `LOC: LIVE` pill in ~10 minutes. It also covers what to
+do when you have a fresh `.db` (rsync to pi + regenerate `map.json`).
 
 ---
 

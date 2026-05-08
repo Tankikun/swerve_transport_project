@@ -8,48 +8,94 @@ You'll end up with a browser window showing:
 - A **cyan cone** on the 3D map that moves as you drive the robot
 - A simple visual proof that "the robot knows where it is"
 
-**Time:** ~10 minutes from cold start.
+**Time:** ~10 minutes from cold start (faster on subsequent runs).
+
+> **Architecture (what runs where).** RTAB-Map runs **on the Pi**, not on the laptop. The Pi has the `.db`, the camera, the wheels — it does the entire localization pipeline locally and publishes `map → tb3_1_base_link` over the LAN. The laptop only runs the **GUI server** (`server.py`) and the **TF→HTTP bridge** (`ros_pose_bridge.py`). This is faster and more reliable than the old split-mode where the laptop did the SLAM — no cross-network image streaming.
 
 ---
 
 ## Terminal layout
 
-You'll need **5 terminals on the laptop** + 1 browser window. Arrange them ahead of time:
+You'll need **4 terminals** + 1 browser. Arrange them ahead of time:
 
-| Terminal | Role |
-|---|---|
-| T1 | SSH'd into pi2 — runs Pi sensor stack |
-| T2 | Laptop — Flask server (web GUI backend) |
-| T3 | Laptop — RTAB-Map in localization mode |
-| T4 | Laptop — ROS pose bridge (TF → HTTP) |
-| T5 | Laptop — teleop keyboard |
-| Browser | Chrome/Firefox at `http://localhost:5002` |
+| Terminal | Where | Role |
+|---|---|---|
+| **T1** | SSH'd into pi2 | RTAB-Map all-on-Pi (sensors + EKF + localization) |
+| **T2** | Laptop | Flask server (web GUI backend) |
+| **T3** | Laptop | ROS pose bridge (TF → HTTP, GUI hint → /initialpose) |
+| **T4** | Laptop | Teleop keyboard |
+| **Browser** | Laptop | Chrome/Firefox at `http://localhost:5002` |
 
 ---
 
 ## What you need on disk before starting
 
-Tick all four:
+Tick all five:
 
-- [ ] A working `.db` from a successful mapping run at `~/maps/tb3_1_room.db` (10+ MB)
-- [ ] A pre-generated `interface/map.json` matching that `.db` (preprocessing is out of scope for this doc — generate it with whatever tool your branch uses; a healthy `map.json` is 2–5 MB)
-- [ ] Python packages: `pip install flask flask-cors requests`
-- [ ] (Cross-host workflow only) `~/fastdds_peers.xml` exists. If you don't have it yet, copy `interface/fastdds_peers.xml.example` to `~/fastdds_peers.xml` and replace `YOUR_LAPTOP_LAN_IP` with the output of `ip -4 addr show | grep 192.168.`. Skip this if you're using **Step 0 alt** (Single-Laptop Simulation Mode).
-- [ ] You're on a branch whose `interface/` folder contains `index.html`, `server.py`, and `ros_pose_bridge.py`. Verify:
+- [ ] A working `.db` from a successful mapping run **on pi2** at `~/maps/tb3_1_room.db` (10+ MB). See the [New `.db`?](#new-db) section if you just regenerated one on the laptop and need to copy it across.
+- [ ] A pre-generated `interface/map.json` **on the laptop** matching that `.db` (the GUI's 3D point cloud comes from this file — preprocessing is out of scope here; whatever script in this folder is current). Healthy size: 2–5 MB.
+- [ ] Python packages on the laptop: `pip install flask flask-cors requests`
+- [ ] (Cross-host workflow) `~/fastdds_peers.xml` exists on **both** the laptop and pi2. If you don't have it yet, copy `interface/fastdds_peers.xml.example` → `~/fastdds_peers.xml` and replace `YOUR_LAPTOP_LAN_IP` with the output of `ip -4 addr show | grep 192.168.`. Skip this if you're using **Step 0 alt** (Single-Laptop Simulation Mode).
+- [ ] You're on a branch whose `interface/` folder contains `index.html`, `server.py`, and `ros_pose_bridge.py`:
   ```bash
   ls interface/index.html interface/server.py interface/ros_pose_bridge.py
   ```
 
 ---
 
+## <a name="new-db"></a>Got a new `.db` file? Read this first
+
+Every time you do a fresh mapping run (laptop-side, with `rtabmap_laptop_mapping.launch.py`), you end up with a new `.db` on the **laptop** at `~/maps/tb3_1_room.db`. To use it for localization with this guide, you must:
+
+### 1. Copy the new `.db` to pi2
+
+The Pi runs RTAB-Map locally and reads its `.db` from its own filesystem.
+
+```bash
+rsync -avh ~/maps/tb3_1_room.db pi2@192.168.1.102:~/maps/
+```
+
+Verify it landed:
+```bash
+ssh pi2@192.168.1.102 "ls -lh ~/maps/tb3_1_room.db"
+```
+
+### 2. Regenerate the GUI's `map.json` on the laptop
+
+The browser's 3D point cloud is rendered from `interface/map.json`. If the underlying `.db` changed, this needs to be regenerated so the cloud and the live pose share the same world frame.
+
+```bash
+cd ~/swerve_transport_project/interface
+# Use whichever preprocessing script is in your branch — examples:
+python3 db_to_map_json.py --db ~/maps/tb3_1_room.db --out map.json
+# or whatever your branch's pipeline calls for.
+```
+
+Healthy result: `interface/map.json` is 2–5 MB, no errors.
+
+### 3. (Optional) Verify both copies match
+
+```bash
+md5sum ~/maps/tb3_1_room.db
+ssh pi2@192.168.1.102 "md5sum ~/maps/tb3_1_room.db"
+```
+
+The two hashes must match. If they differ, the rsync didn't complete — re-run.
+
+> **Why this matters**: if the laptop's `map.json` was generated from one `.db` and pi2 is localizing against a different `.db`, the cyan robot cone will appear in random parts of the room because the two frames don't align. Always regenerate `map.json` and rsync the `.db` together.
+
+After this prep, continue with Step 1 below.
+
+---
+
 ## Step 0 (alt) — Single-Laptop Simulation Mode (no Pi, no robot)
 
-If you only want to verify the **GUI ↔ bridge ↔ server** chain — for example to debug the web UI, fake a robot pose, or test `Set Initial Pose` without unplugging anything — skip the Pi, skip RTAB-Map, and skip the Fast-DDS XML entirely.
+If you only want to verify the **GUI ↔ bridge ↔ server** chain — for example to debug the web UI or test `Set Initial Pose` without unplugging anything — skip the Pi, skip RTAB-Map, and skip the Fast-DDS XML entirely.
 
-> **Important — do NOT export `FASTRTPS_DEFAULT_PROFILES_FILE` in this mode.**  
+> **Important — do NOT export `FASTRTPS_DEFAULT_PROFILES_FILE` in this mode.**
 > The XML hardcodes `192.168.1.114` / `.101` / `.102`; on a laptop with a different LAN IP (or with the cable unplugged) Fast-DDS tries to bind to nonexistent interfaces and may silently fail discovery. Default multicast (`224.0.0.1:7400`) handles same-host discovery just fine.
 
-Open **4 terminals** on the laptop. In every one, source ROS but leave `FASTRTPS_DEFAULT_PROFILES_FILE` unset:
+Open **3 terminals** on the laptop. In every one, source ROS but leave `FASTRTPS_DEFAULT_PROFILES_FILE` unset:
 
 ```bash
 unset FASTRTPS_DEFAULT_PROFILES_FILE
@@ -80,39 +126,16 @@ cd ~/swerve_transport_project/interface
 python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1
 ```
 
-In **T4**, sanity check:
+Open the browser at `http://localhost:5002`. The cyan cone should appear at world `(1.0, 2.0)` with yaw 0.5 rad. Click "📍 Set Initial Pose" and confirm the bridge log prints `Published initial pose`.
 
-```bash
-ros2 run tf2_ros tf2_echo map tb3_1_base_link    # should print the transform
-curl http://localhost:5002/pose                  # should return "localized": true
-```
-
-Open **`http://localhost:5002`** in your browser. You should see the cyan cone at (1.0, 2.0). Click **📍 Set Initial Pose** to verify the hint round-trip; the bridge will log `Published initial pose: x=… seq=…`.
-
-To **make the cone move**, restart T1 with new `--x` / `--y` / `--yaw` values, or publish `/tf` directly in a loop:
-
-```bash
-ros2 topic pub -r 10 /tf tf2_msgs/msg/TFMessage \
-  "{transforms: [{header: {frame_id: 'map'}, child_frame_id: 'tb3_1_base_link',
-    transform: {translation: {x: 1.5, y: 2.0, z: 0.0},
-                rotation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}]}"
-```
-
-To turn the LOC pill **green** (LIVE) instead of orange (DEAD-RECK), also publish a heartbeat on `/{robot_id}/slam/pose` — the bridge uses any message arrival on that topic as the "fresh visual match" signal:
-
-```bash
-ros2 topic pub -r 2 /tb3_1/slam/pose geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: 'map'}, pose: {position: {x: 1.0, y: 2.0, z: 0.0}, orientation: {w: 1.0}}}"
-```
-
-When you're done with simulation mode, **skip directly to "Stopping the run"** at the bottom of this file. Resume from Step 1 below only when you're testing with the real Pi + robot.
+Skip the rest of this doc — that's the simulation mode complete.
 
 ---
 
 ## Step 1 — Physical setup
 
-1. **Place the robot inside the area you mapped.** RTAB-Map can only localize where it has stored keyframes. If you put the robot in a corner you didn't drive through during mapping, the GUI badge will stay red forever.
-2. **Turn lights on.** Visual SLAM matches the conditions the map was made under. Different lighting → different visual features → no match.
+1. **Place the robot inside the area you mapped.** RTAB-Map can only localize where it has stored keyframes. If you put the robot in a corner you didn't drive through during mapping, the GUI badge will stay red forever (RTAB-Map can never match).
+2. **Turn lights on.** Visual SLAM matches the same conditions the map was made under. Different lighting = different visual features = no match.
 3. **Power on the robot** (toggle the OpenCR power switch). Wait ~5 seconds for the OpenCR LEDs to stabilize.
 4. **Make sure all 8 Dynamixel motors are responding** — listen for the brief click as they apply torque.
 
@@ -127,7 +150,6 @@ ssh pi2@192.168.1.102 "lsusb | grep Movidius"
 ```
 
 Expected output:
-
 ```
 Bus 002 Device 003: ID 03e7:2485 Intel Movidius MyriadX
 ```
@@ -156,7 +178,9 @@ Pi sudo password: `raspberry`.
 
 ---
 
-## Step 4 — T1: Start the Pi sensor stack
+## Step 4 — T1: Start the all-on-Pi localization stack
+
+This single launch on the Pi brings up: camera + camera→base_link TF + wheel odometry + EKF + RTAB-Map + slam_pose_relay. Everything in one command. The laptop only runs the GUI.
 
 In **Terminal 1**, SSH into pi2:
 
@@ -171,23 +195,35 @@ export FASTRTPS_DEFAULT_PROFILES_FILE=/home/pi2/fastdds_peers.xml
 export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
-ros2 launch swerve_bringup rtabmap_pi_sensors.launch.py robot_id:=tb3_1 cam_x:=0.128 cam_y:=0.000 cam_z:=-0.0175
+ros2 launch swerve_bringup rtabmap_localization.launch.py \
+    robot_id:=tb3_1 \
+    db_path:=~/maps/tb3_1_room.db \
+    cam_x:=0.128 cam_y:=0.000 cam_z:=-0.0175
 ```
 
-**Wait ~15 seconds** (the ~5-second pause after `Serial /dev/ttyACM0 @ 115200 opened.` is normal — OpenCR is homing). Then check that all 4 of these lines have appeared:
+> **Use `~`, NOT `$HOME`** for `db_path` — `os.path.expanduser` only expands `~` when it's the first character of the string.
 
-```
-[oak_camera_node-1]    ... oak_camera_node ready (tb3_1) — rgb=640x400@15fps  ... depthai=3.5.0
-[oak_camera_node-1]    ... pipeline running. device=OAK-D-LITE
-[conveyor_base_node-3] ... ConveyorBaseNode activated
-[ekf_node-4]           ... EKF node ready for tb3_1
-```
+> **Camera mount values** (`cam_x/cam_y/cam_z`) must match the values used during mapping. The defaults here are tb3_1's measured values (camera 12.8 cm forward, on-centre, 1.75 cm below base_link).
 
-**Leave T1 running for the rest of the session.** Don't Ctrl+C.
+**Wait ~20–30 seconds** for the boot sequence. Watch for these milestones in T1's output:
+
+| Line (in roughly this order) | What it means |
+|---|---|
+| `oak_camera_node ready (tb3_1) — rgb=...@15fps  ... depthai=3.5.0` | Camera process up |
+| `pipeline running. device=OAK-D-LITE` | Camera is streaming |
+| `Serial /dev/ttyACM0 @ 115200 opened.` | OpenCR serial connected |
+| (5-second pause is normal — OpenCR is homing) | |
+| `ConveyorBaseNode activated` | Wheel odom flowing |
+| `EKF node ready for tb3_1` | EKF subscribed |
+| `RTAB-Map started` (or `Initialization complete!`) | Localization node running |
+
+Once `RTAB-Map started` appears, the Pi enters "global re-localization" mode — silently scanning the `.db` for a visual match to whatever the camera is currently seeing. **For the first 5–30 seconds you'll see no `/slam/pose` output — that's normal. Use Step 8 (Set Initial Pose) to skip the wait.**
+
+**Leave T1 running for the rest of the session.** Don't Ctrl+C unless you intentionally restart.
 
 ---
 
-## Step 5 — T2: Start the Flask server
+## Step 5 — T2: Start the Flask server (laptop)
 
 In **Terminal 2** (laptop, fresh shell):
 
@@ -208,77 +244,30 @@ Server running at http://localhost:5002
 
 The server exposes:
 
-- `GET /` and `GET /map` for the GUI
-- `POST /pose` and `GET /pose` for the live-pose relay
-- `POST /set_initial_pose` and `GET /set_initial_pose` for the GUI's "Set Initial Pose" tool
+- `GET /` and `GET /map` — for the GUI
+- `POST /pose` and `GET /pose` — live-pose relay (bridge writes; browser reads)
+- `POST /set_initial_pose` and `GET /set_initial_pose` — GUI's "Set Initial Pose" mailbox (browser writes; bridge reads)
 
 ---
 
-## Step 6 — T3: Start RTAB-Map in localization mode
+## Step 6 — T3: Start the ROS pose bridge (laptop)
 
-In **Terminal 3** (laptop, fresh shell). First source the ROS env:
+This is the small Python service that:
+- Reads the robot's `map → tb3_1_base_link` TF every 100 ms and POSTs it to the Flask server (drives the LOC pill and the cyan cone)
+- Polls the GUI's pending initial-pose hint and republishes it once on `/initialpose` for RTAB-Map (this is what makes the "Set Initial Pose" button work)
+
+In **Terminal 3** (laptop, fresh shell):
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (Step 0 alt)
-```
-
-Then verify pi2's topics are visible:
-
-```bash
-ros2 daemon stop ; sleep 2 ; ros2 daemon start ; sleep 6
-ros2 topic list | grep -E '/tb3_1/(camera|ekf/odom|odom$)'
-```
-
-You should see exactly **6 topics**:
-
-```
-/tb3_1/camera/depth/camera_info
-/tb3_1/camera/depth/image_raw
-/tb3_1/camera/rgb/camera_info
-/tb3_1/camera/rgb/image_raw
-/tb3_1/ekf/odom
-/tb3_1/odom
-```
-
-If empty, see [Troubleshooting → Discovery](#discovery).
-
-Now launch RTAB-Map:
-
-```bash
-ros2 launch swerve_bringup rtabmap_laptop_localization.launch.py \
-    robot_id:=tb3_1 \
-    db_path:=~/maps/tb3_1_room.db
-```
-
-Wait for `RTAB-Map started` (or `Initialization complete!`). Then RTAB-Map enters "global re-localization" mode — silently scanning the `.db` for a visual match to whatever the camera is currently seeing. **For the first 5–30 seconds you'll see no `/slam/pose` output — that's normal.**
-
-**Leave T3 running.**
-
-> Use `~`, NOT `$HOME`, for `db_path` — `os.path.expanduser` only expands `~` when it's the first character.
-
-> **About the odom feedback loop:** the launch defaults to `odom:=/tb3_1/ekf/odom` which is technically a feedback loop, but in practice it works fine for verification. If you see jumpy poses (meter-scale jumps), see [Why the override](#why-the-override) for the proper fix.
-
----
-
-## Step 7 — T4: Start the ROS pose bridge
-
-This is the small Python service that reads the robot's pose from ROS TF and POSTs it to your Flask server every 100 ms. Without it, the GUI badge stays at `LOC: NO BRIDGE`.
-
-In **Terminal 4** (laptop, fresh shell):
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/swerve_transport_project/ros2_ws/install/setup.bash
-export ROS_DOMAIN_ID=30
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (Step 0 alt)
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
 cd ~/swerve_transport_project/interface
 python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1
 ```
 
-Expected output (one line, then silence):
+Expected output (one line, then mostly silence):
 
 ```
 [INFO] [ros_pose_bridge]: ros_pose_bridge: robot_id=tb3_1 -> http://localhost:5002/pose @ 10.0 Hz
@@ -291,18 +280,13 @@ If you see this every 5 seconds:
 [WARN] TF map -> tb3_1_base_link not available; robot not localized yet
 ```
 
-…that's NORMAL until RTAB-Map finds its first match. Drive the robot for 30 seconds in Step 10 (or use Step 9 to give it a hint), and the warning will stop.
+…that's NORMAL until RTAB-Map finds its first match. Use Step 8 (Set Initial Pose) and the warning will stop within 1–3 seconds.
 
-**Leave T4 running.**
-
-> The bridge talks to the server in **two directions**:
->
-> - `POST /pose` → server stores the current TF every tick. The browser polls `GET /pose` to drive the LOC pill and the cyan cone.
-> - `GET /set_initial_pose` → bridge polls the server for new GUI hints and republishes them once on `/initialpose` for RTAB-Map. This is what makes the "Set Initial Pose" button work.
+**Leave T3 running.**
 
 ---
 
-## Step 8 — Open the GUI
+## Step 7 — Open the GUI
 
 In any browser:
 
@@ -313,7 +297,7 @@ http://localhost:5002
 You should see:
 
 - **Full panel**: 3D point cloud of your mapped room with a floor grid + axes gnomon at world origin
-- **Header (right side)**: three status pills — `Awaiting map…` (turns green when the cloud loads), `ROS Disconnected` (informational; this app only uses ROS via the HTTP bridge for localization), and `LOC: …` (the localization pill)
+- **Header (right side)**: three status pills — `Awaiting map…` (turns green when the cloud loads), `ROS Disconnected` (informational; this app uses ROS via the HTTP bridge, not directly), and `LOC: …` (the localization pill — initially red `SEARCHING`)
 - **Bottom bar**: X/Y/Z readouts, an orientation slider, and a **Send Goal** button
 - A **📍 Set Initial Pose** button in the header
 
@@ -328,7 +312,7 @@ Until you give RTAB-Map a hint or drive a bit so it matches on its own, the cyan
 
 ---
 
-## Step 9 — Click to set initial pose (this is the magic step)
+## Step 8 — Click to set initial pose (this is the magic step)
 
 Without this step, RTAB-Map has to do a global re-localization search through every keyframe in the map — slow and unreliable in real rooms. With this step, RTAB-Map gets a hint and converges in 1–2 seconds.
 
@@ -340,31 +324,32 @@ Without this step, RTAB-Map has to do a global re-localization search through ev
 
 To cancel without setting a pose: press `Escape`, or click the button again.
 
-Within 1–3 seconds the status pill should turn 🟢 `LOC: LIVE` and the cyan cone should appear at your hinted location (possibly with a small refinement).
+Within 1–3 seconds the status pill should turn 🟢 `LOC: LIVE` and the cyan cone should appear at your hinted location (possibly with a small refinement). Pi-side, the T1 terminal will print something like `Localization succeeded` once the match lands.
 
 If it doesn't turn green within 5 seconds:
 
 - Wrong room location — try clicking somewhere else
-- Hint too far from any keyframe — drive the robot a bit so RTAB-Map sees fresh frames near the hint
+- Hint too far from any keyframe — drive the robot a bit (Step 9) so RTAB-Map sees fresh frames near the hint
 - Map and current view differ too much — regenerate `map.json` from a current `.db` and reload the browser
+- `.db` on pi2 doesn't match `map.json` on laptop — see [New `.db`?](#new-db) above
 
 ---
 
-## Step 10 — T5: Drive the robot until it localizes
+## Step 9 — T4: Drive the robot (verify localization survives motion)
 
-In **Terminal 5** (laptop, fresh shell):
+In **Terminal 4** (laptop, fresh shell):
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/swerve_transport_project/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=30
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml   # skip in Single-Laptop Simulation Mode (Step 0 alt)
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/$USER/fastdds_peers.xml
 ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/tb3_1/cmd_vel
 ```
 
 If "Package not found": `sudo apt install -y ros-humble-teleop-twist-keyboard` then re-run.
 
-**Click on T5's window to focus it** (the keyboard input only works while T5 is the foreground window). Then:
+**Click on T4's window to focus it** (the keyboard input only works while T4 is the foreground window). Then:
 
 1. Press `z` 5 times to slow max speed to ~0.07 m/s — safer for verification.
 2. Drive a small loop:
@@ -379,19 +364,19 @@ If "Package not found": `sudo apt install -y ros-humble-teleop-twist-keyboard` t
 
 3. Drive ~1–2 meters through visually rich parts of the room (varied walls, furniture, posters — NOT a featureless corner).
 
-**Watch the browser tab** (you don't need to put it in the foreground — it polls every 200 ms).
+**Watch the browser tab.** The cyan cone should track your movement smoothly. If the cone freezes or lags far behind the robot's actual position, RTAB-Map lost the lock — re-do Step 8.
 
 ---
 
-## Step 11 — Watch the GUI
+## Step 10 — Watch the GUI
 
-Within 30 seconds of the robot starting to drive, you should see:
+You should see:
 
 | Sign | What it means |
 |---|---|
-| **Status pill turns green** with `LOC: LIVE x.xx,y.yy` | RTAB-Map matched a keyframe — localization is working ✅ |
-| **A cyan cone appears** on the 3D point cloud at the robot's location and moves as you teleop | Pose is being broadcast and the bridge → server → browser chain works |
-| **A green sphere appears too** (if rosbridge is running on `ws://localhost:9090`) | Independent confirmation from the rosbridge `/tb3_0/pose` subscription. Optional — the cyan cone alone is sufficient. |
+| Status pill solid 🟢 `LOC: LIVE x.xx,y.yy` | RTAB-Map is matching and `map → tb3_1_base_link` TF is fresh |
+| Cyan cone moves with the robot | Bridge → server → browser chain works end to end |
+| Pill flickers to 🟠 `DEAD-RECK Xs` briefly during fast motion | Normal — the visual matcher just hasn't caught up yet; will return to green within a few seconds |
 
 If after **60 seconds** of driving the pill is still `SEARCHING`, see [Troubleshooting → SEARCHING never resolves](#searching).
 
@@ -403,9 +388,9 @@ If after **60 seconds** of driving the pill is still `SEARCHING`, see [Troublesh
 |---|---|---|---|
 | `LOC: LIVE x.xx,y.yy` | 🟢 green | Localized; visual match within last 5 s | Done. You can stop here. |
 | `LOC: DEAD-RECK Xs` | 🟠 orange | TF still tracking but no visual match in X seconds | Drive into a more featureful area; if it persists, the map has a hole there |
-| `LOC: SEARCHING Xs` | 🔴 red | No `map → tb3_1_base_link` TF yet | Use Set Initial Pose, OR drive 30 cm in any direction with view of varied features |
-| `LOC: STALE Xs` | 🔴 red | Pose data on the server is older than 2 s | T4 (bridge) died — restart it |
-| `LOC: NO BRIDGE` | 🔴 red | Server up but no pose ever received | T4 was never started — go back to Step 7 |
+| `LOC: SEARCHING Xs` | 🔴 red | No `map → tb3_1_base_link` TF yet | Use Set Initial Pose (Step 8), OR drive 30 cm with view of varied features |
+| `LOC: STALE Xs` | 🔴 red | Pose data on the server is older than 2 s | T3 (bridge) died — restart it |
+| `LOC: NO BRIDGE` | 🔴 red | Server up but no pose ever received | T3 was never started — go back to Step 6 |
 | `LOC: SERVER DOWN` | 🔴 red | Browser can't reach `/pose` endpoint | T2 (server) died — restart it |
 
 ---
@@ -414,24 +399,23 @@ If after **60 seconds** of driving the pill is still `SEARCHING`, see [Troublesh
 
 Stop in this order (commands stop first, sensor last):
 
-1. **T5** (teleop) — `Ctrl+C`
+1. **T4** (teleop) — `Ctrl+C`
 2. **Browser** — close the tab
-3. **T4** (pose bridge) — `Ctrl+C`
-4. **T3** (rtabmap) — `Ctrl+C`
-5. **T2** (Flask server) — `Ctrl+C`
-6. **T1** (Pi sensors) — `Ctrl+C`
+3. **T3** (pose bridge) — `Ctrl+C`
+4. **T2** (Flask server) — `Ctrl+C`
+5. **T1** (Pi all-in-one) — `Ctrl+C` in the SSH session
 
 ---
 
-## <a name="why-the-override"></a>Why the odom feedback loop is theoretically a problem
+## <a name="why-the-override"></a>About the odom feedback loop (advanced)
 
-The launch file's default remap tells RTAB-Map to read `/tb3_1/ekf/odom` as its odometry prior. But `ekf_node` itself fuses RTAB-Map's correction back in — that's a feedback loop:
+The launch file's default tells RTAB-Map to read `/tb3_1/ekf/odom` as its odometry prior. But `ekf_node` itself fuses RTAB-Map's correction back in — that's a feedback loop:
 
 ```
 RTAB-Map (correction) → ekf_node → /tb3_1/ekf/odom → RTAB-Map (input) → ...
 ```
 
-In practice the loop gain is small and the default works fine for verification. **If you see jumpy poses** (the cyan cone jumping meters at a time), break the loop by editing `ros2_ws/src/swerve_bringup/launch/rtabmap_laptop_localization.launch.py` and changing:
+In practice the loop gain is small and the default works fine for verification. **If you see jumpy poses** (the cyan cone jumping meters at a time), break the loop by editing `ros2_ws/src/swerve_bringup/launch/rtabmap_localization.launch.py` and changing:
 
 ```python
 ('odom', f'/{robot_id}/ekf/odom'),
@@ -443,14 +427,13 @@ to:
 ('odom', f'/{robot_id}/odom'),
 ```
 
-Then rebuild your laptop workspace:
+Then rebuild **on pi2** (because that's where this launch runs):
 
 ```bash
-cd ~/swerve_transport_project/ros2_ws && colcon build --packages-select swerve_bringup
-source install/setup.bash
+ssh pi2@192.168.1.102 "source /opt/ros/humble/setup.bash && cd ~/ros2_ws && colcon build --packages-select swerve_bringup"
 ```
 
-Re-launch rtabmap. RTAB-Map's odometry prior is now the **raw** wheel odom, which breaks the loop.
+Re-launch (T1). RTAB-Map's odometry prior is now the **raw** wheel odom, which breaks the loop.
 
 The canonical pose flow:
 
@@ -458,10 +441,8 @@ The canonical pose flow:
 /tb3_1/odom (raw)  ──────►  ekf_node  ◄──── /tb3_1/slam/pose (RTAB correction)
                               │
                               ▼
-                      /tb3_1/ekf/odom  (authoritative — read by Nav2 + laplacian)
+                         /tb3_1/ekf/odom (authoritative)
 ```
-
-`slam_pose_relay_node` (auto-started by the launch) is what converts RTAB's `PoseWithCovarianceStamped` to the `PoseStamped` that `ekf_node` already subscribes to.
 
 ---
 
@@ -469,114 +450,66 @@ The canonical pose flow:
 
 ### <a name="searching"></a>SEARCHING never resolves
 
-After driving for 60 s the pill is still red `SEARCHING`. Possible causes:
+After 60 sec of driving + a Set Initial Pose hint, the pill is still red.
 
-- **Use Step 9 first.** A click-to-hint usually resolves SEARCHING faster than blind driving.
-- **Robot is outside the mapped area.** Pick it up and put it inside the area you drove through during mapping. RTAB-Map can't match a view it's never seen.
-- **Lighting differs from mapping.** Re-map under the actual operating lighting.
-- **Map is too small.** Re-do mapping with a longer drive (more keyframes).
-- **`.db` is broken.** Verify by listing keyframe + link counts; want > 0 links.
+**Most likely causes (in order):**
 
-If `ros2 topic echo /tb3_1/slam/pose` (run in any sourced terminal) is silent, RTAB-Map definitely hasn't matched. If it's actually publishing but the GUI still shows SEARCHING, the bridge is broken — see next.
+1. **`.db` on pi2 doesn't match `map.json` on laptop.** Re-run the [New `.db`?](#new-db) prep — rsync the .db AND regenerate map.json.
+2. **Robot is in a part of the room you didn't map.** Drive it back to a known mapped area, click Set Initial Pose there.
+3. **Lighting changed since mapping.** Re-map under current lighting.
+4. **OAK-D wedged** — check on pi2: `ssh pi2@192.168.1.102 "lsusb | grep Movidius"`. If empty, replug the camera.
+5. **RTAB-Map didn't actually start.** Check T1's output for `RTAB-Map started`. If it crashed, scroll back for the error.
 
-### Bridge logs `TF map -> tb3_1_base_link not available` forever
+### Browser shows "Awaiting map…" forever
 
-The TF doesn't exist because RTAB-Map hasn't matched. Same fix as "SEARCHING never resolves" above. **Try Step 9 first.**
+The Flask server isn't serving `interface/map.json`. Check:
 
-### `Set Initial Pose` button does nothing
+- Is `map.json` present? `ls interface/map.json`
+- Did `python3 server.py` print `Map loaded: N points`?
+- Try `curl http://localhost:5002/map | head -c 200` — should return JSON, not an HTML error
 
-Two things to check:
+### Set Initial Pose click doesn't trigger anything
 
-- Is the **map.json loaded**? (Status pill says `<N> pts · floor … · bounds …`.) If not, `Set Initial Pose` has nothing to raycast against.
-- Is **T4 (the bridge) running**? Without the bridge, the hint is queued on the server but nothing ever publishes it to `/initialpose`. `LOC: NO BRIDGE` is the giveaway.
+- Did the cursor turn into a crosshair after you clicked the 📍 button? If not, the JS isn't running — open the browser dev console and look for errors.
+- Is the bridge logging `Published initial pose` after you confirm the click? If not, check T3's console for `requests.exceptions` — server is unreachable.
 
-### Marker is in the wrong corner of the room
+### Cyan cone lags badly behind the real robot
 
-Map frame mismatch: `map.json` was generated from a different `.db` than what RTAB-Map is loading. Regenerate `map.json` from the matching `.db` and reload the browser.
+- Network latency too high. Confirm laptop and pi2 are on the same LAN, not going through a slow Wi-Fi.
+- Bridge running on a slow machine. Check CPU usage — if `ros_pose_bridge.py` is at 100%, the queue is overflowing.
 
-### Marker is at the right place but rotated 180°
+### `LOC: STALE` or `LOC: NO BRIDGE`
 
-Yaw sign convention regression. The OpenCR firmware should negate the FK's `wz` per REP-103. Verify the patch is in place by grepping the firmware:
-
-```bash
-grep "sum_wz_num / sum_wz_den" "$HOME/swerve_transport_project/opencr_firmware/swerve_kinematics/turtlebot3_conveyor.ino"
-```
-
-Expected: `wz = (sum_wz_den > 1e-6f) ? -(sum_wz_num / sum_wz_den) : 0.0f;` (note the leading minus). If the minus is missing, the firmware needs re-flashing.
-
-### `ros_pose_bridge.py` crashes immediately
-
-Likely `requests` is missing in the Python you're running:
-
-```bash
-pip install requests
-```
-
-Or wrong ROS sourcing — `echo $ROS_DISTRO` should print `humble`.
-
-### `requests.exceptions.ConnectionError` floods the bridge log
-
-T2 (Flask) is unreachable. Confirm:
-
-```bash
-curl http://localhost:5002/
-```
-
-…returns the HTML. If not, T2 isn't running or port 5002 is in use.
-
-### Status pill says `LIVE` but no cone appears
-
-Browser console error. F12 → Console. Look for `mapData.metadata` undefined or similar. Reload the page; if persistent, regenerate `map.json` and reload again.
-
-### Cone disappears when robot moves
-
-The pose left the bounding box of `map.json`. Either the robot really did leave the mapped area, OR the map was generated with too tight a `--bbox`. Regenerate with a wider bounding box.
-
-### <a name="discovery"></a>Discovery: Pi topics not visible from laptop in Step 6
-
-- `~/fastdds_peers.xml` is missing the `127.0.0.1` loopback entries
-- Or the laptop's IP in `<defaultUnicastLocatorList>` doesn't match your actual LAN IP
-
-Find your laptop's LAN IP:
-
-```bash
-ip -4 addr show | grep 192.168.1.
-```
-
-Canonical `~/fastdds_peers.xml` (replace `192.168.1.114` with what `ip -4` printed):
-
-```xml
-<initialPeersList>
-  <locator><udpv4><address>127.0.0.1</address>      <port>14910</port></udpv4></locator>
-  <locator><udpv4><address>127.0.0.1</address>      <port>14912</port></udpv4></locator>
-  <locator><udpv4><address>192.168.1.101</address>  <port>14910</port></udpv4></locator>
-  <locator><udpv4><address>192.168.1.101</address>  <port>14912</port></udpv4></locator>
-  <locator><udpv4><address>192.168.1.102</address>  <port>14910</port></udpv4></locator>
-  <locator><udpv4><address>192.168.1.102</address>  <port>14912</port></udpv4></locator>
-</initialPeersList>
-<metatrafficUnicastLocatorList>
-  <locator><udpv4><address>192.168.1.114</address></udpv4></locator>
-</metatrafficUnicastLocatorList>
-<defaultUnicastLocatorList>
-  <locator><udpv4><address>192.168.1.114</address></udpv4></locator>
-</defaultUnicastLocatorList>
-```
-
-After fixing: restart T3 (rtabmap), then `ros2 daemon stop ; sleep 2 ; ros2 daemon start`.
-
-### Pi clock has slipped (`delay=` is huge in T3 log, or RTAB-Map drops every frame)
-
-Re-do Step 3. If `systemd-timesyncd` re-enabled itself (some distros do this on every boot), the Step 3 command's `disable --now` makes it permanent.
+- `STALE`: T3 (bridge) is running but hasn't POSTed in >2 sec. Restart T3.
+- `NO BRIDGE`: T2 (server) is running but T3 was never started. Run Step 6.
 
 ### TF says "two or more unconnected trees"
 
-Stale processes from a previous run. Restart T1.
+The TF chain `map → tb3_1_odom → tb3_1_base_link` is broken somewhere. Restart T1 — the Pi may have stale TF publishers from a previous run.
+
+### <a name="discovery"></a>Pi topics not visible from the laptop
+
+Symptoms: `ros2 topic list` from the laptop shows no `/tb3_1/*` topics.
+
+Causes (in order):
+
+1. **`~/fastdds_peers.xml` missing the `127.0.0.1` loopback entry** — see the example file in the repo.
+2. **Laptop IP in `<defaultUnicastLocatorList>` is wrong** — find yours with `ip -4 addr show | grep 192.168.1.`
+3. **Pi's peers file points to a stale laptop IP** — same fix on pi2's `~/fastdds_peers.xml`.
+
+After fixing: restart T1, T2, T3, AND `ros2 daemon stop ; sleep 2 ; ros2 daemon start` on the laptop.
+
+### Pi clock has slipped
+
+Symptoms in T1: rtabmap log shows huge `delay=` values, or "drops every frame."
+
+Re-do Step 3. If `systemd-timesyncd` keeps re-enabling itself, the disable command's `--now` should make it permanent across boots.
 
 ---
 
 ## Cross-network setup (running server and bridge on different machines)
 
-If T2 (server) is on machine A and T4 (bridge) is on machine B, point the bridge at A's IP:
+If T2 (server) is on machine A and T3 (bridge) is on machine B, point the bridge at A's IP:
 
 ```bash
 python3 interface/ros_pose_bridge.py --ros-args \
@@ -591,11 +524,10 @@ The server already listens on `0.0.0.0` (all interfaces). Just open port 5002 on
 
 ## What success looks like
 
-- All 5 terminals running, no error spam in any of them
-- Browser shows the 3D point cloud filling the panel
+- **All 4 terminals running**, no error spam in any of them
+- Browser shows the 3D point cloud, no "Awaiting map…" stuck pill
 - Status pill is solid 🟢 `LOC: LIVE x.xx,y.yy`
-- Cyan cone appears in the 3D scene at the robot's location and follows as you teleop
-- Cone position roughly matches where the robot physically is in the room
-- (Optional) Click anywhere on the floor in 3D → bottom bar shows world (X, Y, Z); **Send Goal** publishes that to ROS as `/goal_pose`
+- Cyan cone on the 3D map moves smoothly as you teleop
+- The cyan cone's position roughly matches where the robot physically is in the room
 
 If all of the above is true, **localization is verified working**. The robot can now be plugged into Nav2, formation control, or whatever's next.
