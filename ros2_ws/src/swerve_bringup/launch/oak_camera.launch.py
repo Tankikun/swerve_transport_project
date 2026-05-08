@@ -83,10 +83,17 @@ def launch_setup(context, *args, **kwargs):
 
     return [
         # ── OAK-D camera publisher (depthai_ros_driver) ──────────────────
-        # i_tf_prefix matches the static TF child frame below.
+        # The driver builds image header frame_ids from node->get_name() (see
+        # depthai_ros_driver sensor_helpers.cpp::tfPrefix), so we encode the
+        # robot prefix in the node name (`{robot_id}_oak`) instead of via a
+        # parameter — there is no `i_tf_prefix` parameter in v2.12.x.
         # i_publish_tf_from_calibration is off because we publish the
         # measured base→camera transform ourselves; two publishers on the
         # same edge would clobber each other.
+        # use_intra_process_comms=True puts the driver on the IPC publisher
+        # branch (img_pub.cpp), which avoids image_transport plugin
+        # auto-loading and the parallel `<topic>/compressed` siblings that
+        # otherwise bypass our remappings.
         ComposableNodeContainer(
             name='oak_container' + suffix,
             namespace=robot_id,
@@ -96,29 +103,30 @@ def launch_setup(context, *args, **kwargs):
                 ComposableNode(
                     package='depthai_ros_driver',
                     plugin='depthai_ros_driver::Camera',
-                    name='oak',
+                    name=f'{robot_id}_oak',
                     namespace=f'{robot_id}/camera',
                     parameters=[yaml_path, {
-                        'camera.i_tf_prefix': f'{robot_id}_oak',
                         'camera.i_publish_tf_from_calibration': False,
                         'rgb.i_fps': float(fps),
                         'stereo.i_fps': float(fps),
                     }],
+                    extra_arguments=[{'use_intra_process_comms': True}],
                     # depthai_ros_driver publishes under
                     #   <ns>/<node_name>/<sensor>/image_raw — i.e.
-                    #   /{robot_id}/camera/oak/rgb/image_raw
-                    #   /{robot_id}/camera/oak/stereo/image_raw
-                    # Strip the 'oak/' segment and rename 'stereo' → 'depth'
-                    # so downstream subscribers (rtabmap, ai_camera_node,
-                    # alignment_node) see the schema documented in CLAUDE.md.
+                    #   /{robot_id}/camera/{robot_id}_oak/rgb/image_raw
+                    #   /{robot_id}/camera/{robot_id}_oak/stereo/image_raw
+                    # Strip the '{robot_id}_oak/' segment and rename
+                    # 'stereo' → 'depth' so downstream subscribers (rtabmap,
+                    # ai_camera_node, alignment_node) see the schema
+                    # documented in CLAUDE.md.
                     remappings=[
-                        (f'/{robot_id}/camera/oak/rgb/image_raw',
+                        (f'/{robot_id}/camera/{robot_id}_oak/rgb/image_raw',
                          f'/{robot_id}/camera/rgb/image_raw'),
-                        (f'/{robot_id}/camera/oak/rgb/camera_info',
+                        (f'/{robot_id}/camera/{robot_id}_oak/rgb/camera_info',
                          f'/{robot_id}/camera/rgb/camera_info'),
-                        (f'/{robot_id}/camera/oak/stereo/image_raw',
+                        (f'/{robot_id}/camera/{robot_id}_oak/stereo/image_raw',
                          f'/{robot_id}/camera/depth/image_raw'),
-                        (f'/{robot_id}/camera/oak/stereo/camera_info',
+                        (f'/{robot_id}/camera/{robot_id}_oak/stereo/camera_info',
                          f'/{robot_id}/camera/depth/camera_info'),
                     ],
                 ),
