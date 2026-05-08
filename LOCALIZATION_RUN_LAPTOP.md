@@ -168,14 +168,21 @@ ros2 launch swerve_bringup rtabmap_pi_sensors.launch.py \
     cam_x:=0.128  cam_y:=0.000  cam_z:=-0.0175
 ```
 
-Wait for these lines to appear:
-```
-[oak_camera_node-1]    ... oak_camera_node ready (tb3_1)
-[oak_camera_node-1]    ... pipeline running. device=OAK-D-LITE
-[static_transform_publisher-2] ... Spinning until stopped
-[conveyor_base_node-3] ... ConveyorBaseNode activated
-[ekf_node-4]           ... EKF node ready for tb3_1
-```
+Wait for these signals (in roughly this order):
+
+1. A `component_container` line confirming the `depthai_ros_driver::Camera` plugin loaded inside `oak_container_tb3_1`, with the OAK device opening. Exact wording depends on the depthai_ros_driver version; if you see a USB-speed error, swap the cable / port for a USB 3 one.
+2. ```
+   [static_transform_publisher-2] ... Spinning until stopped
+   [conveyor_base_node-3] ... ConveyorBaseNode activated
+   [ekf_node-4]           ... EKF node ready for tb3_1
+   ```
+
+> Since the migration to `depthai_ros_driver`, the Camera component logs much less than the old `oak_camera_node`. Sanity-check the camera is publishing from any **other** sourced terminal:
+>
+> ```bash
+> ros2 topic list | grep '/tb3_1/camera'
+> # Expect 4 lines: rgb + depth, image_raw + camera_info
+> ```
 
 **Leave T1 alone for the rest of the session.**
 
