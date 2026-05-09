@@ -142,7 +142,13 @@ rsync ~/maps/lab.db pi1@<ip>:~/maps/lab.db
 rsync ~/maps/lab.db pi2@<ip>:~/maps/lab.db
 ```
 
-**Mapping config** (`rtabmap_mapping.yaml`): `Mem/IncrementalMemory true`, `Kp/MaxFeatures 600`, `Mem/ImagePreDecimation 1` (full res), `Vis/MinInliers 20`, `Rtabmap/DetectionRate 1 Hz`, `RGBD/LinearUpdate 0.1 m`, `RGBD/AngularUpdate 0.1 rad`, `ProximityBySpace true`, `ProximityByTime true`, `Optimizer/Strategy 1` (g2o), `Optimizer/Robust true`.
+**Mapping config** (`rtabmap_mapping.yaml`): `Mem/IncrementalMemory true`, `Kp/MaxFeatures 800`, `Mem/ImagePreDecimation 1` (full res), `Vis/MinInliers 15`, `Rtabmap/DetectionRate 2 Hz`, `Mem/STMSize 30`, `RGBD/LinearUpdate 0.1 m`, `RGBD/AngularUpdate 0.2 rad`, `ProximityBySpace true`, `ProximityByTime true`, `Optimizer/Strategy 1` (g2o), `Optimizer/Robust true`.
+
+**Mapping motion regime** (matters more than the config). The encoder-based wheel odom this firmware integrates is corrupted by per-turn slip whenever the four steering modules are mid-traversal toward a new δ — drive motors react in ~10 ms while joints take 100-300 ms, and during that window the wheels produce force misaligned with the body twist. Slip is invisible to the encoders, so integrated odom over-counts. The cosine drive ramp in firmware (`g_last_measured` in `turtlebot3_conveyor.ino`) plus IMU gyro fusion in `ekf_node` reduce this dramatically, but even with both fixes the safest mapping run still:
+- Drives at ≤ 0.05 m/s body speed.
+- Prefers smooth arcs over in-place rotation. In-place rotation forces every module through its largest possible δ change for the required wheel-tangent angle, which is the worst case for slip.
+- Avoids fast yaw reversals (CCW → CW within a single turn). Each reversal triggers an IK k-flip on every module simultaneously; the firmware ramp handles it correctly but extra reversals burn detection-rate budget that loop closure could be using.
+- Returns to the start position before stopping, so the optimizer has a chance to collapse drift into a closed graph.
 
 ### Localization (runtime, per robot)
 
