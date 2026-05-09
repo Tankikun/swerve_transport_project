@@ -2,19 +2,43 @@
 server.py
 Flask server that serves the web UI and point cloud data.
 Also receives the selected goal from the browser and forwards it to ros_bridge,
-plus relays initial-pose hints + live robot pose between the GUI and
-ros_pose_bridge.py for RTAB-Map localization.
+plus relays initial-pose hints + live robot poses between the GUI and one or
+more ros_pose_bridge.py instances for RTAB-Map localization.
+
+Multi-robot model
+-----------------
+Each `ros_pose_bridge.py` instance is launched with `--ros-args -p robot_id:=<id>`
+(e.g. `tb3_0`, `tb3_1`) and POSTs its TF lookup to /pose with `robot_id`
+embedded in the JSON body. The server demuxes by `robot_id` and stores the
+latest pose per robot. The GUI then polls /pose/<robot_id> for each robot it
+wants to render. Same pattern for initial-pose hints: the GUI POSTs to
+/set_initial_pose with a `robot_id` (or to /set_initial_pose/<robot_id>) and
+each bridge polls /set_initial_pose/<its_own_id>, only acting when its
+per-robot `seq` increments.
+
+Backward compatibility
+----------------------
+A bridge that POSTs without `robot_id` is bucketed under the literal id
+"default", and the legacy GET /pose returns the most recently received pose
+across all robots — so a single-robot deployment still Just Works.
 
 Endpoints:
-    GET  /                    web UI
-    GET  /map                 primary map JSON
-    GET  /map_overlay         optional A/B map JSON  (204 if not loaded)
-    POST /goal                browser -> server: new goal
-    GET  /goal                anything -> server: read latest goal
-    POST /pose                ros_pose_bridge -> server: live robot pose
-    GET  /pose                browser -> server: read latest pose + age
-    POST /set_initial_pose    browser -> server: queue an initial-pose hint
-    GET  /set_initial_pose    ros_pose_bridge -> server: poll for new hint
+    GET  /                         web UI
+    GET  /map                      primary map JSON
+    GET  /map_overlay              optional A/B map JSON  (204 if not loaded)
+    POST /goal                     browser -> server: new goal
+    GET  /goal                     anything -> server: read latest goal
+
+    POST /pose                     ros_pose_bridge -> server: live pose
+                                     (demuxed by `robot_id` field in body)
+    GET  /pose                     legacy: most-recent pose across all robots
+    GET  /pose/<robot_id>          per-robot live pose feed for the GUI
+
+    POST /set_initial_pose         browser -> server: queue a hint
+                                     (uses `robot_id` field in body, or "default")
+    POST /set_initial_pose/<id>    explicit per-robot variant
+    GET  /set_initial_pose         legacy: poll the "default" queue
+    GET  /set_initial_pose/<id>    per-robot poll for ros_pose_bridge
 
 Usage:
     python3 server.py --map map.json --port 5002
@@ -36,21 +60,39 @@ CORS(app)
 map_data       = None
 overlay_data   = None       # optional second map for visual A/B
 latest_goal    = None
-goal_callbacks = []
+goal_callbacks = []         # functions to call when a new goal is received
 
 # ── Live-pose relay (ros_pose_bridge → GUI) ─────────────────────────────
-latest_pose         = None  # most recent pose dict from ros_pose_bridge
-latest_pose_recv_t  = 0.0   # server-side wall clock when pose was received
+# One entry per robot, keyed by the `robot_id` the bridge sent in its POST
+# body. Each entry is { "data": <last pose JSON>, "recv_t": <wall clock> }.
+# Multi-threaded Flask dev server means we guard the read-modify-write
+# behind a lock.
+latest_poses     = {}        # robot_id -> {"data": dict, "recv_t": float}
+_poses_lock      = threading.Lock()
 
-# ── Initial-pose hint (GUI → ros_pose_bridge → /initialpose for RTAB-Map)
-# RViz "2D Pose Estimate" equivalent. The bridge polls /set_initial_pose
-# at its tick rate and only acts when `seq` increments past its
-# last_seen_seq. Flask's dev server is multi-threaded, so the
-# read-modify-write on initial_pose_seq + pending_initial_pose is
-# protected against simultaneous POSTs racing.
-pending_initial_pose = None
-initial_pose_seq     = 0
-_initial_pose_lock   = threading.Lock()
+# ── Initial-pose hints (GUI → ros_pose_bridge → /initialpose for RTAB-Map)
+# RViz "2D Pose Estimate" equivalent. Per-robot queue: each bridge tracks
+# its own last_seen_seq for its own robot_id and only acts when its
+# entry's seq increments past it. POSTs without an explicit robot_id land
+# in the "default" bucket — single-robot deployments stay one-line.
+pending_initial_poses = {}    # robot_id -> {seq, x, y, yaw_rad, frame, wall_clock_iso}
+_initial_pose_lock    = threading.Lock()
+
+DEFAULT_ROBOT_ID = "default"
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────
+
+def _resolve_robot_id(data, override=None):
+    """Pick a robot_id from an explicit URL override, then a body field,
+    then fall back to DEFAULT_ROBOT_ID. Always returned as a string."""
+    if override is not None and override != "":
+        return str(override)
+    if isinstance(data, dict):
+        rid = data.get("robot_id")
+        if rid is not None and rid != "":
+            return str(rid)
+    return DEFAULT_ROBOT_ID
 
 
 # ── Routes ──────────────────────────────────────────────────────────────
@@ -116,11 +158,14 @@ def get_latest_goal():
 
 @app.route("/pose", methods=["POST"])
 def receive_pose():
-    """Receive live robot pose from ros_pose_bridge.py.
+    """Receive a live robot pose from a ros_pose_bridge.py instance.
+
+    The bridge embeds its own `robot_id` in the body so this server can
+    demux multiple bridges into per-robot slots.
 
     Body schema (see ros_pose_bridge.py docstring):
         {
-          "robot_id":           "tb3_1",
+          "robot_id":           "tb3_0" | "tb3_1" | ...,
           "localized":          true | false,
           "x": ..., "y": ..., "yaw_rad": ..., "yaw_deg": ...,
           "frame":              "map",
@@ -128,82 +173,149 @@ def receive_pose():
           "wall_clock_iso":     "..."
         }
     """
-    global latest_pose, latest_pose_recv_t
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "no JSON body"}), 400
-    latest_pose        = data
-    latest_pose_recv_t = time.time()
-    return jsonify({"status": "ok"})
+    robot_id = _resolve_robot_id(data)
+    with _poses_lock:
+        latest_poses[robot_id] = {"data": data, "recv_t": time.time()}
+    return jsonify({"status": "ok", "robot_id": robot_id})
 
 
 @app.route("/pose", methods=["GET"])
-def get_pose():
-    """Serve the latest robot pose to the GUI.
-
-    Adds a server-side `age_sec` so the browser can decide if the bridge
-    has gone silent (e.g. ros_pose_bridge crashed). When no bridge has
-    ever posted a pose, returns `available: false` so the GUI can show
-    a clear "NO BRIDGE" badge instead of stale data.
-    """
-    if latest_pose is None:
-        return jsonify({"available": False, "reason": "no_bridge_yet"}), 200
-    age_sec = time.time() - latest_pose_recv_t
+def get_pose_legacy():
+    """Legacy single-robot read: return the most-recently received pose
+    across ALL robots. Single-robot deployments keep working unchanged.
+    Multi-robot GUIs should hit /pose/<robot_id> instead."""
+    with _poses_lock:
+        if not latest_poses:
+            return jsonify({"available": False, "reason": "no_bridge_yet"}), 200
+        # Pick the freshest entry across robots.
+        rid, entry = max(latest_poses.items(), key=lambda kv: kv[1]["recv_t"])
+        age_sec = time.time() - entry["recv_t"]
+        body    = entry["data"]
     return jsonify({
         "available": True,
         "age_sec":   age_sec,
-        **latest_pose,
+        "robot_id":  rid,
+        **body,
     }), 200
 
 
-@app.route("/set_initial_pose", methods=["POST"])
-def set_initial_pose():
-    """Receive an initial-pose hint from the browser GUI.
+@app.route("/pose/<robot_id>", methods=["GET"])
+def get_pose_for_robot(robot_id):
+    """Per-robot live-pose feed. The browser polls one of these per robot
+    it wants to render. Returns `available: false` if that robot's bridge
+    has never posted, so the GUI can show a clear NO BRIDGE pill."""
+    with _poses_lock:
+        entry = latest_poses.get(robot_id)
+        if entry is None:
+            return jsonify({
+                "available": False,
+                "reason":    "no_bridge_yet",
+                "robot_id":  robot_id,
+            }), 200
+        age_sec = time.time() - entry["recv_t"]
+        body    = entry["data"]
+    return jsonify({
+        "available": True,
+        "age_sec":   age_sec,
+        "robot_id":  robot_id,
+        **body,
+    }), 200
 
-    Body: {"x": float, "y": float, "yaw_rad": float}
 
-    Z-up convention: x and y are ROS map-frame coordinates on the floor
-    plane (the same frame /goal uses). The bridge polls
-    /set_initial_pose (GET) at its tick rate; when seq increments, it
-    publishes one PoseWithCovarianceStamped to /initialpose for
-    RTAB-Map. This is the same topic AMCL / RViz "2D Pose Estimate"
-    use, so RTAB-Map seeds its pose at the hint and converges in
-    1-2 sec instead of doing a slow global re-localization search.
-    """
-    global pending_initial_pose, initial_pose_seq
-    data = request.get_json(silent=True)
-    if data is None or "x" not in data or "y" not in data:
-        return jsonify({"error": "missing x/y in JSON body"}), 400
+def _queue_initial_pose(robot_id, data):
+    """Common: stamp + bump per-robot seq + store. Returns the snapshot."""
     with _initial_pose_lock:
-        initial_pose_seq += 1
-        pending_initial_pose = {
-            "seq":            initial_pose_seq,
+        prev = pending_initial_poses.get(robot_id)
+        next_seq = (prev["seq"] + 1) if prev is not None else 1
+        snapshot = {
+            "seq":            next_seq,
+            "robot_id":       robot_id,
             "x":              float(data["x"]),
             "y":              float(data["y"]),
             "yaw_rad":        float(data.get("yaw_rad", 0.0)),
             "frame":          "map",
             "wall_clock_iso": datetime.now(timezone.utc).isoformat(),
         }
-        seq_for_log = initial_pose_seq
-        snapshot    = pending_initial_pose
-    print(f"[server] initial pose hint #{seq_for_log}: "
-          f"x={snapshot['x']:.2f}, "
-          f"y={snapshot['y']:.2f}, "
-          f"yaw={math.degrees(snapshot['yaw_rad']):.0f}deg")
-    return jsonify({"status": "queued", "seq": seq_for_log})
+        pending_initial_poses[robot_id] = snapshot
+    return snapshot
+
+
+@app.route("/set_initial_pose", methods=["POST"])
+def set_initial_pose():
+    """Receive an initial-pose hint from the browser GUI.
+
+    Body: {"x": float, "y": float, "yaw_rad": float, "robot_id"?: str}
+
+    Z-up convention: x and y are ROS map-frame coordinates on the floor
+    plane (the same frame /goal uses). Each robot's bridge polls
+    /set_initial_pose/<its_own_id> at its tick rate; when seq increments
+    for that robot, the bridge publishes one PoseWithCovarianceStamped to
+    /initialpose for its RTAB-Map. This is the same topic AMCL / RViz "2D
+    Pose Estimate" use, so RTAB-Map seeds its pose at the hint and
+    converges in 1-2 sec instead of doing a slow global re-localization
+    search.
+
+    Posts that don't carry a `robot_id` land in the "default" bucket. A
+    single-robot deployment that always polls /set_initial_pose (no path
+    suffix) keeps working unchanged.
+    """
+    data = request.get_json(silent=True)
+    if data is None or "x" not in data or "y" not in data:
+        return jsonify({"error": "missing x/y in JSON body"}), 400
+    robot_id = _resolve_robot_id(data)
+    snap = _queue_initial_pose(robot_id, data)
+    print(f"[server] initial pose hint #{snap['seq']} for {robot_id}: "
+          f"x={snap['x']:.2f}, y={snap['y']:.2f}, "
+          f"yaw={math.degrees(snap['yaw_rad']):.0f}deg")
+    return jsonify({"status": "queued",
+                    "seq":      snap["seq"],
+                    "robot_id": robot_id})
+
+
+@app.route("/set_initial_pose/<robot_id>", methods=["POST"])
+def set_initial_pose_for(robot_id):
+    """Explicit per-robot POST. URL path overrides body's robot_id."""
+    data = request.get_json(silent=True)
+    if data is None or "x" not in data or "y" not in data:
+        return jsonify({"error": "missing x/y in JSON body"}), 400
+    snap = _queue_initial_pose(robot_id, data)
+    print(f"[server] initial pose hint #{snap['seq']} for {robot_id}: "
+          f"x={snap['x']:.2f}, y={snap['y']:.2f}, "
+          f"yaw={math.degrees(snap['yaw_rad']):.0f}deg")
+    return jsonify({"status": "queued",
+                    "seq":      snap["seq"],
+                    "robot_id": robot_id})
 
 
 @app.route("/set_initial_pose", methods=["GET"])
-def get_initial_pose():
-    """Polled by ros_pose_bridge.py. Returns current pending pose + seq.
-
-    The bridge tracks its own last_seen_seq; whenever the seq we return
-    here is greater, the bridge publishes one PoseWithCovarianceStamped
-    on /initialpose and updates its last_seen_seq.
-    """
-    if pending_initial_pose is None:
+def get_initial_pose_legacy():
+    """Legacy single-queue poll for the bridge. Returns the "default"
+    bucket so single-robot setups keep working without changes."""
+    with _initial_pose_lock:
+        snap = pending_initial_poses.get(DEFAULT_ROBOT_ID)
+    if snap is None:
         return jsonify({"available": False, "seq": 0}), 200
-    return jsonify({"available": True, **pending_initial_pose}), 200
+    return jsonify({"available": True, **snap}), 200
+
+
+@app.route("/set_initial_pose/<robot_id>", methods=["GET"])
+def get_initial_pose_for(robot_id):
+    """Per-robot poll for ros_pose_bridge.py.
+
+    Each bridge tracks its own last_seen_seq; when the seq we return here
+    is greater than what the bridge last saw, it publishes one
+    PoseWithCovarianceStamped on /initialpose and updates its
+    last_seen_seq. Bridges only ever read the queue for their own
+    robot_id, so a hint for tb3_0 never accidentally seeds tb3_1."""
+    with _initial_pose_lock:
+        snap = pending_initial_poses.get(robot_id)
+    if snap is None:
+        return jsonify({"available": False, "seq": 0,
+                        "robot_id": robot_id}), 200
+    return jsonify({"available": True, **snap}), 200
 
 
 def register_goal_callback(fn):
@@ -229,6 +341,7 @@ def load_map(path):
 
 
 def load_overlay(path):
+    """Optional second map served on /map_overlay for visual A/B."""
     global overlay_data
     print(f"Loading overlay map: {path}")
     with open(path, "r") as f:
@@ -244,7 +357,8 @@ def run(host="0.0.0.0", port=5002):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Map visualization server")
-    parser.add_argument("--map",     default="map.json", help="Primary map JSON")
+    parser.add_argument("--map",     default="map.json",
+                        help="Primary map JSON")
     parser.add_argument("--overlay", default=None,
                         help="Optional second map JSON to overlay (for A/B accuracy check)")
     parser.add_argument("--port",    type=int, default=5002, help="Port to serve on")
