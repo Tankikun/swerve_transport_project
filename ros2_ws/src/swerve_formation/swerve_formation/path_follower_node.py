@@ -4,7 +4,7 @@ path_follower_node.py
 Waypoint follower for the elected formation leader.
 
 Inputs come from the laptop UI as two one-shot messages:
-  1. After localization:  /formation/offset    — PoseArray (frame_id "map")
+  1. After localization:  /formation/offsets    — PoseArray (frame_id "map")
                                                   with one pose per robot, where
                                                   pose.position.(x, y) is that
                                                   robot's WORLD-frame offset from
@@ -14,8 +14,11 @@ Inputs come from the laptop UI as two one-shot messages:
                                                   uses it directly to compute the
                                                   virtual centre as
                                                   centre = leader_xy − offset.
-  2. After goal click:    /navigation/waypoints — ordered waypoint list
-                                                  (planned with A* + APF).
+  2. After goal click:    /formation/path       — ordered waypoint list
+                                                  (planned with A* + APF),
+                                                  published as a LATCHED
+                                                  PoseArray so late subscribers
+                                                  still receive the last path.
 
 The follower drives /virtual_center/cmd_vel toward each waypoint in turn,
 advancing when the virtual centre is within tolerance of the current target,
@@ -27,10 +30,12 @@ laptop planner's responsibility. Its only job is to follow a list of dots.
 Subscriptions
   /formation/leader        std_msgs/String         — robot_id of current leader
   /{robot_id}/ekf/odom     nav_msgs/Odometry       — authoritative pose (EKF output)
-  /navigation/waypoints    geometry_msgs/PoseArray — ordered waypoint list (in map frame)
-  /formation/offset        geometry_msgs/PoseArray — per-robot offsets from virtual
-                                                     centre, in WORLD/map frame.
-                                                     Read poses[formation_index].position
+  /formation/path          geometry_msgs/PoseArray — ordered waypoint list (in map frame),
+                                                     LATCHED (transient_local QoS)
+  /formation/offsets       geometry_msgs/PoseArray — per-robot offsets from virtual
+                                                     centre, in WORLD/map frame,
+                                                     LATCHED. Read
+                                                     poses[formation_index].position
 
 Publications
   /virtual_center/cmd_vel  geometry_msgs/Twist     — velocity for the formation
@@ -40,6 +45,7 @@ Publications
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
 from geometry_msgs.msg import Twist, PoseArray
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
@@ -109,10 +115,21 @@ class PathFollowerNode(Node):
                                  self._leader_cb, 10)
         self.create_subscription(Odometry, f'/{self._robot_id}/ekf/odom',
                                  self._pose_cb, 10)
-        self.create_subscription(PoseArray, '/navigation/waypoints',
-                                 self._waypoints_cb, 10)
-        self.create_subscription(PoseArray, '/formation/offset',
-                                 self._offset_cb, 10)
+        # Latched QoS: matches publishers that use transient_local so we still
+        # receive the most recent message even if we subscribe late (e.g. the
+        # follower restarts after the planner / localization has already
+        # published). Both /formation/path and /formation/offsets carry STATE
+        # (the current path / formation geometry), so latching is correct.
+        latched_qos = QoSProfile(
+            depth=1,
+            history=HistoryPolicy.KEEP_LAST,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(PoseArray, '/formation/path',
+                                 self._waypoints_cb, latched_qos)
+        self.create_subscription(PoseArray, '/formation/offsets',
+                                 self._offset_cb, latched_qos)
 
         # ── Publishers ───────────────────────────────────────────────────────
         self._cmd_pub    = self.create_publisher(Twist,  '/virtual_center/cmd_vel', 10)
