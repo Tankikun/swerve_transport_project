@@ -33,6 +33,7 @@ setup(
             'ekf_node = swerve_formation.ekf_node:main',
             'leader_election_node = swerve_formation.leader_election_node:main',
             'navigation_node = swerve_formation.navigation_node:main',
+            'path_planner_node = swerve_formation.path_planner_node:main',
             'formation_size_node = swerve_formation.formation_size_node:main',
             'ai_camera_node = swerve_formation.ai_camera_node:main',
             'oak_camera_node = swerve_formation.oak_camera_node:main',

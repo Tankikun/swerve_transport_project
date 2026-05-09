@@ -1,25 +1,34 @@
 """
 navigation_node.py
 ------------------
-Runs on every robot; ONLY the elected leader activates its control loop.
-The leader drives /virtual_center/cmd_vel; follower robots track via
-laplacian_formation_node.
+Path FOLLOWER for the elected formation leader. Runs on every robot;
+ONLY the elected leader activates its control loop. The leader emits
+/virtual_center/cmd_vel; follower robots track via laplacian_formation_node.
 
-Path planning: Hybrid APF (global avoidance) + velocity ramp (local smoothing).
-This is taken directly from the formation_path_planning notebook — see that
-notebook for derivations and visualisations.
+Path PLANNING is done elsewhere: the laptop-side path_planner_node consumes
+/goal_pose, /formation/footprint, and both /tb3_*/pose, then publishes
+/formation/path (PoseArray, latched). This file CONSUMES that path.
+
+Controller stack (no global planning here):
+  - Pure-pursuit lookahead carrot (Coulter 1992) over the planned waypoints
+  - Local APF safety layer for dynamic obstacles seen on /navigation/obstacles
+    (the planner already keeps the static map clear; this is a runtime safety net)
+  - Velocity ramp on (vx, vy) with body-frame transform for the holonomic base
 
 Subscriptions
   /formation/leader          std_msgs/String   — robot_id of current leader
   /{robot_id}/ekf/odom       nav_msgs/Odometry — authoritative pose (EKF output)
-  /navigation/goal           geometry_msgs/Twist  — single goal (linear.x/y = x/y, angular.z = θ)
-  /navigation/waypoints      geometry_msgs/PoseArray — ordered waypoint sequence
-  /navigation/obstacles      geometry_msgs/PoseArray — obstacle centres (x, y, radius in z)
-  /formation/footprint_radius std_msgs/Float32  — half-width of formation for obstacle inflation
+  /navigation/waypoints      geometry_msgs/PoseArray — planned path
+                                                      (transition name; spec target: /formation/path)
+  /navigation/obstacles      geometry_msgs/PoseArray — runtime obstacle centres (x, y, radius in z)
+  /formation/footprint_radius std_msgs/Float32  — formation half-width (for APF safety inflation)
 
 Publications
-  /virtual_center/cmd_vel    geometry_msgs/Twist — velocity for the whole formation
+  /virtual_center/cmd_vel    geometry_msgs/Twist — velocity for the whole formation (20 Hz)
   /navigation/status         std_msgs/String     — "IDLE" | "NAVIGATING" | "REACHED"
+
+NOTE: The /navigation/goal Twist subscription that used to live here was
+removed — goals are consumed by path_planner_node on /goal_pose, not here.
 """
 
 import numpy as np
@@ -185,9 +194,9 @@ class NavigationNode(Node):
         self.create_subscription(
             Odometry, f'/{self._robot_id}/ekf/odom', self._pose_cb, 10
         )
-        self.create_subscription(
-            Twist, '/navigation/goal', self._goal_cb, 10
-        )
+        # Goals do NOT come in on this node anymore — see path_planner_node
+        # which consumes /goal_pose and publishes /formation/path. We only
+        # consume the planned path here.
         self.create_subscription(
             PoseArray, '/navigation/waypoints', self._waypoints_cb, 10
         )
@@ -228,16 +237,6 @@ class NavigationNode(Node):
         self._pose[2] = np.arctan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        )
-
-    def _goal_cb(self, msg: Twist):
-        """Single goal via Twist: linear.x/y = target x/y, angular.z = target θ."""
-        self._waypoints.clear()
-        self._current_wp = np.array([msg.linear.x, msg.linear.y, msg.angular.z])
-        self._reset_ramp()
-        self._phase = 'DRIVE'
-        self.get_logger().info(
-            f'New goal: x={msg.linear.x:.2f} y={msg.linear.y:.2f} θ={msg.angular.z:.2f}'
         )
 
     def _waypoints_cb(self, msg: PoseArray):
