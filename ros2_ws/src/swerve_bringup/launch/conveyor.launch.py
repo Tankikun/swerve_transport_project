@@ -85,12 +85,16 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # EKF — fuses raw /odom + SLAM pose; sole consumer of raw odometry
+        # EKF — fuses raw /odom + /imu (gyro Z, slip-immune) + SLAM pose;
+        # sole consumer of raw odometry.
         Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
+            parameters=[{
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
+            }],
             output='screen',
         ),
 
@@ -174,5 +178,10 @@ def generate_launch_description():
                               description='Leave empty to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument('cam_z', default_value='',
                               description='Leave empty to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument('gyro_z_sign', default_value='1.0',
+                              description='Sign of the IMU gyro Z reading. '
+                                          'Set to -1.0 if a bench yaw test '
+                                          'shows ekf yaw decreasing under '
+                                          'physical CCW rotation.'),
         OpaqueFunction(function=launch_setup),
     ])

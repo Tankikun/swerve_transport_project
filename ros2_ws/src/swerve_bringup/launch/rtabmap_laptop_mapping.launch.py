@@ -17,9 +17,9 @@ Topology:
   pi2 (sensors):              laptop (this launch):
     oak_camera_node             rtabmap_slam (mapping mode)
     conveyor_base_node          → ~/maps/{robot_id}_room.db
-    ekf_node
+    ekf_node (gyro fused)
             └────── /tb3_1/camera/...,
-                    /tb3_1/ekf/odom,
+                    /tb3_1/ekf/odom (IMU-fused, slip-immune yaw),
                     /tf, /tf_static     ─────┘
 
 Usage on the laptop:
@@ -103,12 +103,16 @@ def launch_setup(context, *args, **kwargs):
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
                 ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
                 ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
-                # Raw wheel odom during mapping — there is no SLAM
-                # correction yet, and the {robot_id}_odom→base_link TF
-                # (from conveyor_base_node on the Pi) is also raw, so
-                # topic and TF agree. Localization-mode launches use
-                # /ekf/odom instead.
-                ('odom',              f'/{robot_id}/odom'),
+                # IMU-fused odom during mapping. No SLAM correction
+                # exists yet, but ekf_node still adds value by fusing
+                # the gyro Z rate (slip-immune) over the wheel-derived
+                # yaw — the wheel-derived yaw drifts by degrees per
+                # turn during steering transitions and was the dominant
+                # cause of bad PnP priors at loop-closure verification.
+                # The {robot_id}_odom→base_link TF is still wheel-
+                # derived, mirroring the localization launches; small
+                # divergences during a mapping pass are tolerable.
+                ('odom',              f'/{robot_id}/ekf/odom'),
                 # Per-robot scoping (consistent with the on-pi launches).
                 ('localization_pose', f'/{robot_id}/rtabmap/localization_pose'),
                 ('info',              f'/{robot_id}/rtabmap/info'),

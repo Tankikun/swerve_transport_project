@@ -107,13 +107,18 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ))
 
-    # ── EKF — wheel /odom (+ /slam/pose later, in localization) → /ekf/odom
+    # ── EKF — wheel /odom + /imu (gyro Z fusion) (+ /slam/pose later,
+    # in localization) → /ekf/odom. Gyro fusion is the slip-immune yaw
+    # source that fixes RTAB-Map loop-closure rejection during mapping.
     if enable_ekf:
         actions.append(Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
+            parameters=[{
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
+            }],
             output='screen',
         ))
 
@@ -150,5 +155,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_ekf', default_value='true',
             description='Start ekf_node.'),
+        DeclareLaunchArgument(
+            'gyro_z_sign', default_value='1.0',
+            description='Sign of the IMU gyro Z reading. Set to -1.0 if a '
+                        'bench yaw test shows ekf yaw decreasing under '
+                        'physical CCW rotation — the MPU-9250 mount '
+                        'direction depends on OpenCR orientation.'),
         OpaqueFunction(function=launch_setup),
     ])
