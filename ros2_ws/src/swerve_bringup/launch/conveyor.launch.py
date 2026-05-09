@@ -196,5 +196,10 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_yaw', default_value='',
                               description='Camera mount yaw from base_link to oak-d-base-frame [rad]. '
                                           'Leave empty to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument('gyro_z_sign', default_value='1.0',
+                              description='Sign of the IMU gyro Z reading. '
+                                          'Set to -1.0 if a bench yaw test '
+                                          'shows ekf yaw decreasing under '
+                                          'physical CCW rotation.'),
         OpaqueFunction(function=launch_setup),
     ])
