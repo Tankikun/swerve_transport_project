@@ -16,6 +16,7 @@
     --text:      #8441a4;
     --muted:     #9a8ca2;
     --success:   #7fb884;
+    --plan:      #ffd33f;
     --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
   }
@@ -245,8 +246,8 @@
 
 const ROSBRIDGE_URL          = "ws://localhost:9090";
 const ROBOT_POSE_TOPIC       = "/tb3_0/pose";
-const GOAL_TOPIC             = "/goal_pose";
 const FORMATION_OFFSET_TOPIC = "/formation/offsets";
+const FORMATION_PATH_TOPIC   = "/formation/path";
 const POSE_POLL_MS           = 200;
 
 // =======================================================================
@@ -327,6 +328,11 @@ let combinedMarkerGroup = null; // outer frame + centre marker
 //   }
 let systemFormation = null;
 let _lastFormationKey = null;   // for change-only logging
+
+// Plan-path state — `planGroup3d` holds the rendered yellow waypoint
+// dots on the floor. Populated synchronously by Send Goal's POST /plan
+// response; cleared when the user starts a new goal placement.
+let planGroup3d = null;
 
 let pendingPoseGroup = null;    // visual during Set Initial Pose / Goal placement
 let cloudCenter = new THREE.Vector3();
@@ -1077,6 +1083,7 @@ function clearGoal() {
     el.className   = 'empty';
   });
   document.getElementById('sendBtn').disabled = true;
+  clearPlanGroup();
 }
 
 function confirmGoal(p) {
@@ -1104,6 +1111,30 @@ function confirmGoal(p) {
   pendingPose = null;
   removePendingPoseMarker();
   updateGoalMarker();
+}
+
+// =======================================================================
+// Plan-path overlay — yellow waypoint dots on the floor. Driven by the
+// Send Goal handler: POST /plan, render whatever waypoints come back in
+// the response. No polling, no separate button.
+// =======================================================================
+function clearPlanGroup() {
+  if (planGroup3d) { disposeGroup(planGroup3d); planGroup3d = null; }
+  planGroup3d = new THREE.Group();
+  scene.add(planGroup3d);
+}
+
+function renderPlan3D(waypoints) {
+  if (!Array.isArray(waypoints) || !mapData) return;
+  clearPlanGroup();
+  const floorZ = (mapData.metadata.floor_z || 0) + 0.005;
+  for (const [wx, wy] of waypoints) {
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.05, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffd33f }));
+    sphere.position.set(wx, wy, floorZ + 0.01);
+    planGroup3d.add(sphere);
+  }
 }
 
 // Robot marker (rosbridge feed) — kept for debugging the EKF output.
@@ -1192,15 +1223,11 @@ function goalCollisionSides(g) {
   return computeCollisionSides(g.x, g.y, yawRad, GOAL_WIDTH_M, goalLen);
 }
 
-document.getElementById("sendBtn").addEventListener("click", () => {
+document.getElementById("sendBtn").addEventListener("click", async () => {
   if (!goal) return;
   const btn = document.getElementById("sendBtn");
 
   // Refuse to publish a goal whose footprint overlaps an obstacle.
-  // Exactly the same check as the red-edge highlight, so what the user
-  // sees on screen and what the button blocks on are guaranteed to
-  // agree. Treat "grid not loaded" (sides == null) as "can't check,
-  // allow send" — same behaviour as before this guard existed.
   const sides = goalCollisionSides(goal);
   if (sides && (sides.front || sides.back || sides.left || sides.right)) {
     const hits = ['front','back','left','right'].filter(s => sides[s]);
@@ -1222,28 +1249,45 @@ document.getElementById("sendBtn").addEventListener("click", () => {
   }
 
   btn.disabled    = true;
-  btn.textContent = "Sending...";
+  btn.textContent = "Planning…";
 
-  try {
-    publishGoalToROS(goal);
-    btn.textContent = "Sent ✓";
-    btn.classList.add("sent");
-    showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°`);
-    setTimeout(() => {
-      btn.textContent = "Send Goal";
-      btn.classList.remove("sent");
-      btn.disabled = false;
-    }, 2500);
-  } catch (e) {
-    btn.textContent = "Failed";
-    btn.style.borderColor = "var(--accent2)";
-    btn.style.color       = "var(--accent2)";
-    setTimeout(() => {
-      btn.textContent = "Send Goal";
-      btn.style       = "";
-      btn.disabled    = false;
-    }, 2000);
+  // Plan a path from the virtual centre to the goal, render the dots,
+  // then publish the goal to ROS. Planning is best-effort: if the
+  // formation isn't up or A* fails we still publish, so a single-robot
+  // run keeps working.
+  let plannedCount = 0;
+  if (systemFormation) {
+    try {
+      const r = await fetch("/plan", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          start: { x: systemFormation.centre.x, y: systemFormation.centre.y },
+          goal:  { x: goal.x,                   y: goal.y },
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && Array.isArray(j.waypoints)) {
+        renderPlan3D(j.waypoints);
+        publishFormationPath(j.waypoints, j.headings);
+        plannedCount = j.waypoints.length;
+      } else if (!r.ok) {
+        showToast(`Plan failed: ${j.error || r.status}`, "warning");
+      }
+    } catch (e) {
+      showToast(`Plan error: ${e.message}`, "warning");
+    }
   }
+
+  btn.textContent = "Sent ✓";
+  btn.classList.add("sent");
+  const tail = plannedCount ? ` · ${plannedCount} waypoints` : '';
+  showToast(`Goal → X:${goal.x.toFixed(2)} Y:${goal.y.toFixed(2)} θ:${goal.orientation}°${tail}`);
+  setTimeout(() => {
+    btn.textContent = "Send Goal";
+    btn.classList.remove("sent");
+    btn.disabled = false;
+  }, 2500);
 });
 
 // =======================================================================
@@ -1303,20 +1347,6 @@ function subscribeToRobotPose() {
   });
 }
 
-const goalTopic = new ROSLIB.Topic({ ros, name: GOAL_TOPIC, messageType: "geometry_msgs/PoseStamped" });
-
-function publishGoalToROS(g) {
-  const yawRad = g.orientation * Math.PI / 180;
-  const qz = Math.sin(yawRad / 2);
-  const qw = Math.cos(yawRad / 2);
-  const msg = new ROSLIB.Message({
-    header: { frame_id: "map", stamp: { secs: 0, nsecs: 0 } },
-    pose:   { position:    { x: g.x, y: g.y, z: g.z },
-              orientation: { x: 0,    y: 0,    z: qz, w: qw } }
-  });
-  goalTopic.publish(msg);
-}
-
 // =======================================================================
 // /formation/offsets — published while BOTH robots are localized.
 //
@@ -1350,6 +1380,43 @@ function publishFormationOffset(formation) {
     poses,
   });
   formationOffsetTopic.publish(msg);
+}
+
+// =======================================================================
+// /formation/path — published once after every successful Send Goal plan.
+//
+// One geometry_msgs/PoseArray; poses[i].position.{x,y} carries the
+// virtual centre's i-th waypoint in the ROS map frame, and
+// poses[i].orientation carries the path tangent at that waypoint
+// (yaw → quaternion). z is the floor height from the loaded map. The
+// architecture doc calls this topic latched / transient_local — the
+// rosbridge_server side configures durability QoS, this client just
+// publishes once per plan.
+// =======================================================================
+const formationPathTopic = new ROSLIB.Topic({
+  ros,
+  name:        FORMATION_PATH_TOPIC,
+  messageType: "geometry_msgs/PoseArray",
+});
+
+function publishFormationPath(waypoints, headings) {
+  if (!Array.isArray(waypoints) || waypoints.length === 0) return;
+  const floorZ = (mapData && mapData.metadata && mapData.metadata.floor_z) || 0.0;
+  const poses  = waypoints.map((wp, i) => {
+    const yaw = (Array.isArray(headings) && headings.length === waypoints.length)
+                  ? headings[i] : 0.0;
+    return {
+      position:    { x: wp[0], y: wp[1], z: floorZ },
+      orientation: { x: 0.0, y: 0.0,
+                     z: Math.sin(yaw / 2),
+                     w: Math.cos(yaw / 2) },
+    };
+  });
+  const msg = new ROSLIB.Message({
+    header: { frame_id: "map", stamp: { secs: 0, nsecs: 0 } },
+    poses,
+  });
+  formationPathTopic.publish(msg);
 }
 
 // =======================================================================
