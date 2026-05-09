@@ -40,6 +40,15 @@ Endpoints:
     GET  /set_initial_pose         legacy: poll the "default" queue
     GET  /set_initial_pose/<id>    per-robot poll for ros_pose_bridge
 
+    POST /set_initial_pose/<id>/ack
+                                   bridge -> server: confirm `seq` was published
+                                     to /initialpose. Lets the GUI distinguish
+                                     "hint queued, no bridge consumed it yet"
+                                     from "bridge confirmed publish to RTAB-Map".
+    GET  /pose_hint_status/<id>    GUI -> server: read latest hint seq + ack
+                                     state. Used by the 📍 Set Initial Pose
+                                     button to update its label after click.
+
 Usage:
     python3 server.py --map map.json --port 5002
 """
@@ -226,7 +235,16 @@ def get_pose_for_robot(robot_id):
 
 
 def _queue_initial_pose(robot_id, data):
-    """Common: stamp + bump per-robot seq + store. Returns the snapshot."""
+    """Common: stamp + bump per-robot seq + store. Returns the snapshot.
+
+    Each snapshot also carries `acked_seq` (last seq the bridge confirmed
+    via POST /set_initial_pose/<id>/ack) and `acked_iso` (timestamp of
+    that confirmation, or None if not yet acked). When `acked_seq < seq`
+    the GUI knows the hint is in flight; when `acked_seq == seq` the
+    bridge has published it to /initialpose and RTAB-Map should converge
+    momentarily (or the hint was wrong). Either way the user has a
+    signal they didn't have before.
+    """
     with _initial_pose_lock:
         prev = pending_initial_poses.get(robot_id)
         next_seq = (prev["seq"] + 1) if prev is not None else 1
@@ -238,6 +256,8 @@ def _queue_initial_pose(robot_id, data):
             "yaw_rad":        float(data.get("yaw_rad", 0.0)),
             "frame":          "map",
             "wall_clock_iso": datetime.now(timezone.utc).isoformat(),
+            "acked_seq":      0,        # bumped by POST .../ack
+            "acked_iso":      None,
         }
         pending_initial_poses[robot_id] = snapshot
     return snapshot
@@ -316,6 +336,101 @@ def get_initial_pose_for(robot_id):
         return jsonify({"available": False, "seq": 0,
                         "robot_id": robot_id}), 200
     return jsonify({"available": True, **snap}), 200
+
+
+@app.route("/set_initial_pose/<robot_id>/ack", methods=["POST"])
+def ack_initial_pose(robot_id):
+    """Bridge -> server: confirm a hint `seq` was published to /initialpose.
+
+    Called by ros_pose_bridge.py after a successful publish on the
+    /initialpose topic. The GUI watches /pose_hint_status/<id> to know
+    whether the bridge actually consumed the hint or whether the hint is
+    still queued (bridge crashed, network dropped, etc.).
+
+    Body: {"seq": int}
+
+    Returns:
+      200 {"status": "acked", ...}        normal case
+      200 {"status": "no_pending_hint"}   server has no record (legitimate after restart)
+      200 {"status": "stale_ack", ...}    seq < current acked_seq (ignored)
+      400                                 missing seq
+
+    Always returns 200 except for malformed input — bridges that target
+    an old server version still get a graceful answer when this endpoint
+    is missing (404 → bridge silently retries on next tick), so this
+    feature is opt-in on both sides."""
+    data = request.get_json(silent=True) or {}
+    if "seq" not in data:
+        return jsonify({"error": "missing seq in JSON body"}), 400
+    seq = int(data["seq"])
+    with _initial_pose_lock:
+        snap = pending_initial_poses.get(robot_id)
+        if snap is None:
+            return jsonify({"status":   "no_pending_hint",
+                            "robot_id": robot_id,
+                            "seq":      seq}), 200
+        if seq < snap.get("acked_seq", 0):
+            return jsonify({"status":            "stale_ack",
+                            "robot_id":          robot_id,
+                            "seq":               seq,
+                            "current_acked_seq": snap.get("acked_seq", 0)}), 200
+        snap["acked_seq"] = seq
+        snap["acked_iso"] = datetime.now(timezone.utc).isoformat()
+    print(f"[server] hint #{seq} for {robot_id} acked by bridge")
+    return jsonify({"status":   "acked",
+                    "robot_id": robot_id,
+                    "seq":      seq}), 200
+
+
+@app.route("/pose_hint_status/<robot_id>", methods=["GET"])
+def pose_hint_status_for(robot_id):
+    """GUI poll: latest hint seq + ack state for this robot.
+
+    Returns:
+      {
+        "available":         bool,    # false if no hint ever queued for <id>
+        "robot_id":          str,
+        "seq":               int,     # latest hint queued
+        "acked_seq":         int,     # latest hint the bridge confirmed
+        "acked":             bool,    # acked_seq >= seq (hint was published)
+        "age_since_queue_s": float,   # wall-clock age of latest hint
+        "age_since_ack_s":   float | null,  # wall-clock age of last ack
+      }
+
+    The GUI uses this to drive the 📍 Set Initial Pose button label: after
+    the user clicks, the button polls this endpoint until either `acked`
+    becomes true (success) or a timeout elapses (bridge probably down)."""
+    with _initial_pose_lock:
+        snap = pending_initial_poses.get(robot_id)
+    if snap is None:
+        return jsonify({"available": False,
+                        "robot_id":  robot_id,
+                        "seq":       0,
+                        "acked_seq": 0,
+                        "acked":     False}), 200
+    try:
+        queued_t = datetime.fromisoformat(snap["wall_clock_iso"]).timestamp()
+        age_q    = max(0.0, time.time() - queued_t)
+    except (KeyError, ValueError):
+        age_q = None
+    age_a = None
+    if snap.get("acked_iso"):
+        try:
+            acked_t = datetime.fromisoformat(snap["acked_iso"]).timestamp()
+            age_a   = max(0.0, time.time() - acked_t)
+        except ValueError:
+            age_a = None
+    seq       = int(snap["seq"])
+    acked_seq = int(snap.get("acked_seq", 0))
+    return jsonify({
+        "available":         True,
+        "robot_id":          robot_id,
+        "seq":               seq,
+        "acked_seq":         acked_seq,
+        "acked":             acked_seq >= seq,
+        "age_since_queue_s": age_q,
+        "age_since_ack_s":   age_a,
+    }), 200
 
 
 def register_goal_callback(fn):

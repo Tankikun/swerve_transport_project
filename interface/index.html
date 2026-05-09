@@ -631,6 +631,12 @@ async function postInitialPose(pose) {
       const j = await res.json();
       console.log("Initial pose queued for", targetId, "seq=", j.seq);
       flashConfirmation(targetId);
+      // Watch /pose_hint_status to confirm the bridge actually published.
+      // Three terminal states for the button label:
+      //   1. seq acked          → "✓ R1 hint published"          (success)
+      //   2. timeout, not acked → "⚠ R1 hint not acked — bridge?" (warn)
+      //   3. another POST fires before this one finishes → it cancels itself
+      watchHintAck(targetId, j.seq);
     } else {
       console.warn("Initial pose POST failed:", res.status);
       showToast("Set Initial Pose failed: HTTP " + res.status);
@@ -647,18 +653,77 @@ function flashConfirmation(targetId) {
   btn._flashing = true;
   const lbl = targetId ? targetLabelFor(targetId) : "";
   btn.textContent = lbl
-    ? `✓ ${lbl} pose sent — RTAB-Map matching…`
-    : "✓ Pose sent — RTAB-Map matching…";
+    ? `✓ ${lbl} pose sent — awaiting bridge…`
+    : "✓ Pose sent — awaiting bridge…";
   btn.style.background  = "var(--success)";
   btn.style.color       = "var(--bg)";
   btn.style.borderColor = "var(--success)";
+  // Note: we no longer auto-revert on a fixed 2.5s timer — `watchHintAck`
+  // owns the button label until the ack arrives or its timeout elapses.
+}
+
+function _resetSetPoseButton(btn) {
+  btn._flashing = false;
+  btn.textContent = "\u{1F4CD} Set Initial Pose";
+  btn.style.background  = "";
+  btn.style.color       = "";
+  btn.style.borderColor = "";
+}
+
+// Polls /pose_hint_status/<id> until the bridge confirms it published this
+// `expectedSeq` (success), or HINT_ACK_TIMEOUT_MS elapses (warning). Any
+// new postInitialPose() invocation increments _hintAckGen, which causes
+// older watcher loops to silently exit so they don't fight over the
+// button label. Old servers without the endpoint return `available:false`
+// or 404 → loop times out into the warn state, which is the right answer
+// for "I have no idea if the bridge consumed this."
+const HINT_ACK_TIMEOUT_MS = 6000;
+const HINT_ACK_POLL_MS    = 250;
+let _hintAckGen = 0;
+async function watchHintAck(targetId, expectedSeq) {
+  const myGen   = ++_hintAckGen;
+  const btn     = document.getElementById("setPoseBtn");
+  const url     = "/pose_hint_status/" + encodeURIComponent(targetId);
+  const lbl     = targetLabelFor(targetId) || "";
+  const startT  = Date.now();
+  while (Date.now() - startT < HINT_ACK_TIMEOUT_MS) {
+    if (myGen !== _hintAckGen) return;       // superseded by a newer click
+    try {
+      const r = await fetch(url, { cache: "no-store" });
+      if (r.ok) {
+        const j = await r.json();
+        if (j.available && j.acked && j.acked_seq >= expectedSeq) {
+          btn.textContent = lbl
+            ? `✓ ${lbl} hint published (seq=${j.acked_seq})`
+            : `✓ Hint published (seq=${j.acked_seq})`;
+          btn.style.background  = "var(--success)";
+          btn.style.color       = "var(--bg)";
+          btn.style.borderColor = "var(--success)";
+          // Hold the success label for a moment so the user catches it,
+          // then revert to the idle label.
+          setTimeout(() => {
+            if (myGen === _hintAckGen) _resetSetPoseButton(btn);
+          }, 2200);
+          return;
+        }
+      }
+    } catch (e) { /* network blip — try again next tick */ }
+    await new Promise(r => setTimeout(r, HINT_ACK_POLL_MS));
+  }
+  // Timed out before ack — bridge probably down, server probably old, or
+  // the publish failed silently. Let the user know loudly enough they'll
+  // check T3 / loc_doctor instead of staring at a red pill.
+  if (myGen !== _hintAckGen) return;
+  btn.textContent = lbl
+    ? `⚠ ${lbl} hint not acked — bridge down?`
+    : `⚠ Hint not acked — bridge down?`;
+  btn.style.background  = "transparent";
+  btn.style.color       = "#ffaa00";
+  btn.style.borderColor = "#ffaa00";
+  showToast(`Hint #${expectedSeq} for ${lbl || targetId} not acked in ${HINT_ACK_TIMEOUT_MS/1000}s — check ros_pose_bridge`);
   setTimeout(() => {
-    btn._flashing = false;
-    btn.textContent = "\u{1F4CD} Set Initial Pose";
-    btn.style.background  = "";
-    btn.style.color       = "";
-    btn.style.borderColor = "";
-  }, 2500);
+    if (myGen === _hintAckGen) _resetSetPoseButton(btn);
+  }, 4000);
 }
 
 document.addEventListener("keydown", ev => {

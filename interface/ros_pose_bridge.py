@@ -49,6 +49,10 @@ Run
         -p server_url:=http://192.168.1.42:5002/pose \
         -p initial_pose_url:=http://192.168.1.42:5002/set_initial_pose
 
+    # ack_url is auto-derived from initial_pose_url; override if you ever
+    # split the server's read and ack endpoints behind different hosts:
+    #   -p ack_url:=http://192.168.1.42:5002/set_initial_pose/tb3_1/ack
+
 POST body schema (POST -> {server_url})
 ---------------------------------------
     {
@@ -93,11 +97,18 @@ class PoseBridge(Node):
         self.declare_parameter('robot_id',         'tb3_1')
         self.declare_parameter('server_url',       'http://localhost:5002/pose')
         self.declare_parameter('initial_pose_url', 'http://localhost:5002/set_initial_pose')
+        # ack_url is empty by default → derived from initial_pose_url +
+        # /<robot_id>/ack. Override only if the server splits read and
+        # ack endpoints across hosts.
+        self.declare_parameter('ack_url',          '')
         self.declare_parameter('rate_hz',          10.0)
 
         self._robot_id         = str(self.get_parameter('robot_id').value)
         self._server_url       = str(self.get_parameter('server_url').value)
         self._initial_pose_url = str(self.get_parameter('initial_pose_url').value)
+        ack_url_param          = str(self.get_parameter('ack_url').value)
+        self._ack_url          = ack_url_param or self._derive_ack_url(
+            self._initial_pose_url, self._robot_id)
         rate                   = float(self.get_parameter('rate_hz').value)
 
         self._base_frame  = f'{self._robot_id}_base_link'
@@ -140,7 +151,26 @@ class PoseBridge(Node):
         self.get_logger().info(
             f'ros_pose_bridge: robot_id={self._robot_id} '
             f'-> {self._server_url} @ {rate:.1f} Hz '
-            f'(initial-pose poll: {self._initial_pose_url})')
+            f'(initial-pose poll: {self._initial_pose_url}, '
+            f'ack: {self._ack_url})')
+
+    @staticmethod
+    def _derive_ack_url(initial_pose_url: str, robot_id: str) -> str:
+        """Derive the per-robot ack URL from the initial-pose poll URL.
+
+        The poll URL may be:
+          - the legacy single-queue endpoint:  .../set_initial_pose
+          - the per-robot endpoint:            .../set_initial_pose/<rid>
+
+        In both cases the ack endpoint is .../set_initial_pose/<rid>/ack;
+        we just normalise away any trailing /<rid> the user already gave
+        us so we don't end up with .../<rid>/<rid>/ack."""
+        base = initial_pose_url.rstrip('/')
+        # Drop a trailing /<robot_id> if it's there.
+        suffix = '/' + robot_id
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+        return f'{base}/{robot_id}/ack'
 
     # ----------------------------------------------------------- callbacks
 
@@ -287,6 +317,17 @@ class PoseBridge(Node):
         self.get_logger().info(
             f'Published initial pose: x={x:.2f} y={y:.2f} '
             f'yaw={math.degrees(yaw):.0f}deg, seq={seq}')
+
+        # Tell the server we actually consumed this hint. The GUI polls
+        # /pose_hint_status/<rid> and uses this ack to flip the 📍 button
+        # label from "matching..." to "hint published" — closing the
+        # observability gap between click and green pill.
+        # Best-effort: if the server is old (no /ack endpoint), it returns
+        # 404 and we silently ignore. Same for transient network errors.
+        try:
+            requests.post(self._ack_url, json={'seq': seq}, timeout=0.5)
+        except requests.exceptions.RequestException:
+            pass
 
 
 def main(args=None):

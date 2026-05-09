@@ -445,7 +445,20 @@ T1 (rtabmap):      Transformed map accordingly to last localization pose saved
                    in database! nearest id = NN of last pose = xyz=...
 ```
 
-Within 1-2 seconds, in the GUI:
+What you see in the **GUI button** itself, in order, after you click:
+
+| Button label | What it means |
+|---|---|
+| `✓ R1 pose sent — awaiting bridge…` | Server queued the hint. We are now polling `/pose_hint_status/<rid>`. |
+| `✓ R1 hint published (seq=N)` | Bridge confirmed it published `seq=N` to `/initialpose`. RTAB-Map should converge in 1-2 sec. **Look at the pill next.** |
+| `⚠ R1 hint not acked — bridge down?` | 6 sec passed and the bridge never confirmed. T3's `ros_pose_bridge.py` probably isn't running, or it can't reach the Flask server. Restart T3 and re-click 📍. |
+
+The "hint published" → "pill green" transition is what closes the loop:
+once you see "hint published", any further failure is on the RTAB-Map /
+visual-matching side, not the GUI / bridge plumbing side. That cuts the
+debugging space in half.
+
+Within 1-2 seconds of "hint published", in the GUI:
 - The pill turns **green**: `LOC: LIVE x.xx,y.yy`
 - A **cyan cone marker appears** at the position you clicked, pointing
   in the direction you set
@@ -647,7 +660,10 @@ depth-to-laser + Slam Toolbox per `HANDOFF_TO_TAN.md`.
 | `interface/loc_doctor.py` | Bug fix: numpy covariance truthiness |
 | `scripts/drive_box.py` | **Optional** automated mapping drive — see [§ below](#auto-box). Phase 2 uses teleop by default. |
 | `scripts/inject_initialpose.py` | CLI fallback for Set Initial Pose |
-| `interface/index.html`, `server.py`, `ros_pose_bridge.py` | Unchanged from main — used as-is |
+| `interface/server.py` | Adds `POST /set_initial_pose/<id>/ack` and `GET /pose_hint_status/<id>` so the GUI can show whether the bridge actually consumed the hint. Backward-compatible — old bridges that don't ack still work, the GUI just falls into the "bridge down?" warning state after 6 sec. |
+| `interface/ros_pose_bridge.py` | Calls the new `/ack` endpoint after publishing `/initialpose`. New `ack_url` param (auto-derived from `initial_pose_url`); ack is best-effort, missing endpoint on an old server is silently ignored. |
+| `interface/index.html` | 📍 button now polls `/pose_hint_status/<id>` after click and updates its own label: "awaiting bridge…" → "hint published (seq=N)" or "hint not acked — bridge down?" |
+| `interface/test_server_endpoints.py` | Pure-Python smoke test (no ROS) covering the new ack/status endpoints + multi-robot isolation. Run: `python3 interface/test_server_endpoints.py` |
 
 ---
 
