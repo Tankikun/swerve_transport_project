@@ -1,335 +1,278 @@
-# Navigation Pipeline — `navigation_node.py` end-to-end
+# Navigation Pipeline — Technical Reference
 
-This document walks the *control flow* from "user clicks goal in the
-browser" all the way to "individual robot wheels turn." It covers the
-five layers your friend's swerve-formation system uses.
+Companion to **README.md**. This file is the engineering spec: every data
+boundary, every JSON field, every ROS topic, plus academic citations for
+each algorithm in the stack. Read this when the README is too vague.
 
-```
-       BROWSER                      SERVER                ROBOT (running navigation_node)
-  ┌────────────────┐         ┌────────────────────┐    ┌──────────────────────────────────┐
-  │  index.html    │  POST   │   server.py        │    │  navigation_node.py              │
-  │  3D view       │ /plan   │                    │    │                                  │
-  │  click goal    │ ──────▶ │  → astar_planner   │    │  /navigation/goal       (Twist)  │
-  │  click Plan    │         │     compute_plan   │    │  /navigation/waypoints  (PoseArr)│
-  │                │         │                    │    │  /navigation/obstacles  (PoseArr)│
-  │  yellow path   │ ◀──poll │  writes            │    │                                  │
-  │  appears       │ /path…  │  path_plan.json    │    │  → APF planner (10 Hz)           │
-  └────────────────┘         └────────────────────┘    │  → velocity ramp                 │
-                                                       │  → /virtual_center/cmd_vel       │
-                                                       │     (Twist)                      │
-                                                       └────────────┬─────────────────────┘
-                                                                    │
-                                                       ┌────────────▼─────────────────────┐
-                                                       │  laplacian_formation_node (each  │
-                                                       │  robot runs its own copy)        │
-                                                       │                                  │
-                                                       │  reads /virtual_center/cmd_vel   │
-                                                       │  reads own /ekf/odom             │
-                                                       │  computes own offset correction  │
-                                                       │  publishes /{robot_id}/cmd_vel   │
-                                                       └────────────┬─────────────────────┘
-                                                                    │
-                                                       ┌────────────▼─────────────────────┐
-                                                       │  Swerve drive module (firmware)  │
-                                                       │  applies wheel velocities        │
-                                                       └──────────────────────────────────┘
-```
-
-The five layers, top-to-bottom, are:
-
-1. **Goal pose acquisition** — where the goal comes from
-2. **Grid-based global planning** — A\* on the inflated occupancy grid
-3. **Local control + velocity shaping** — APF + velocity ramp + slow-on-approach
-4. **Formation keeping** — virtual center + Laplacian consensus
-5. **Wheel-level execution** — swerve module response
+> **Two stacks, one algorithm.** The same `compute_plan()` is used in two
+> integrations:
+>
+> | | **Mac dev sandbox** | **Deployed system** (per Tankhun's spec) |
+> |---|---|---|
+> | Goal in | `POST /plan` (JSON) or `/goal_pose` via rosbridge | `/goal_pose` (`PoseStamped`) on Zenoh |
+> | Path out | `path_plan.json` on disk + `/navigation/waypoints` over rosbridge | `/formation/path` (`PoseArray`, latched / `transient_local`) |
+> | Footprint | scalar `formation_radius` arg | `/formation/footprint` (`Polygon`); planner converts to bounding-circle radius |
+> | Robot poses | single `start` arg | both `/tb3_0/pose` + `/tb3_1/pose` → midpoint = virtual center |
+> | Map source | `map.json` on disk (preprocessed) | `map.json` loaded once at node startup (long-term: read `lab.db` directly) |
+>
+> Section 3 describes the dev-sandbox wire format. Section 6 (added) is the
+> deployed-system equivalent. The algorithm itself (sections 4-5) is shared.
 
 ---
 
-## Layer 1 — Goal pose acquisition
+## 1. End-to-end workflow
 
-Two paths feed the navigation node a goal:
+```
++---------------------+        (1)        +---------------------+
+| RTAB-Map .db file   |  rtabmap-export   | ASCII PLY cloud     |
+| (tb3_1_room.db)     | ----------------> | (xyz + rgb)         |
++---------------------+                   +---------------------+
+                                                    |
+                                                    | (2) SOR + DBSCAN, build_map_json
+                                                    v
+                                          +---------------------+
+                                          | map.json (raw)      |
+                                          +---------------------+
+                                                    |
+                                       (3) inpaint_floor.py (in-place)
+                                                    v
+                                          +---------------------+
+                                          | map.json (filled)   |
+                                          +---------------------+
+                                                    |
+                                       (4) tighten_obstacles.py
+                                                    v
+                                          +---------------------+
+                                          | map.json (cleaned)  |
+                                          +---------------------+
+                                                    |
+                                       (5) Flask server.py loads it on startup
+                                                    v
+                                          +---------------------+
+                                          | server.py + browser |
+                                          | (index.html, three.js)
+                                          +---------------------+
+                                                    |
+                                       (6) user clicks Plan  ->  POST /plan
+                                                    v
+                                       compute_plan() -> path_plan.json on disk
+                                                    |
+                                       (7) Send Goal -> publishWaypointsToROS
+                                                    v
+                                          +---------------------+
+                                          | rosbridge_server    |
+                                          | (websocket, port 9090)
+                                          +---------------------+
+                                                    |
+                                       (8) /navigation/waypoints (PoseArray)
+                                                    v
+                                          +---------------------+
+                                          | navigation_node.py  |
+                                          | (Pi, ROS 2)         |
+                                          | _waypoints_cb       |
+                                          +---------------------+
+                                                    |
+                                       (9) /virtual_center/cmd_vel (Twist)
+                                                    v
+                                          laplacian_formation_node -> per-wheel
+                                                    |
+                                       (10) serial -> OpenCR firmware -> motors
+```
 
-| Source | Topic | Trigger |
+Steps 1–7 run on the **Mac**. Steps 8–10 run on the **Raspberry Pi**.
+
+---
+
+## 2. Mac side vs Pi side
+
+| Layer | Where it runs | Lives in |
 |---|---|---|
-| Web UI "Send Goal" button | `/goal_pose` (PoseStamped, Nav2 standard) | User clicks goal in 3D view, presses "Send Goal" |
-| Web UI "Plan Path" button | `/path_plan.json` (HTTP, polled by UI) | User clicks Plan; result is a precomputed waypoint list |
-| Direct CLI / external | `/navigation/goal` (Twist, navigation_node native) | Programmatic |
-
-Internally `navigation_node.py` accepts:
-
-```python
-self.create_subscription(Twist,     '/navigation/goal',      self._goal_cb,      10)
-self.create_subscription(PoseArray, '/navigation/waypoints', self._waypoints_cb, 10)
-```
-
-The Twist convention used (line 87, navigation_node.py):
-
-```
-linear.x   = goal x in map frame
-linear.y   = goal y in map frame
-angular.z  = goal yaw (rad)
-```
-
-When a goal arrives, the leader's `_goal_cb` clears any pending waypoints
-and stores the new goal as `self._current_wp`.
+| Map building (rtabmap-export, SOR, DBSCAN, RANSAC) | Mac | `db_to_map_json.py` |
+| Floor inpainting (closing + flood-fill) | Mac | `inpaint_floor.py` |
+| Obstacle tightening (3D-evidence rescue) | Mac | `tighten_obstacles.py` |
+| A\* + APF refine + arc-resample (planning) | Mac | `astar_planner.py:compute_plan` |
+| HTTP/JSON server, `/plan` endpoint, `path_plan.json` writer | Mac | `server.py` |
+| 3D viewer, click-to-set-pose, **Send Goal** button | Mac (browser) | `index.html` |
+| ROS bridge (websocket → ROS 2 topic) | either Mac or Pi | `rosbridge_server` (external) |
+| Pure-pursuit + APF safety + ramp + 2-phase arrival | **Pi** | `swerve_transport_project/.../navigation_node.py` |
+| EKF (odometry fusion) | **Pi** | `swerve_transport_project/.../ekf_node` |
+| Formation control (leader → follower offsets) | **Pi** | `swerve_transport_project/.../laplacian_formation_node.py` |
+| Per-wheel kinematics, serial protocol | **Pi** | swerve_formation package |
+| Motor PID + encoder loop | OpenCR microcontroller | OpenCR C++ firmware |
 
 ---
 
-## Layer 2 — Grid-based global planning (A\*)
+## 3. Data schemas at each boundary
 
-Triggered when the user presses **Plan Path** in the web UI. Server-side flow:
+### 3.1 `map.json` (Mac, written by `db_to_map_json.py` ± `inpaint_floor.py` ± `tighten_obstacles.py`)
 
-1. `POST /plan` arrives at `server.py` with `{start: {x, y}, goal: {x, y}}`
-2. Server calls `astar_planner.compute_plan(map, start, goal, formation_radius)`
-3. `compute_plan()` does:
-   1. **Inflate** the occupancy grid by `formation_radius` (so the virtual
-      center can never be placed where any robot in the formation would
-      collide)
-   2. **A\*** with 8-connected Euclidean heuristic on the inflated grid
-   3. **Simplify** with line-of-sight (Bresenham) — drops collinear waypoints
-   4. **Per-robot tracks**: each robot's expected path = VC waypoints +
-      its `offset_local` rotated by the path heading
-4. Server writes `path_plan.json` with `seq` counter
-5. Browser polls `path_plan.json`, renders yellow line + envelope rings on the floor
+| Field | Python type | Shape / units | Description |
+|---|---|---|---|
+| `metadata.resolution` | float | meters per cell | grid cell size (default 2 cm) |
+| `metadata.floor_z` | float | meters (Z-up) | RANSAC floor height |
+| `metadata.robot_height` | float | meters | passes through to envelope filter |
+| `metadata.robot_clearance` | float | meters | added on top of `robot_height` |
+| `metadata.min_x, min_y, max_x, max_y` | float | meters, world frame | bbox of the cloud |
+| `metadata.grid_width, grid_height` | int | cells | shape of `grid` |
+| `metadata.point_count` | int | count | length of `points` |
+| `metadata.axis_convention` | str | `"z-up"` | REP-103 frame tag |
+| `grid` | `list[list[int]]` | `H × W`, values `{0,1,2}` | 0 = unknown, 1 = ground, 2 = obstacle |
+| `points` | `list[[float, float, float]]` | `N × 3`, meters | downsampled cloud (for the 3D viewer) |
+| `colors` | `list[[int, int, int]]` | `N × 3`, 0–255 | per-point RGB |
 
-Key A\* properties (`astar_planner.py`):
+`inpaint_floor.py` only mutates `grid` (unknown → ground via closing + flood-fill). `tighten_obstacles.py` only mutates `grid` (ground → obstacle when above-floor evidence exceeds a threshold). Neither rewrites `metadata` or `points`.
 
-- **Heuristic**: `math.hypot(c - gc, r - gr)` — Euclidean distance, admissible & consistent
-- **Cost per move**: 1.0 for cardinal, √2 for diagonal
-- **Corner-cutting prevention**: rejects diagonals that squeeze through obstacle pairs
-- **Inflation**: `ndimage.binary_dilation(obstacles, iterations=ceil(radius/cell))`
+### 3.2 `path_plan.json` (Mac, written by `server.py:/plan`)
 
-The output of A\* is fed to the navigation node as a `PoseArray` on
-`/navigation/waypoints`. Each pose is a (x, y, yaw) target; the leader
-visits them in order.
+| Field | Python type | Shape / units | Description |
+|---|---|---|---|
+| `metadata.formation_radius` | float | meters | radius **actually used** (post-cascade) |
+| `metadata.formation_radius_requested` | float | meters | what the caller asked for |
+| `metadata.radius_reduced` | bool | — | `true` if cascade had to shrink |
+| `metadata.cascade_attempts` | `list[[float, str]]` | (radius_m, status) | e.g. `[[0.45,"no path"], [0.36,"ok"]]` |
+| `metadata.vc_distance` | float | meters | total polyline length of the VC path |
+| `metadata.travel_time_sec` | float | seconds | `vc_distance / 0.18` (MAX_LINEAR estimate) |
+| `metadata.inflation_iters` | int | cells | `ceil(used_radius / resolution)` |
+| `metadata.inflation_cells` | int | cell count | obstacle-halo cells (for viewer) |
+| `metadata.start_snap_dist` | float | meters | how far the start was relocated |
+| `metadata.goal_snap_dist` | float | meters | same for the goal |
+| `metadata.target_spacing` | float | meters | arc-length resampling spacing (0 = off) |
+| `metadata.yaw_policy` | str | `"tangent"` / `"free"` / `"smooth_to_goal"` | controller behavior selector |
+| `metadata.start_yaw` | float | radians | requested start yaw |
+| `metadata.goal_yaw` | float | radians | requested goal yaw |
+| `metadata.navigable_bounds` | dict or null | min/max x/y, cells, area_m² | reachable region (main connected component) |
+| `metadata.map_bounds` | dict | min/max x/y in meters | grid extent in world frame |
+| `virtual_center.start` | `[float, float]` | meters | snapped VC start |
+| `virtual_center.goal` | `[float, float]` | meters | snapped VC goal |
+| `virtual_center.path_raw` | `list[[float, float]]` | meters | unsimplified A\* output |
+| `virtual_center.waypoints` | `list[[float, float]]` | meters | simplified + APF-shifted + arc-resampled |
+| `virtual_center.headings` | `list[float]` | radians | path-tangent yaw at each waypoint |
+| `robots[i]` | dict | per robot | `{name, offset_local:[dx,dy], color, track:list[[x,y]], start, goal}` |
+| `inflation_cells` | `list[[int, int]]` | (col, row) pairs | halo cells (for viewer overlay) |
+| `seq` | int | monotonic counter | bumped per replan |
+| `wall_clock_iso` | str | ISO-8601 UTC | timestamp |
+| `start_source` | str | `"explicit (user click)"` or live-pose | added by `/plan` only |
 
----
+### 3.3 What the **Pi actually receives** (the headline answer)
 
-## Layer 3 — Local control + velocity shaping
+The browser publishes via rosbridge ([index.html:1320](index.html)):
 
-This is where your friend's APF + velocity ramp lives, in
-`navigation_node.py:_apf_velocity()` (lines 195–248) and
-`_apply_ramp()` (lines 257–276).
+- **Topic**: `/navigation/waypoints`
+- **Message type**: `geometry_msgs/msg/PoseArray`
 
-### 3a — Attractive force (toward current waypoint)
+PoseArray wire format:
 
-```python
-to_goal = goal - position
-d_goal  = ||to_goal||
-f_att   = K_ATT * to_goal / d_goal       # unit vector × K_ATT
-```
+| Field | Type | Value |
+|---|---|---|
+| `header.frame_id` | string | `"map"` |
+| `header.stamp` | `builtin_interfaces/Time` | `{secs:0, nsecs:0}` (browser does NOT stamp time — see §4 risks) |
+| `poses[i].position.x` | float64 | meters, world X (= `wp[0]`) |
+| `poses[i].position.y` | float64 | meters, world Y (= `wp[1]`) |
+| `poses[i].position.z` | float64 | hardcoded `0.0` |
+| `poses[i].orientation.{x, y}` | float64 | `0` (yaw-only quaternion) |
+| `poses[i].orientation.z` | float64 | `sin(yaw / 2)` |
+| `poses[i].orientation.w` | float64 | `cos(yaw / 2)` |
 
-This is a **conic** attraction (constant magnitude regardless of distance),
-which prevents the robot from lunging at far-away goals.
+For all interior poses, `yaw = headings[i]` (path tangent). For the **final pose**, `yaw = goal.yawRad` if the user moved the orientation slider, otherwise the last heading. This is how `goal_yaw` survives the rosbridge crossing.
 
-### 3b — Repulsive force (away from each obstacle)
+**The Pi receives ONLY the PoseArray.** The entire `metadata` block (cascade_attempts, vc_distance, navigable_bounds, etc.) lives in `path_plan.json` for the GUI's benefit and is NOT transmitted. `_waypoints_cb` ([navigation_node.py:243](../swerve_transport_project/ros2_ws/src/swerve_formation/swerve_formation/navigation_node.py)) decodes each Pose into `np.array([x, y, yaw])` — that's all the Pi sees: a list of `(x, y, yaw)` triples in the `map` frame.
 
-```python
-for each (cx, cy, r) in obstacles:
-    r_eff = r + SAFETY                   # inflate by formation half-width
-    d     = (distance from robot to obstacle surface)
-    if d < D_REP:
-        f_rep += K_REP * (1/d - 1/D_REP) / d² * (away direction)
-```
+### 3.4 Why `geometry_msgs/PoseArray`?
 
-Khatib's classical formulation. Force grows as 1/d² near the obstacle and
-goes to zero at `D_REP = 1.2 m`. `SAFETY = formation half-width` ensures
-the **whole formation** clears, not just the virtual center.
-
-### 3c — Distance-based slowdown ⭐ (this is the bit you asked about)
-
-```python
-speed = min(MAX_LINEAR, f_mag)           # cap at robot top speed (0.18 m/s)
-if d_goal < SLOW_RADIUS:                 # within 40 cm of waypoint
-    speed *= d_goal / SLOW_RADIUS        # linearly scale to zero
-v_des = (speed / f_mag) * f_total
-```
-
-The closer the formation gets to its waypoint, the slower it moves. At
-`d_goal = 0.40 m` it's at full speed; at `d_goal = 0.20 m` it's at half
-speed; at `d_goal = 0` it's stopped. **This is what keeps the robot on
-track** — no overshoot, no oscillation around the waypoint.
-
-### 3d — Velocity ramp (anti-jerk)
-
-```python
-dv     = v_des - v_actual
-max_dv = ACC_MAX * DT                    # 0.15 m/s² × 0.05 s = 7.5 mm
-if ||dv|| > max_dv:
-    v_actual += (max_dv / ||dv||) * dv   # take only the allowed step
-else:
-    v_actual = v_des
-```
-
-Same idea on yaw: `omega_actual` only changes by `±ALPHA_MAX·DT` per tick.
-This filter sits **between** APF and the publish, so even if APF demands
-a sudden velocity flip, the wheels never get told to flip suddenly. Saves
-the gear teeth and keeps the formation tight.
-
-### 3e — Heading control
-
-```python
-desired_heading = atan2(v_des.y, v_des.x)    # face direction of motion
-omega_des       = K_HEADING * wrap(desired_heading - current_heading)
-```
-
-Proportional yaw controller. Drives the formation's facing direction to
-match its velocity vector. Near the goal (when `||v_des|| < 5 cm/s`),
-switches to the goal's specified yaw instead.
-
-### 3f — Output
-
-```python
-cmd.linear.x  = vx_body            # forward in the formation's own frame
-cmd.linear.y  = vy_body            # left in the formation's own frame
-cmd.angular.z = omega_actual
-self._cmd_pub.publish(cmd)         # → /virtual_center/cmd_vel
-```
+It's the **ROS-standard "ordered list of 6-DoF poses."** Nav2's planners (`PathToPoses`, `ComputePathThroughPoses`) and most ROS 2 visualisation tools (RViz `PoseArray` display, `nav2_smoother`) consume exactly this type. By emitting it directly, the Pi-side `navigation_node` is interchangeable with any Nav2-compatible planner — the laptop just slots in where Nav2 would. A custom dict would have meant a custom `.msg` definition, package rebuild on the Pi, and rosbridge-side type registration. PoseArray is the lowest-friction choice.
 
 ---
 
-## Layer 4 — Formation keeping (Laplacian consensus)
+## 4. Open questions / risks
 
-The leader's `navigation_node` only cares about the **virtual center**.
-Each individual robot runs its own copy of `laplacian_formation_node.py`
-that:
-
-1. Subscribes to `/virtual_center/cmd_vel` (the leader's published command)
-2. Subscribes to its own `/ekf/odom` (where it actually is)
-3. Knows its **assigned offset** from the virtual center (e.g. leader =
-   +25 cm forward, follower = −25 cm)
-4. Runs a **Laplacian consensus** correction: each tick, compute the
-   delta between current-offset and desired-offset, generate a velocity
-   correction that closes the gap, add it to the virtual-center cmd_vel
-5. Publish to its own `/{robot_id}/cmd_vel`
-
-This is the "ghostlab follower car" pattern. The leader follows the path,
-the follower stays at its offset, the formation holds shape because each
-robot independently corrects toward the virtual center.
-
-The math (simplified, single-axis):
-
-```
-own_offset_world  = own_pose - virtual_center_pose      (current)
-want_offset_world = R(yaw_VC) * own_offset_local        (desired, rotated to world)
-correction        = K_FORMATION * (want_offset_world - own_offset_world)
-cmd_robot         = cmd_VC + correction
-```
-
-`K_FORMATION` is the consensus gain. Higher = tighter formation, more
-oscillation. Lower = loose formation, smoother but laggy.
-
-The "Laplacian" name comes from the fact that this is a special case of
-graph-Laplacian consensus dynamics — the robots converge on a fixed
-relative configuration around the virtual center.
+1. **Metadata is stripped at the rosbridge boundary.** If `goal_yaw` ever needs to differ from the final-segment tangent (it currently does — see [index.html:1329-1335](index.html)), it is encoded only in `poses[-1].orientation`. Anyone reusing this pipeline must remember the `metadata` block is Mac-only.
+2. **Header stamp is hardcoded `{0, 0}`** ([index.html:1345](index.html)). Anything downstream that filters by message age (tf2 lookups, message_filters) will see "ancient" messages. The Pi node ignores the stamp, but RViz playback and rosbag introspection look wrong.
+3. **`frame_id` is hardcoded `"map"`.** If the EKF publishes odom under a different parent frame, waypoints will be misinterpreted. There is no TF check on the Pi side.
+4. **The 0.18 m/s travel-time estimate is a UI hint only.** Firmware cap is 0.198 m/s — off by ~10%.
+5. **Path is published one-shot, no ack.** In the dev sandbox a dropped websocket frame loses the entire plan; the Pi has no `/navigation/waypoints/status` topic to surface failure. The recovery is to re-run **Plan Path**, which re-writes `path_plan.json` and re-publishes the waypoints. (Note: **Send Goal** publishes the goal pose alone — it is not a path re-publish.) The deployed system avoids this class of failure entirely by using `transient_local` QoS on `/formation/path`: late subscribers and reconnections receive the latched plan automatically.
 
 ---
 
-## Layer 5 — Obstacle avoidance (cross-cutting)
+## 5. Algorithms & Citations
 
-Two kinds of obstacles enter the system, both via `/navigation/obstacles`
-(PoseArray, line 33 of navigation_node.py):
+This stack is built almost entirely from classical, peer-reviewed algorithms — the contribution of the work is the integration and tuning, not new theory. Below is the canonical reference for each component.
 
-| Source | What it represents |
+### Map preparation (Stage 1)
+
+1. **RANSAC plane fit** — Fischler & Bolles · 1981 · *Communications of the ACM* 24(6):381–395 · [DOI](https://dl.acm.org/doi/10.1145/358669.358692) — random-sample consensus for robust model fitting under heavy outliers; here used to extract the dominant floor plane.
+2. **DBSCAN** — Ester, Kriegel, Sander & Xu · 1996 · *Proc. 2nd KDD*, 226–231 · [PDF](https://file.biolab.si/papers/1996-DBSCAN-KDD.pdf) — density-based spatial clustering that finds arbitrary-shape clusters and rejects noise; used to drop small disconnected obstacle blobs.
+3. **Statistical Outlier Removal (SOR)** — Rusu, Marton, Blodow, Dolha & Beetz · 2008 · *Robotics and Autonomous Systems* 56(11):927–941 · [DOI](https://www.sciencedirect.com/science/article/abs/pii/S0921889008001140) — per-point mean-k-NN-distance thresholding (μ ± k·σ); the canonical PCL formulation re-implemented here in pure SciPy.
+4. **Morphological closing & flood-fill** — no single canonical paper. Soille · 2003 · *Morphological Image Analysis: Principles and Applications*, 2nd ed., Springer · [book](https://link.springer.com/book/10.1007/978-3-662-05088-0); and Vincent · 1993 · *IEEE Trans. Image Processing* 2(2):176–201 · [IEEE](https://ieeexplore.ieee.org/document/217222/) — efficient queue-based reconstruction that underlies modern flood-fill.
+5. **Minkowski-sum C-space inflation** — Latombe · 1991 · *Robot Motion Planning*, Kluwer (Springer reprint) · [book](https://link.springer.com/book/10.1007/978-1-4615-4022-9) — inflate occupancy by robot radius via binary dilation so the robot can be planned as a point.
+6. **Singleton-noise pre-filter (neighbour-count test)** — drop obstacle pixels whose 3×3 neighbourhood contains no other obstacle pixel. Replaces an earlier `binary_opening` step that silently eroded 1-cell-thick walls (chair legs, baseboards) at the 2 cm grid resolution. The neighbour-count test preserves any pixel on a connected wall (≥ 1 neighbour) while still removing isolated salt-and-pepper noise. Soille 2003 (above) covers the morphological foundations.
+
+### Path planning (Stage 2)
+
+7. **A\* search** — Hart, Nilsson & Raphael · 1968 · *IEEE Trans. Systems Science and Cybernetics* 4(2):100–107 · [IEEE](https://ieeexplore.ieee.org/document/4082128/) — optimal best-first search under an admissible heuristic.
+8. **Bresenham's line algorithm** — Bresenham · 1965 · *IBM Systems Journal* 4(1):25–30 · [IEEE](https://ieeexplore.ieee.org/document/5388473/) — integer-only incremental line rasterisation, used here for grid line-of-sight tests.
+9. **String-pulling / any-angle smoothing (Theta\*-family)** — Daniel, Nash, Koenig & Felner · 2010 · *Journal of Artificial Intelligence Research* 39:533–579 · [JAIR](https://jair.org/index.php/jair/article/view/10676) — removes grid-aligned heading bias by replacing intermediate vertices with line-of-sight shortcuts.
+10. **Khatib Artificial Potential Field** — Khatib · 1986 · *Int. Journal of Robotics Research* 5(1):90–98 · [Sage](https://journals.sagepub.com/doi/10.1177/027836498600500106) — conic attraction to the goal plus 1/d² obstacle repulsion for real-time refinement.
+11. **Pure-pursuit waypoint follower** — Coulter · 1992 · *CMU-RI-TR-92-01*, Carnegie Mellon Robotics Institute · [PDF](https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf) — geometric path tracker that aims at a look-ahead point on the path.
+12. **Trapezoidal velocity profile** — no single canonical paper. Lynch & Park · 2017 · *Modern Robotics: Mechanics, Planning, and Control*, Cambridge University Press, §9.2 · [book](https://www.cambridge.org/core/books/modern-robotics/57C3BB1C6D5CB40320FA96E5FA3BCEC6).
+
+### Multi-robot formation (Stage 3, planned)
+
+13. **Laplacian consensus formation control** — Olfati-Saber, Fax & Murray · 2007 · *Proceedings of the IEEE* 95(1):215–233 · [IEEE](https://ieeexplore.ieee.org/document/4118472/) — survey/foundation of graph-Laplacian consensus protocols for networked multi-agent coordination, including formation control.
+
+### Utilities
+
+14. **Arc-length resampling of polylines** — no single canonical paper. Farin · 2002 · *Curves and Surfaces for CAGD: A Practical Guide*, 5th ed., Morgan Kaufmann · [book](https://www.sciencedirect.com/book/9781558607378/curves-and-surfaces-for-cagd) — standard CG/CAGD chord-length parameterisation.
+15. **RTAB-Map RGB-D Visual SLAM** — Labbé & Michaud · 2019 · *Journal of Field Robotics* 36(2):416–446 · [Wiley](https://onlinelibrary.wiley.com/doi/abs/10.1002/rob.21831) — real-time appearance-based mapping with memory management; the upstream source of `tb3_1_room.db`.
+
+### Implementation map
+
+| Algorithm | File |
 |---|---|
-| `map_to_obstacles_node` (extracts blobs from `map.json` once at startup) | Static map obstacles (walls, tire stack, the static panel) |
-| Some perception node (future, not yet wired) | Dynamic obstacles (other robots in the swarm, people, moving objects) |
-
-Each obstacle is published as `(pose.position.x, pose.position.y,
-pose.position.z=radius)`. The APF in Layer 3b automatically generates a
-repulsive force away from each one, with `SAFETY` inflation matching the
-formation's footprint.
-
-For static obstacles, A\* in Layer 2 already accounted for them
-(inflation makes the path avoid them at the global scale). The APF
-repulsion in Layer 3 is then a **safety net** for things that change
-between plan and execute (like a robot drifting slightly off-path).
+| 1, 2, 3 | `db_to_map_json.py` |
+| 4 | `inpaint_floor.py` |
+| 5, 6, 7, 8, 9 | `astar_planner.py` |
+| 10 | `astar_planner.py:apf_refine_path` and `navigation_node.py:_apf_velocity` |
+| 11 | `sim_navigator.py:pure_pursuit_target` and `navigation_node.py:_pure_pursuit_target` |
+| 12 | `sim_navigator.py:_apply_ramp` and `navigation_node.py:_apply_ramp` |
+| 13 | `swerve_transport_project/.../laplacian_formation_node.py` (planned) |
+| 14 | `astar_planner.py:arclength_resample` |
+| 15 | upstream — `tb3_1_room.db` is generated by RTAB-Map |
 
 ---
 
-## Putting it all together — one tick of the leader's control loop
+## 6. Deployed-system wire format (ROS 2)
 
-```
-1. _control_loop() fires (20 Hz)
-   ├─ if not leader → return
-   ├─ if no waypoint → return
-   │
-2. Check goal-tolerance (5 cm)
-   ├─ if reached → pop next waypoint or finish
-   │
-3. APF compute_velocity()
-   ├─ f_att = K_ATT × unit(goal − pos)            ← attractive
-   ├─ f_rep = Σ K_REP × decay(d) × n̂              ← repulsive (each obstacle)
-   ├─ speed = clamp(||f_total||, 0, MAX_LINEAR)
-   ├─ if d_goal < SLOW_RADIUS:                    ← *distance-based slowdown*
-   │     speed *= d_goal / SLOW_RADIUS            ←   keeps the formation
-   ├─ v_des = (speed / ||f_total||) × f_total      ←   on track
-   ├─ omega_des = K_HEADING × yaw_error
-   │
-4. Velocity ramp
-   ├─ v_actual += clamp(v_des − v_actual, ±ACC_MAX·DT)
-   ├─ omega_actual += clamp(omega_des − omega_actual, ±ALPHA_MAX·DT)
-   │
-5. World → body frame transform
-   ├─ vx_body =  v_actual.x cos(θ) + v_actual.y sin(θ)
-   ├─ vy_body = −v_actual.x sin(θ) + v_actual.y cos(θ)
-   │
-6. Publish
-   ├─ /virtual_center/cmd_vel (Twist)             ← read by every robot
-   ├─ /navigation/status      (String)            ← UI / monitoring
-```
+In Tankhun's architecture the planner is a ROS 2 node `path_planner_node`
+on the laptop, not a Flask app. The algorithm is the same; only the I/O
+layer differs from section 3.
 
-Each follower does (also at 20 Hz):
+**Subscriptions**
 
-```
-1. Read /virtual_center/cmd_vel
-2. Read own /ekf/odom
-3. Look up assigned offset from VC
-4. Compute consensus correction
-5. Publish /{robot_id}/cmd_vel  ← swerve drive
-```
+| Topic | Type | When | Notes |
+|---|---|---|---|
+| `/goal_pose` | `geometry_msgs/PoseStamped` | on user submit | from Flask UI on laptop |
+| `/formation/footprint` | `geometry_msgs/Polygon` | on change | convex envelope around all robots + payload (from `formation_size_node`); the planner converts to a bounding-circle radius |
+| `/tb3_0/pose` | `geometry_msgs/PoseStamped` | 20 Hz | fused odom + RTAB pose from `ekf_node` on tb3_0 |
+| `/tb3_1/pose` | `geometry_msgs/PoseStamped` | 20 Hz | same, on tb3_1 |
 
----
+**Publication**
 
-## Tuning cheat sheet
+| Topic | Type | QoS | Notes |
+|---|---|---|---|
+| `/formation/path` | `geometry_msgs/PoseArray` | `transient_local` (latched), depth 1, reliable | one-shot per goal; late subscribers (e.g., a follower's dormant `path_follower_node` after a leader handover) receive the cached plan automatically |
 
-| What you'd change | Where | Effect |
-|---|---|---|
-| Make formation tighter | `K_FORMATION` ↑ in laplacian_formation_node | Robots correct faster, may oscillate |
-| Slower deceleration on approach | `SLOW_RADIUS` ↑ in navigation_node | Smoother stop, longer braking distance |
-| Avoid obstacles harder | `K_REP` ↑ or `D_REP` ↑ | Wider berth around obstacles |
-| Smoother turns | `ALPHA_MAX` ↓ | Less yaw jerk, slower direction changes |
-| Higher top speed | `MAX_LINEAR` ↑ | Watch motor current limits |
-| Plan paths more conservatively | `formation_radius` ↑ in server.py call | Inflated grid eats more space; avoids tight gaps |
+**Virtual center input.** `path_planner_node` computes
+`C = ((P0.x + P1.x)/2, (P0.y + P1.y)/2)` from the two pose subscriptions
+and passes `C` as the planner's `start`. `start_yaw` is the average of the
+two robot yaws (atan2 of summed sin/cos to handle the ±π wrap).
 
----
+**Goal yaw** is read from `goal_pose.pose.orientation.z` (yaw quaternion
+component) and passed to `compute_plan` as `goal_yaw`.
 
-## Quick references
+**Per-waypoint orientation in the published `PoseArray`** is set by
+`compute_plan`'s `headings` list (which honours `yaw_policy`):
+`pose.orientation = yaw_to_quat(heading[i])` for each waypoint.
 
-- Path planner: `astar_planner.py:compute_plan()`
-- Local control: `navigation_node.py:_apf_velocity()` and `_apply_ramp()`
-- Formation keeping: `laplacian_formation_node.py`
-- Obstacle source: `map_to_obstacles.py` extracts from `map.json`
-- Web UI: `index.html` (3D view + click-to-goal + Plan Path)
-- HTTP backend: `server.py` (`/plan`, `/goal`, `/pose`, `/set_initial_pose`)
-- Live pose: `ros_pose_bridge.py` (TF lookup → POST /pose)
-
----
-
-## Why the velocity stays on track — short answer
-
-Three layers stack to keep the robot on its planned path:
-
-1. **A\*** gives a globally optimal path that respects obstacles + formation footprint
-2. **APF attraction** at each waypoint pulls the formation toward it
-3. **Distance-based slowdown** (`speed *= d_goal / SLOW_RADIUS` when within 40 cm)
-   ensures the formation **decelerates** rather than overshooting
-
-If the formation drifts off the planned path (e.g., a follower lags), the
-**Laplacian consensus** in Layer 4 corrects each robot back toward its
-assigned offset around the virtual center. The virtual center itself
-stays on the A\*-planned path because Layer 3 keeps it there.
-
-The combination is robust: A\* handles "where," APF + slowdown handle
-"how fast," and Laplacian consensus handles "stay in formation while
-doing both."
+**Wrapper file:**
+`ros2_ws/src/swerve_formation/swerve_formation/path_planner_node.py`
+imports `astar_planner.compute_plan()` from `interface/` verbatim.

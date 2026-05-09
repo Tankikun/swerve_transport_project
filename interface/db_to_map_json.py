@@ -415,7 +415,7 @@ def build_map_json(xyz, rgb,
         is marked passable / ground if no obstacles sit in the envelope.
     """
     out_x = xyz[:, 0]
-    out_y = xyz[:, 1]    # ← negate
+    out_y = xyz[:, 1]
     out_z = xyz[:, 2]
 
     if floor_z is None:

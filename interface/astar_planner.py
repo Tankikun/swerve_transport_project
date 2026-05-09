@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -57,6 +58,13 @@ def cell_to_world(col, row, meta):
 def inflate_grid(grid, res, robot_radius):
     """Return a binary obstacle mask dilated by `robot_radius` meters.
 
+    Pre-step: drop singleton-noise pixels (an obstacle cell with NO obstacle
+    neighbours in its 3×3 window). Earlier versions used binary_opening for
+    this, but opening's default cross structuring element silently erodes
+    1-cell-thick walls — bad for 2 cm RTAB-Map output where baseboards and
+    chair legs can be one pixel wide. The neighbour-count test preserves
+    any pixel that's connected to anything else.
+
     Only TRUE obstacle cells (g==2) are inflated. 'Unknown' cells (g==0) are
     NOT treated as blocked — there are unknown patches inside indoor rooms
     where the camera didn't see (under furniture, occluded floor) and we
@@ -65,13 +73,25 @@ def inflate_grid(grid, res, robot_radius):
     For outdoor / large-area maps, callers can additionally OR with (g==0)
     before passing the grid in."""
     g = np.asarray(grid, dtype=np.int32)
-    blocked  = (g == 2)
+    raw_blocked = (g == 2)
+    # ── Pre-filter: keep only pixels with ≥1 obstacle neighbour ──────────
+    # This drops salt-and-pepper noise while preserving connected walls
+    # (a 1-cell-wide straight wall has 2 neighbours per pixel; opening would
+    #  erode it entirely, neighbour-counting keeps every cell).
+    KERNEL = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.int8)
+    n_neighbors = ndimage.convolve(raw_blocked.astype(np.int8),
+                                    KERNEL, mode='constant', cval=0)
+    blocked  = raw_blocked & (n_neighbors >= 1)
     iters    = max(1, int(math.ceil(robot_radius / res)))
     inflated = ndimage.binary_dilation(blocked, iterations=iters)
+    n_raw = int(raw_blocked.sum())
+    n_post_open = int(blocked.sum())
+    n_inflated = int(inflated.sum())
     print(f"[inflate] radius={robot_radius:.2f} m  iterations={iters} cells "
           f"(cell={res:.2f} m)")
-    print(f"[inflate] obstacle cells: {blocked.sum()} -> {inflated.sum()} "
-          f"(grew by {inflated.sum() - blocked.sum()})")
+    print(f"[inflate] obstacle cells: {n_raw} -> {n_post_open} (singleton "
+          f"filter dropped {n_raw - n_post_open} pixels) -> {n_inflated} "
+          f"(dilation grew by {n_inflated - n_post_open})")
     return inflated
 
 
@@ -202,190 +222,116 @@ def simplify(path, blocked):
     return out
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Visualization (matplotlib)
-# ────────────────────────────────────────────────────────────────────────────
+def apf_refine_path(waypoints_w, blocked, meta, formation_radius,
+                    base_step=0.30, dense_step=0.05, dense_threshold=0.30,
+                    apf_gain=0.04, max_shift=0.08, iterations=2):
+    """A* gives a topologically correct corridor; this function makes it safe
+    and smooth before sending to the robot:
 
-def visualize(meta, grid, blocked, path, simplified,
-              leader_start, goal,
-              follower_start, follower_path, follower_simplified,
-              robot_radius, formation_distance,
-              out_path):
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle, Rectangle
+      Step 1 — adaptive densification:
+        Walk every A* segment and sample intermediate points at a spacing
+        that depends on distance to the nearest obstacle.
+            far from obstacles  → coarse  (base_step,  default 30 cm)
+            near obstacles      → fine    (dense_step, default  5 cm)
 
-    g = np.asarray(grid, dtype=np.int32)
-    H, W = g.shape
-    res = meta['resolution']
+      Step 2 — APF repulsion shift:
+        For each interior waypoint, sum Khatib-style repulsive forces from
+        nearby obstacles and shift the waypoint along that vector. This
+        pushes the path away from walls/tires that the inflation halo was
+        only just barely clearing. Endpoints (start, goal) are preserved.
 
-    # Render the base map: 3 colors for unknown / ground / obstacle
-    img = np.full((H, W, 3), 0.05, dtype=float)   # unknown = nearly black
-    img[g == 1] = (0.07, 0.15, 0.15)              # ground = dark teal
-    img[g == 2] = (0.20, 0.29, 0.37)              # obstacle = blue-grey
-    inflated_only = blocked & (g != 2) & (g != 0)
-    img[inflated_only] = (0.15, 0.10, 0.05)       # inflation halo = warm dark
+    The robot then receives a denser, safer waypoint list — its on-board
+    APF is essentially a backup since the laptop pre-shifted the points.
 
-    extent = [meta['min_x'], meta['min_x'] + W * res,
-              meta['min_y'], meta['min_y'] + H * res]
+    Returns: refined list of [x, y] waypoints in world frame.
+    """
+    if len(waypoints_w) < 2:
+        return waypoints_w
 
-    # ── Two-panel layout: map (LEFT) | path planning (RIGHT) ──────────────
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(20, 11), dpi=120,
-                                    gridspec_kw={'width_ratios': [1, 1]})
+    res  = float(meta['resolution'])
+    mn_x = float(meta['min_x'])
+    mn_y = float(meta['min_y'])
 
-    # ════════════════════════════════════════════════════════════════════════
-    #  LEFT — full map context (point cloud area, walls, inflation, paths)
-    # ════════════════════════════════════════════════════════════════════════
-    axL.imshow(img, origin='lower', extent=extent, interpolation='nearest')
+    # KD-tree over obstacle cell centers (in world frame) for O(log n) lookup.
+    rows, cols = np.where(blocked)
+    if len(rows) == 0:
+        return waypoints_w
+    obs_xy = np.column_stack([
+        mn_x + (cols + 0.5) * res,
+        mn_y + (rows + 0.5) * res,
+    ]).astype(np.float32)
+    tree = cKDTree(obs_xy)
 
-    if path:
-        xs = [meta['min_x'] + (c + 0.5) * res for c, r in path]
-        ys = [meta['min_y'] + (r + 0.5) * res for c, r in path]
-        axL.plot(xs, ys, color=(0.0, 0.9, 1.0, 0.35), linewidth=1.2,
-                 label=f'A* raw ({len(path)} cells)')
+    def nearest_d(p):
+        d, _ = tree.query(p, k=1)
+        return float(d)
 
-    if simplified:
-        xs = [meta['min_x'] + (c + 0.5) * res for c, r in simplified]
-        ys = [meta['min_y'] + (r + 0.5) * res for c, r in simplified]
-        axL.plot(xs, ys, color='#00e5ff', linewidth=3.0, marker='o', markersize=6,
-                 label=f'leader ({len(simplified)} waypoints)')
+    # ─── Step 1: adaptive densification ────────────────────────────────────
+    dense = [list(waypoints_w[0])]
+    for i in range(len(waypoints_w) - 1):
+        x0, y0 = waypoints_w[i]
+        x1, y1 = waypoints_w[i + 1]
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if seg_len < 1e-6:
+            continue
+        # Mid-segment distance to nearest obstacle decides spacing.
+        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+        d_obs = nearest_d((mx, my))
+        if d_obs < dense_threshold:
+            step = dense_step
+        elif d_obs < dense_threshold * 2:
+            t = (d_obs - dense_threshold) / dense_threshold
+            step = dense_step + t * (base_step - dense_step)
+        else:
+            step = base_step
+        n = max(1, int(math.ceil(seg_len / step)))
+        for k in range(1, n):
+            t = k / n
+            dense.append([x0 + t * (x1 - x0), y0 + t * (y1 - y0)])
+        dense.append([x1, y1])
 
-    if follower_simplified:
-        xs = [meta['min_x'] + (c + 0.5) * res for c, r in follower_simplified]
-        ys = [meta['min_y'] + (r + 0.5) * res for c, r in follower_simplified]
-        axL.plot(xs, ys, color='#ff9933', linewidth=2.5, linestyle='--',
-                 marker='s', markersize=5,
-                 label=f'follower (offset {formation_distance:.2f} m)')
+    # ─── Step 2: APF repulsion shift (preserve endpoints) ──────────────────
+    # D_REP = effective influence radius. Bigger than formation_radius so
+    # that the shift kicks in BEFORE the formation footprint touches an
+    # obstacle.
+    D_REP = max(formation_radius + 0.10, 0.30)
+    refined = [list(p) for p in dense]
+    n_shifted = 0
+    for _ in range(iterations):
+        new_pts = [refined[0]]
+        for i in range(1, len(refined) - 1):
+            x, y = refined[i]
+            idxs = tree.query_ball_point((x, y), D_REP)
+            fx = fy = 0.0
+            for j in idxs:
+                ox, oy = obs_xy[j]
+                dx, dy = x - ox, y - oy
+                d  = math.hypot(dx, dy)
+                if d < 1e-3:
+                    continue
+                # Khatib repulsion: only inside D_REP, monotone in 1/d.
+                mag = (1.0 / d - 1.0 / D_REP) / (d * d)
+                fx += mag * dx / d
+                fy += mag * dy / d
+            # Apply gain first, then cap the resulting shift magnitude.
+            sx = fx * apf_gain
+            sy = fy * apf_gain
+            shift_mag = math.hypot(sx, sy)
+            if shift_mag > max_shift:
+                sx *= max_shift / shift_mag
+                sy *= max_shift / shift_mag
+            if shift_mag > 1e-4:
+                n_shifted += 1
+            new_pts.append([float(x + sx), float(y + sy)])
+        new_pts.append(refined[-1])
+        refined = new_pts
 
-    axL.add_patch(Rectangle((0, 0), 0, 0, color=(0.15, 0.10, 0.05),
-                            label=f'inflation halo (r={robot_radius:.2f} m)'))
+    print(f"[refine] {len(waypoints_w)} A* waypoints -> {len(refined)} "
+          f"(adaptive density + APF shift × {iterations}, "
+          f"shifted {n_shifted} interior pts)")
+    # Cast to plain Python floats so the result is JSON-serializable.
+    return [[float(p[0]), float(p[1])] for p in refined]
 
-    axL.add_patch(Circle(leader_start, robot_radius, fill=True,
-                         facecolor='#00e5ff', alpha=0.55,
-                         edgecolor='#ffffff', linewidth=2, zorder=10))
-    axL.text(leader_start[0], leader_start[1] + robot_radius + 0.08,
-             'LEADER', color='#00e5ff', ha='center', fontsize=10,
-             fontweight='bold', zorder=11)
-    axL.plot(goal[0], goal[1], '+', markersize=22, mew=3, color='#00e5ff',
-             zorder=10)
-    axL.text(goal[0], goal[1] + 0.10, 'GOAL', color='#00e5ff', ha='center',
-             fontsize=10, fontweight='bold', zorder=11)
-    axL.add_patch(Circle(follower_start, robot_radius, fill=True,
-                         facecolor='#ff9933', alpha=0.55,
-                         edgecolor='#ffffff', linewidth=2, zorder=10))
-    axL.text(follower_start[0], follower_start[1] - robot_radius - 0.10,
-             'FOLLOWER', color='#ff9933', ha='center', fontsize=10,
-             fontweight='bold', zorder=11)
-
-    axL.set_xlabel('X (m)'); axL.set_ylabel('Y (m)')
-    axL.set_title('Map + planned route\n'
-                  f'grid {W}×{H} @ {res} m')
-    axL.grid(alpha=0.15)
-    axL.legend(loc='upper right', framealpha=0.9, fontsize=9)
-    axL.set_aspect('equal')
-
-    # ════════════════════════════════════════════════════════════════════════
-    #  RIGHT — focused path-planning view (route only, with annotations)
-    # ════════════════════════════════════════════════════════════════════════
-    # Build a tighter view bounded by the path + a margin
-    if simplified:
-        xs_all = [cell_to_world(c, r, meta)[0] for c, r in simplified]
-        ys_all = [cell_to_world(c, r, meta)[1] for c, r in simplified]
-        if follower_simplified:
-            xs_all += [cell_to_world(c, r, meta)[0] for c, r in follower_simplified]
-            ys_all += [cell_to_world(c, r, meta)[1] for c, r in follower_simplified]
-        margin = max(robot_radius * 3, 0.5)
-        x0, x1 = min(xs_all) - margin, max(xs_all) + margin
-        y0, y1 = min(ys_all) - margin, max(ys_all) + margin
-    else:
-        x0, x1 = meta['min_x'], meta['min_x'] + W * res
-        y0, y1 = meta['min_y'], meta['min_y'] + H * res
-
-    # Show ONLY the obstacle silhouette + inflation halo (no busy ground texture)
-    silhouette = np.full((H, W, 4), (0, 0, 0, 0), dtype=float)
-    silhouette[g == 2]      = (0.30, 0.40, 0.50, 0.95)   # walls + tires
-    silhouette[inflated_only] = (0.55, 0.30, 0.10, 0.45) # inflation halo
-    axR.imshow(silhouette, origin='lower', extent=extent, interpolation='nearest')
-
-    # Leader path with per-segment distance + cumulative annotations
-    if simplified:
-        wxs = [cell_to_world(c, r, meta)[0] for c, r in simplified]
-        wys = [cell_to_world(c, r, meta)[1] for c, r in simplified]
-        axR.plot(wxs, wys, color='#00e5ff', linewidth=3.5,
-                 marker='o', markersize=10, markerfacecolor='#00e5ff',
-                 markeredgecolor='white', markeredgewidth=2, zorder=8)
-        # Per-segment distances
-        cum = 0.0
-        for i in range(len(wxs) - 1):
-            seg = math.hypot(wxs[i+1] - wxs[i], wys[i+1] - wys[i])
-            cum += seg
-            mx, my = (wxs[i] + wxs[i+1]) / 2, (wys[i] + wys[i+1]) / 2
-            axR.text(mx, my + 0.04, f'{seg:.2f} m',
-                     color='#00e5ff', fontsize=9, ha='center',
-                     bbox=dict(boxstyle='round,pad=0.15', facecolor='black',
-                               edgecolor='#00e5ff', alpha=0.65),
-                     zorder=9)
-        # Waypoint labels (W0..Wn)
-        for i, (wx, wy) in enumerate(zip(wxs, wys)):
-            axR.text(wx, wy + robot_radius * 0.55,
-                     f'W{i}', color='white', fontsize=8, ha='center',
-                     fontweight='bold', zorder=10)
-        leader_total = cum
-    else:
-        leader_total = 0.0
-
-    # Follower path
-    if follower_simplified:
-        fxs = [cell_to_world(c, r, meta)[0] for c, r in follower_simplified]
-        fys = [cell_to_world(c, r, meta)[1] for c, r in follower_simplified]
-        axR.plot(fxs, fys, color='#ff9933', linewidth=2.0, linestyle='--',
-                 marker='s', markersize=7, markerfacecolor='#ff9933',
-                 markeredgecolor='white', markeredgewidth=1.5, zorder=7)
-
-    # Robots + goal (bigger so they read in the focused view)
-    axR.add_patch(Circle(leader_start, robot_radius, fill=True,
-                         facecolor='#00e5ff', alpha=0.7,
-                         edgecolor='white', linewidth=2.5, zorder=10))
-    axR.add_patch(Circle(follower_start, robot_radius, fill=True,
-                         facecolor='#ff9933', alpha=0.7,
-                         edgecolor='white', linewidth=2.5, zorder=10))
-    axR.plot(goal[0], goal[1], '+', markersize=28, mew=4, color='#00e5ff',
-             zorder=11)
-
-    axR.text(leader_start[0], leader_start[1] + robot_radius + 0.10,
-             'LEADER\nstart', color='#00e5ff', ha='center', fontsize=9,
-             fontweight='bold', zorder=12)
-    axR.text(follower_start[0], follower_start[1] - robot_radius - 0.10,
-             'FOLLOWER\nstart', color='#ff9933', ha='center', fontsize=9,
-             fontweight='bold', zorder=12)
-    axR.text(goal[0] + 0.15, goal[1], 'GOAL', color='#00e5ff',
-             ha='left', va='center', fontsize=11, fontweight='bold', zorder=12)
-
-    # Stats panel (top-left of the right axes)
-    travel_time = leader_total / 0.18  # MAX_LINEAR from navigation_node.py
-    stats = (
-        f'Leader path:    {len(simplified) if simplified else 0} waypoints\n'
-        f'Total length:   {leader_total:.2f} m\n'
-        f'Travel time:    ~{travel_time:.1f} s @ 0.18 m/s\n'
-        f'Robot radius:   {robot_radius:.2f} m\n'
-        f'Formation gap:  {formation_distance:.2f} m'
-    )
-    axR.text(0.02, 0.98, stats, transform=axR.transAxes,
-             color='#e0e6f0', fontsize=10, fontfamily='monospace',
-             ha='left', va='top',
-             bbox=dict(boxstyle='round,pad=0.6', facecolor='#0a0c10',
-                       edgecolor='#1e2330', alpha=0.92),
-             zorder=15)
-
-    axR.set_xlim(x0, x1); axR.set_ylim(y0, y1)
-    axR.set_xlabel('X (m)'); axR.set_ylabel('Y (m)')
-    axR.set_title('Path planning detail\n(per-segment distances + waypoints)')
-    axR.grid(alpha=0.15)
-    axR.set_aspect('equal')
-    axR.set_facecolor('#0a0c10')
-
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=120, facecolor='#0a0c10')
-    print(f"[viz] wrote {out_path}")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -463,9 +409,70 @@ def visualize_vc(plan, map_data, out_path):
     print(f"[viz] wrote {out_path}")
 
 
+def arclength_resample(waypoints, target_spacing=0.15):
+    """Resample a polyline at uniform arc-length spacing.
+
+    Walks the polyline accumulating distance; emits a sample every
+    `target_spacing` meters. Endpoints are always preserved.
+
+    Why: `apf_refine_path` produces densely-packed (~5 cm) points near
+    obstacles and sparse (~30 cm) points in open space. Both are outside
+    the controller's "sweet spot" — 5 cm is below GOAL_TOL_INTERMEDIATE
+    so the Pi pops 4 waypoints in one tick, and 30 cm is past LOOKAHEAD
+    so pure-pursuit can momentarily walk past the end of a segment.
+    Uniform 12-15 cm spacing falls inside the sweet spot for both.
+
+    APF safety shift is preserved — we resample the SHIFTED polyline,
+    so the wall-margin earned by `apf_refine_path` carries through.
+
+    Args:
+        waypoints      : list of [x, y] (or longer tuples; only [:2] used)
+        target_spacing : meters between adjacent samples (default 0.15)
+
+    Returns:
+        list of [x, y] at uniform spacing.
+    """
+    if len(waypoints) < 2:
+        return [list(p[:2]) for p in waypoints]
+
+    pts = [list(p[:2]) for p in waypoints]
+    cum = [0.0]
+    for i in range(1, len(pts)):
+        cum.append(cum[-1] + math.hypot(pts[i][0] - pts[i-1][0],
+                                         pts[i][1] - pts[i-1][1]))
+    total = cum[-1]
+    if total < 1e-9 or target_spacing <= 1e-6:
+        return pts[:]
+
+    out = [pts[0]]
+    target = target_spacing
+    seg = 0
+    while target < total:
+        while seg < len(pts) - 1 and cum[seg + 1] < target:
+            seg += 1
+        seg_len = cum[seg + 1] - cum[seg]
+        if seg_len < 1e-9:
+            target += target_spacing
+            continue
+        t = (target - cum[seg]) / seg_len
+        x = pts[seg][0] + t * (pts[seg + 1][0] - pts[seg][0])
+        y = pts[seg][1] + t * (pts[seg + 1][1] - pts[seg][1])
+        out.append([x, y])
+        target += target_spacing
+
+    out.append(pts[-1])
+    print(f"[resample] {len(waypoints)} -> {len(out)} waypoints "
+          f"({total:.2f} m at ~{target_spacing*100:.0f} cm spacing)")
+    return out
+
+
 def compute_plan(map_data: dict, start: tuple, goal: tuple,
                  formation_radius: float = 0.45,
-                 robots=None) -> dict:
+                 robots=None,
+                 yaw_policy: str = "tangent",
+                 start_yaw: float = 0.0,
+                 goal_yaw: float = 0.0,
+                 target_spacing: float = 0.15) -> dict:
     """Plan ONE path for the virtual center; the formation moves together.
 
     Args:
@@ -492,80 +499,164 @@ def compute_plan(map_data: dict, start: tuple, goal: tuple,
     grid = map_data['grid']
     res  = float(meta['resolution'])
 
-    # Inflate by the FORMATION radius (not single-robot radius). Whatever the
-    # virtual center can clear, every robot in formation can clear.
-    blocked = inflate_grid(grid, res, formation_radius)
-    free       = ~blocked
-    cc_labels, n_cc = ndimage.label(free)
-    cc_sizes   = np.bincount(cc_labels.ravel())
-    cc_sizes[0] = 0
-    main_cc    = int(np.argmax(cc_sizes))
-    main_mask  = (cc_labels == main_cc)
-
-    def snap_to_main(c, r):
-        if main_mask[r, c]:
-            return c, r
-        for radius in range(1, max(blocked.shape)):
-            for dc in range(-radius, radius + 1):
-                for dr in (-radius, radius):
-                    nc, nr = c + dc, r + dr
-                    if (0 <= nc < blocked.shape[1] and 0 <= nr < blocked.shape[0]
-                            and main_mask[nr, nc]):
-                        return nc, nr
-            for dr in range(-radius + 1, radius):
-                for dc in (-radius, radius):
-                    nc, nr = c + dc, r + dr
-                    if (0 <= nc < blocked.shape[1] and 0 <= nr < blocked.shape[0]
-                            and main_mask[nr, nc]):
-                        return nc, nr
-        raise RuntimeError(f"could not find a main-CC cell near ({c}, {r})")
-
-    sc, sr = world_to_cell(*start, meta)
-    gc, gr = world_to_cell(*goal,  meta)
-    if sc is None or gc is None:
+    # Compute start/goal cells once. The cascade below handles the rest.
+    sc_orig, sr_orig = world_to_cell(*start, meta)
+    gc_orig, gr_orig = world_to_cell(*goal,  meta)
+    if sc_orig is None or gc_orig is None:
         raise ValueError(f"start {start} or goal {goal} is outside the mapped area "
                          f"(bounds X[{meta['min_x']:.2f},{meta['max_x']:.2f}] "
                          f"Y[{meta['min_y']:.2f},{meta['max_y']:.2f}])")
-    sc_orig, sr_orig = sc, sr
-    gc_orig, gr_orig = gc, gr
-    sc, sr = snap_to_main(sc, sr)
-    gc, gr = snap_to_main(gc, gr)
+
+    # ── Radius cascade ───────────────────────────────────────────────────
+    # Try planning at the requested radius. If A* fails (typically because
+    # noise pixels collapsed a corridor under inflation), retry at smaller
+    # radii. Surfaced in metadata so the GUI can warn that clearance was
+    # reduced. Replaces the silent snap-the-goal-up-to-1.2m band-aid.
+    blocked = main_mask = sc = sr = gc = gr = path = None
+    used_radius = None
+    attempted = []
+    for scale in (1.0, 0.8, 0.6):
+        radius_try = formation_radius * scale
+        b_try = inflate_grid(grid, res, radius_try)
+        free  = ~b_try
+        cc_labels, _ = ndimage.label(free)
+        cc_sizes = np.bincount(cc_labels.ravel())
+        if cc_sizes.size:
+            cc_sizes[0] = 0
+        if cc_sizes.size <= 1 or cc_sizes.max() == 0:
+            attempted.append((round(radius_try, 3), "everything blocked"))
+            continue
+        main_cc_try   = int(np.argmax(cc_sizes))
+        main_mask_try = (cc_labels == main_cc_try)
+
+        # Bounded snap: never relocate further than 0.5 m. If a click lands
+        # deep inside a wall, surface an error instead of silently moving
+        # the goal somewhere wrong (the old behavior was up to ~1.2 m).
+        max_snap_cells = max(1, int(0.5 / res))
+        def _snap(c, r, mm=main_mask_try, b=b_try, cap=max_snap_cells):
+            if mm[r, c]:
+                return c, r
+            for rad in range(1, min(cap + 1, max(b.shape))):
+                for dc in range(-rad, rad + 1):
+                    for dr in (-rad, rad):
+                        nc, nr = c + dc, r + dr
+                        if (0 <= nc < b.shape[1] and 0 <= nr < b.shape[0]
+                                and mm[nr, nc]):
+                            return nc, nr
+                for dr in range(-rad + 1, rad):
+                    for dc in (-rad, rad):
+                        nc, nr = c + dc, r + dr
+                        if (0 <= nc < b.shape[1] and 0 <= nr < b.shape[0]
+                                and mm[nr, nc]):
+                            return nc, nr
+            return None, None
+
+        sc_try, sr_try = _snap(sc_orig, sr_orig)
+        gc_try, gr_try = _snap(gc_orig, gr_orig)
+        if sc_try is None or gc_try is None:
+            attempted.append((round(radius_try, 3),
+                              "click >0.5 m from any reachable cell"))
+            continue
+
+        path_try = astar(b_try, (sc_try, sr_try), (gc_try, gr_try))
+        if path_try is None:
+            attempted.append((round(radius_try, 3), "no path"))
+            continue
+
+        # First success — keep it.
+        blocked   = b_try
+        main_mask = main_mask_try
+        sc, sr    = sc_try, sr_try
+        gc, gr    = gc_try, gr_try
+        path      = path_try
+        used_radius = radius_try
+        attempted.append((round(radius_try, 3), "ok"))
+        break
+
+    if path is None:
+        raise RuntimeError(
+            f"no path found at any radius. Attempts: {attempted}. "
+            f"Likely the click is unreachable or the map has too much "
+            f"noise. Try clicking further from walls."
+        )
+
+    radius_reduced = (used_radius < formation_radius)
+    if radius_reduced:
+        print(f"[plan] ⚠ reduced clearance to {used_radius:.2f} m "
+              f"(requested {formation_radius:.2f} m). Cascade: {attempted}")
+
     vc_start = cell_to_world(sc, sr, meta)
     vc_goal  = cell_to_world(gc, gr, meta)
-    # How far did we have to relocate the user's click to reach a navigable cell?
     start_snap_dist = math.hypot((sc - sc_orig) * res, (sr - sr_orig) * res)
     goal_snap_dist  = math.hypot((gc - gc_orig) * res, (gr - gr_orig) * res)
     if start_snap_dist > 0:
         print(f"[plan] start snapped {start_snap_dist*100:.1f} cm: "
-              f"{tuple(round(v, 2) for v in start)} -> {tuple(round(v, 2) for v in vc_start)}")
+              f"{tuple(round(v, 2) for v in start)} -> "
+              f"{tuple(round(v, 2) for v in vc_start)}")
     if goal_snap_dist > 0:
         print(f"[plan] goal snapped {goal_snap_dist*100:.1f} cm: "
-              f"{tuple(round(v, 2) for v in goal)} -> {tuple(round(v, 2) for v in vc_goal)}")
-
-    # The single A* path — for the virtual center.
-    path = astar(blocked, (sc, sr), (gc, gr))
-    if path is None:
-        raise RuntimeError("no path found")
+              f"{tuple(round(v, 2) for v in goal)} -> "
+              f"{tuple(round(v, 2) for v in vc_goal)}")
     simplified = simplify(path, blocked)
 
     def cells_to_worldlist(cells):
-        return [list(cell_to_world(c, r, meta)) for c, r in cells]
+        # Cast to Python float — cell indices may be numpy ints, which
+        # produce numpy scalars under arithmetic and break JSON encoding.
+        return [[float(v) for v in cell_to_world(c, r, meta)]
+                for c, r in cells]
 
     waypoints_w = cells_to_worldlist(simplified)
     raw_w       = cells_to_worldlist(path)
 
-    # ── Heading at each waypoint (derived from path tangent) ───────────────
-    # heading[i] points along the segment leaving waypoint i (or arriving
-    # at it, for the final waypoint). Used to orient each robot's offset.
-    headings = []
-    for i in range(len(waypoints_w)):
-        if i < len(waypoints_w) - 1:
-            x0, y0 = waypoints_w[i]
-            x1, y1 = waypoints_w[i + 1]
-        else:
-            x0, y0 = waypoints_w[i - 1]
-            x1, y1 = waypoints_w[i]
-        headings.append(math.atan2(y1 - y0, x1 - x0))
+    # APF refinement: densify near obstacles and shift waypoints away from
+    # walls. The robot ends up with a smoother, safer line to follow.
+    # Note: pass `used_radius` (the actual clearance achieved) rather than
+    # the requested `formation_radius`, so refinement matches the inflation.
+    waypoints_w = apf_refine_path(waypoints_w, blocked, meta, used_radius)
+
+    # Arc-length resample: uniform 15 cm spacing for controller-friendly
+    # density. APF safety shift is preserved; only the spacing changes.
+    if target_spacing > 0:
+        waypoints_w = arclength_resample(waypoints_w, target_spacing)
+
+    # ── Heading at each waypoint, dispatched by yaw_policy ─────────────────
+    # 'free'           : crab-walk; the formation keeps `start_yaw` throughout.
+    # 'tangent'        : heading[i] = direction of segment i→i+1 (path tangent).
+    #                    First waypoint forced to `start_yaw`, last to `goal_yaw`.
+    # 'smooth_to_goal' : linear interpolate from start_yaw to goal_yaw along
+    #                    arc-length progress (0 at start, 1 at goal). Keeps the
+    #                    formation slowly rotating into the goal orientation.
+    n_wps = len(waypoints_w)
+    headings = [0.0] * n_wps
+    if yaw_policy == 'free':
+        for i in range(n_wps):
+            headings[i] = float(start_yaw)
+    elif yaw_policy == 'smooth_to_goal':
+        # Compute cumulative arc length to interpolate yaw uniformly along path.
+        cumlen = [0.0]
+        for i in range(1, n_wps):
+            cumlen.append(cumlen[-1] + math.hypot(
+                waypoints_w[i][0] - waypoints_w[i - 1][0],
+                waypoints_w[i][1] - waypoints_w[i - 1][1]))
+        total = cumlen[-1] if cumlen[-1] > 1e-9 else 1.0
+        # Use shortest-arc interpolation for the yaw delta.
+        delta = math.atan2(math.sin(goal_yaw - start_yaw),
+                           math.cos(goal_yaw - start_yaw))
+        for i in range(n_wps):
+            headings[i] = float(start_yaw + delta * (cumlen[i] / total))
+    else:  # 'tangent' (default) — path-tangent yaw with start/goal pinning
+        for i in range(n_wps):
+            if i < n_wps - 1:
+                x0, y0 = waypoints_w[i]
+                x1, y1 = waypoints_w[i + 1]
+            else:
+                x0, y0 = waypoints_w[i - 1]
+                x1, y1 = waypoints_w[i]
+            headings[i] = math.atan2(y1 - y0, x1 - x0)
+        # Pin endpoints if caller requested specific orientations.
+        if n_wps >= 1:
+            headings[0]  = float(start_yaw)
+            headings[-1] = float(goal_yaw)
 
     # ── Each robot's WORLD pose at each waypoint = VC + R(yaw) * offset ────
     # This is what laplacian_formation_node would produce at runtime;
@@ -617,14 +708,21 @@ def compute_plan(map_data: dict, start: tuple, goal: tuple,
 
     return {
         'metadata': {
-            'formation_radius':  formation_radius,
-            'vc_distance':       vc_distance,
-            'travel_time_sec':   vc_distance / 0.18,   # MAX_LINEAR
-            'inflation_iters':   int(math.ceil(formation_radius / res)),
-            'inflation_cells':   len(inflation_cells),
-            'start_snap_dist':   float(start_snap_dist),
-            'goal_snap_dist':    float(goal_snap_dist),
-            'navigable_bounds':  nav_bounds,
+            'formation_radius':           used_radius,
+            'formation_radius_requested': formation_radius,
+            'radius_reduced':             bool(radius_reduced),
+            'cascade_attempts':           attempted,
+            'vc_distance':                vc_distance,
+            'travel_time_sec':            vc_distance / 0.18,   # MAX_LINEAR
+            'inflation_iters':            int(math.ceil(used_radius / res)),
+            'inflation_cells':            len(inflation_cells),
+            'start_snap_dist':            float(start_snap_dist),
+            'goal_snap_dist':             float(goal_snap_dist),
+            'target_spacing':             float(target_spacing),
+            'yaw_policy':                 yaw_policy,
+            'start_yaw':                  float(start_yaw),
+            'goal_yaw':                   float(goal_yaw),
+            'navigable_bounds':           nav_bounds,
             'map_bounds':        {
                 'min_x': float(meta['min_x']), 'max_x': float(meta['min_x'] + meta['grid_width']  * res),
                 'min_y': float(meta['min_y']), 'max_y': float(meta['min_y'] + meta['grid_height'] * res),

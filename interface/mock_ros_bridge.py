@@ -225,13 +225,13 @@ class RobotSim:
 
 
 def obstacles_to_posearray(obstacles):
-    """Convert (x, z, r) blobs to a geometry_msgs/PoseArray.
-    Convention used by navigation_node: pose.position.x = x, .y = z, .z = radius
-    (since the floor plane is X-Z in our cleaned cloud)."""
+    """Convert (x, y, r) blobs to a geometry_msgs/PoseArray.
+    Convention used by navigation_node: pose.position.x = x, .y = y, .z = radius.
+    The cleaned cloud is z-up REP-103; the floor plane is X-Y in the map frame."""
     poses = []
-    for (x, z, r) in obstacles:
+    for (x, y, r) in obstacles:
         poses.append({
-            'position':    {'x': float(x), 'y': float(z), 'z': float(r)},
+            'position':    {'x': float(x), 'y': float(y), 'z': float(r)},
             'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
         })
     return {

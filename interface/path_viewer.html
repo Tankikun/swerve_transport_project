@@ -239,44 +239,10 @@ function drawPlan(ctx, x0, x1, y0, y1, cw, ch, pad, detailed=false) {
     }
   }
 
-  // Per-robot tracks DISABLED — the user's design treats individual robots
-  // as runtime-derived from the VC + offset, not as planned paths. The
-  // formation envelope already shows where each robot will be. Re-enable
-  // this loop if you want a debugging visualization of the per-robot offset.
-  if (false) for (const robot of planData.robots) {
-    if (!robot.track || robot.track.length < 2) continue;
-
-    ctx.strokeStyle = robot.color;
-    ctx.lineWidth = detailed ? 2.5 : 1.8;
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    for (let i = 0; i < robot.track.length; i++) {
-      const [wx, wy] = robot.track[i];
-      const [px, py] = worldToCanvas(wx, wy, x0, x1, y0, y1, cw, ch, pad);
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Robot at start (small filled circle)
-    const [sx, sy] = robot.track[0];
-    const [px, py] = worldToCanvas(sx, sy, x0, x1, y0, y1, cw, ch, pad);
-    const robotPx = 0.10 * scale;   // 10cm visual radius
-    ctx.fillStyle = robot.color + 'cc';
-    ctx.strokeStyle = 'white';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(px, py, Math.max(robotPx, 4), 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    if (detailed) {
-      ctx.fillStyle = robot.color;
-      ctx.font = 'bold 10px Space Mono, monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(robot.name.toUpperCase(),
-                   px, py - Math.max(robotPx, 4) - 6);
-    }
-  }
+  // (Per-robot tracks intentionally omitted: each robot's pose is derived
+  //  at runtime from the virtual-center pose + its offset. The formation
+  //  envelope shows the swept area; per-robot tracks would only duplicate
+  //  what laplacian_formation_node already computes live.)
 
   // VC start (yellow filled circle) + goal (yellow plus)
   const [sx, sy] = worldToCanvas(vc.start[0], vc.start[1], x0, x1, y0, y1, cw, ch, pad);

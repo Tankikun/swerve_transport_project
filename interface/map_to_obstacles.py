@@ -9,17 +9,18 @@ Used by:
   * later: a real ROS 2 publisher node on the Pi (same logic)
 
 The 2D grid in map.json:
-  grid[row][col]  →  row indexes Z, col indexes X
+  grid[row][col]  →  row indexes Y (forward/back), col indexes X (left/right)
   values: 0=unknown, 1=ground, 2=obstacle
 
-World coordinates:
+World coordinates (post-cleanup map is z-up REP-103):
   x = min_x + col * resolution
-  z = min_z + row * resolution
+  y = min_y + row * resolution
 
-Why X and Z (not X and Y)?
-  Because the Y axis in the cleaned cloud is VERTICAL (up). The floor plane
-  is X-Z. The robot lives on the floor. We pass (x, z) as the 2D plane to
-  navigation_node, which expects (x, y) — so callers map z → y.
+Earlier versions of this file used a Y-up convention with "X-Z" floor (a
+leftover from the pre-RTAB-Map Scaniverse pipeline), which referenced a
+non-existent `min_z` metadata key. The current map.json from
+db_to_map_json.py / clean_map.py uses Z-up; the floor plane is X-Y; the
+metadata exposes `min_x`, `min_y`, `max_x`, `max_y` (no `min_z`).
 
 Usage:
     python3 map_to_obstacles.py --map map.json
@@ -60,7 +61,7 @@ def extract_obstacles(map_path: str,
                           0 = disable; 4 is a good default for nav.
 
     Returns:
-        list of (world_x, world_z, radius_m)
+        list of (world_x, world_y, radius_m) — coordinates in REP-103 map frame.
     """
     with open(map_path) as f:
         m = json.load(f)
@@ -68,7 +69,7 @@ def extract_obstacles(map_path: str,
     grid = np.asarray(m['grid'], dtype=np.int32)
     res  = float(m['metadata']['resolution'])
     x0   = float(m['metadata']['min_x'])
-    z0   = float(m['metadata']['min_z'])
+    y0   = float(m['metadata']['min_y'])
 
     obs_mask = (grid == 2)
     labels, n = ndimage.label(obs_mask, structure=np.ones((3, 3)))
@@ -89,22 +90,22 @@ def extract_obstacles(map_path: str,
             # Optionally sample wall cells as small obstacles
             if sample_wall_step > 0:
                 for k in range(0, size, sample_wall_step):
-                    cz_idx, cx_idx = cells[k]
+                    cy_idx, cx_idx = cells[k]
                     wx = x0 + cx_idx * res
-                    wz = z0 + cz_idx * res
+                    wy = y0 + cy_idx * res
                     # Each wall sample = single-cell-radius obstacle
-                    blobs.append((float(wx), float(wz),
+                    blobs.append((float(wx), float(wy),
                                   float(res * 1.2 + inflate_radius)))
             continue
 
-        cz_idx, cx_idx = cells.mean(axis=0)
+        cy_idx, cx_idx = cells.mean(axis=0)
         area_m2 = size * (res ** 2)
         radius  = math.sqrt(area_m2 / math.pi) + inflate_radius
         radius  = max(radius, res * 1.2)
 
         wx = x0 + cx_idx * res
-        wz = z0 + cz_idx * res
-        blobs.append((float(wx), float(wz), float(radius)))
+        wy = y0 + cy_idx * res
+        blobs.append((float(wx), float(wy), float(radius)))
 
     return blobs
 
@@ -131,8 +132,8 @@ def main():
                               exclude_largest=not args.keep_walls,
                               sample_wall_step=args.wall_step)
     print(f'extracted {len(blobs)} obstacle blobs from {args.map}')
-    for i, (x, z, r) in enumerate(blobs):
-        print(f'  [{i:3d}]  centre=({x:+.2f}, {z:+.2f})  radius={r:.2f} m')
+    for i, (x, y, r) in enumerate(blobs):
+        print(f'  [{i:3d}]  centre=({x:+.2f}, {y:+.2f})  radius={r:.2f} m')
 
 
 if __name__ == '__main__':

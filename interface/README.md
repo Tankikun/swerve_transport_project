@@ -1,173 +1,162 @@
-# interface/ — Web GUI for RTAB-Map localization
+# Robot Path Planner
 
-This folder contains the **laptop-side web GUI** for visualizing the SLAM
-map and watching the robot localize against it in real time. The GUI is
-3D-only: a textured point cloud rendered with Three.js, with a click-to-set-goal
-floor plane and a click-to-set-initial-pose tool.
+A laptop-side planning brain that turns a 3D room scan into a safe, smooth route for a small mobile robot — and lets you preview that route in the browser before sending it to the hardware.
 
-For the data-preparation pipeline that turns an RTAB-Map `.db` into the
-`map.json` this GUI consumes, see your branch's preprocessing docs (the
-preprocessing has changed over time; whichever script is in this folder
-right now is the one to use).
+> **Scope of this repo.** This is the **Mac-side dev sandbox**: Flask + JSON files + a browser preview + a mock executor. It is where the planning *algorithm* lives and gets tuned. The deployed system (per Tankhun's swerve-transport architecture) is a ROS 2 node `path_planner_node` running on the laptop, subscribing to `/goal_pose` + `/formation/footprint` + `/tb3_*/pose`, and publishing `/formation/path` (latched `geometry_msgs/PoseArray`). The **algorithm** in `astar_planner.compute_plan()` is reused as-is; the integration glue is the only thing that changes between sandbox and deployment. The wrapper node lives at `ros2_ws/src/swerve_formation/swerve_formation/path_planner_node.py` in the team repo.
 
----
+## What this is
 
-## Operator runbook
+This project takes a 3D scan of a real room, cleans it into a simple top-down floor plan, and figures out a route from where the robot is to where you want it to go. You click a goal in a 3D web view, the planner draws the route in yellow, and a browser-based simulation plays back what the robot *would* do on that route. When everything looks right, the same route is shipped over to a Raspberry Pi on the robot, which actually drives it. Think of this repo as the part that does the *thinking* — the Pi does the *moving*.
 
-To actually run the localization viewer end-to-end (5 terminals + a
-browser), open **[`RUN_LOCALIZATION_VIEWER.md`](RUN_LOCALIZATION_VIEWER.md)**.
-It's a self-contained, step-by-step guide that takes you from a powered-off
-robot to a green `LOC: LIVE` pill in ~10 minutes.
-
----
-
-## What's in this folder
-
-| File | Purpose |
-|---|---|
-| `index.html` | The web UI itself — Three.js 3D point cloud, click-to-goal floor raycast, "Set Initial Pose" tool, LOC status pill |
-| `server.py` | Flask backend serving `index.html`, `map.json`, and the `/pose` + `/set_initial_pose` mailbox endpoints |
-| `ros_pose_bridge.py` | rclpy node that streams `map → base_link` TF to the server every 100 ms and republishes GUI initial-pose hints to RTAB-Map's `/initialpose` |
-| `db_to_map_json.py` | Preprocessing — converts an RTAB-Map `.db` into the `map.json` the GUI consumes |
-| `map.json` | Currently-served map (regenerate from your `.db` when needed) |
-| `RUN_LOCALIZATION_VIEWER.md` | Step-by-step runbook for the localization viewer |
-| `README.md` | (this file) |
-
----
-
-## How the live-pose loop fits together
+## The big picture
 
 ```
-                          ┌────────────────────────┐
-                          │       Browser          │
-                          │   (index.html, 3D)     │
-                          └───┬──────────────────▲─┘
-                              │                  │
-              POST            │ GET /pose        │
-   /set_initial_pose          │ (every 200 ms)   │
-                              │                  │
-                              ▼                  │
-                          ┌────────────────────────┐
-                          │      server.py         │
-                          │  (Flask, port 5002)    │
-                          └───▲──────────────────┬─┘
-                              │                  │
-              GET             │ POST             │
-   /set_initial_pose          │ /pose            │
-   (every 100 ms)             │ (every 100 ms)   │
-                              │                  ▼
-                          ┌────────────────────────┐
-                          │  ros_pose_bridge.py    │
-                          │  (rclpy node)          │
-                          └───▲──────────────────┬─┘
-                              │                  │
-                  TF lookup   │                  │ Publish PoseWithCovarianceStamped
-       map -> tb3_1_base_link │                  │ to /initialpose (single shot
-                              │                  │ per new GUI hint)
-                              │                  ▼
-                          ┌────────────────────────┐
-                          │       RTAB-Map         │
-                          │  (laptop_localization) │
-                          └────────────────────────┘
+   ┌───────────────┐    ┌──────────────┐    ┌───────────────┐    ┌───────────────┐
+   │ 3D scan (.db) │    │ Cleaned 2D   │    │ Planner       │    │ JSON path     │
+   │ from RTAB-Map │───▶│ floor plan   │───▶│ (A* + smooth) │───▶│ (waypoints +  │
+   │ mapping run   │    │ (map.json)   │    │               │    │  yaw + meta)  │
+   └───────────────┘    └──────────────┘    └───────────────┘    └───────┬───────┘
+       db_to_map_json.py   inpaint_floor.py    astar_planner.py          │
+       + tighten_obstacles.py                  compute_plan()            │
+                                                                         │
+                                       ┌─────────────────────────────────┴─────────┐
+                                       │                                           │
+                                       ▼                                           ▼
+                              ┌─────────────────┐                          ┌────────────────┐
+                              │ Browser preview │                          │ Real robot     │
+                              │ (mock executor, │                          │ (Raspberry Pi  │
+                              │  yellow path,   │                          │  + ROS 2 node, │
+                              │  2D path tab)   │                          │  swerve drive) │
+                              └─────────────────┘                          └────────────────┘
+                              sim_navigator.py                             navigation_node.py
+                              + index.html                                 (in friend's repo)
 ```
 
-Two independent roles for the bridge:
+## How it works (5 stages, plain English)
 
-1. **Live pose feed** — every 10 Hz, look up the canonical
-   `map → {robot_id}_base_link` TF and POST it to `/pose`. The browser
-   polls `/pose` to drive the LOC status pill (`LIVE` / `DEAD-RECK` /
-   `SEARCHING` / `STALE`) and the cyan cone marker.
-2. **Initial-pose republisher** — every 10 Hz, GET `/set_initial_pose`.
-   The browser writes there when the user uses the 📍 button. When the
-   `seq` increments, the bridge publishes one
-   `PoseWithCovarianceStamped` to `/initialpose` for RTAB-Map to seed
-   its current pose estimate. This is the same topic AMCL / RViz
-   "2D Pose Estimate" use, so RTAB-Map converges in 1–2 seconds
-   instead of doing a slow global re-localization search.
+1. **Stage 1 — From 3D scan to 2D floor plan.** *(map preparation)* The robot drives around the room with a depth camera and builds up a 3D point cloud (`tb3_1_room.db`). `db_to_map_json.py` exports that cloud, throws away noise (Statistical Outlier Removal — drops lonely floating points; DBSCAN — drops small disconnected blobs), and slices it into a simple top-down grid where every 2 cm cell is labelled "ground", "obstacle" or "unknown". `inpaint_floor.py` then fills in floor holes the camera missed, and `tighten_obstacles.py` rescues short objects (panel rims, tire bases) that the floor-detection step accidentally labelled as ground.
 
-The server is intentionally a tiny, stateless mailbox — it doesn't
-queue or order anything, it just remembers the latest message in each
-direction.
+2. **Stage 2 — Drawing the route.** *(global path planning with A\*)* Given the cleaned grid and a click-selected goal, `astar_planner.compute_plan()` first inflates every obstacle by the robot's footprint so the planner can safely treat the robot as a single point. Then it runs *A\** — the classic shortest-path search that explores cells in order of "how far have I gone + how far do I still have to go" — to produce a sequence of grid waypoints from start to goal.
 
----
+3. **Stage 3 — Smoothing and safety nudges.** *(path refinement)* The raw A\* output has 1-cell zigzags and skims close to walls. `apf_refine_path()` re-samples the line at finer spacing near obstacles, then nudges every waypoint *away* from nearby walls using a soft repulsive force (an *Artificial Potential Field*, or APF — imagine each wall blowing a gentle wind that pushes the path outward). Finally `arclength_resample()` lays the points down at uniform 12–15 cm intervals so the robot's onboard controller has neither too few nor too many to chew on.
+
+4. **Stage 4 — Hand-off to the robot.** *(JSON path file)* The planner saves the finished route to `path_plan.json` — a plain text file listing every waypoint with its (x, y) position and yaw (which way the robot should be facing there), plus metadata like the inflation radius that was actually used. The browser reads this file and offers two views: the 3D map with the route drawn on top, and a clean 2D "path-only" tab that shows exactly what the robot will receive.
+
+5. **Stage 5 — Execution.** *(Pi takes over)* In the deployed system, the elected leader robot subscribes to `/formation/path` (latched `PoseArray`) which `path_planner_node` publishes on the laptop. The leader's `navigation_node.py` runs the onboard control loop — closing the small remaining gap between "planned point" and "actual position" with pure-pursuit, a velocity ramp on (vx, vy), and a local APF safety layer that fires on **dynamic** obstacles seen on `/navigation/obstacles` (the static map is already kept clear by the planner's inflation; the runtime APF is for unmapped objects). The laptop is no longer in the path-following loop once execution starts; it just hosts the Zenoh router for inter-robot consensus.
+
+## What this project IS NOT
+
+This is the **planning brain**, not the robot. The simulation in the browser is a *mock* — `sim_navigator.py` pretends to be a real robot driving the planned path, so you can preview the motion before committing to hardware. **Real execution happens on the Raspberry Pi**, in a separate codebase (the swerve-drive project). If the simulation looks fine but the real robot misbehaves, the bug is almost certainly on the Pi side, not here.
 
 ## Quick start
 
-Once you have a `map.json` ready in this folder:
+> **Python note:** use `/usr/bin/python3` (the system Python). Homebrew's Python 3.14 currently ships a broken `pyexpat` that crashes some of the dependencies; the system Python avoids it.
 
 ```bash
-# Terminal 2 (laptop): web backend
-cd interface
-python3 server.py --map map.json --port 5002
+# 1. Generate / verify map.json from your latest mapping .db
+/usr/bin/python3 db_to_map_json.py --db tb3_1_room.db --output map.json
+/usr/bin/python3 inpaint_floor.py
+/usr/bin/python3 tighten_obstacles.py
 
-# Terminal 4 (laptop, separate sourced shell with ROS): live-pose bridge
-source /opt/ros/humble/setup.bash
-source ~/swerve_transport_project/ros2_ws/install/setup.bash
-export ROS_DOMAIN_ID=30
-python3 ros_pose_bridge.py --ros-args -p robot_id:=tb3_1
+# 2. Start the planner server (Flask, listens on :5002)
+/usr/bin/python3 server.py --map map.json --port 5002
 
-# Browser
+# 3. (Optional) Start the mock executor for live preview
+/usr/bin/python3 sim_navigator.py
+
+# 4. Open the GUI
 open http://localhost:5002
 ```
 
-Plus T1 (Pi sensors), T3 (RTAB-Map in localization mode), and T5
-(teleop) — see the runbook for the full sequence. Order matters; the
-bridge will warn loudly if RTAB-Map isn't producing the
-`map → tb3_1_base_link` TF yet.
+In the browser: click **Sim Pose** (or wait for a real localized pose), click somewhere on the floor to drop a goal, press **Plan Path**, then watch the yellow route appear. Switch to the **2D Path** tab to see exactly what would be sent to the Pi.
 
----
+## What lives where
 
-## GUI controls
-
-In the 3D panel:
-
-| Action | Result |
-|---|---|
-| **Drag** | Orbit the camera around the cloud's centre |
-| **Scroll** | Zoom in/out |
-| **Double-click** | Refit the camera so the whole cloud fills the panel |
-| **Short click on the floor** (no drag) | Raycast onto the floor plane → set goal at world (X, Y, floor_z). Drag-clicks (>5 px motion) are filtered out |
-| **📍 Set Initial Pose button** | Enter `PLACING` mode. Next click anchors a position; mouse-move thereafter sets yaw; second click confirms and POSTs to `/set_initial_pose` |
-| **Escape** | Cancel an active "Set Initial Pose" without sending |
-
-In the bottom bar:
-
-- **X / Y / Z** show the world coordinates of the most recent floor click
-- **Orientation slider** (0–359°) sets the goal yaw; the cyan goal-arrow
-  rotates live as you drag the slider
-- **Send Goal** publishes the current `(X, Y, Z, yaw)` to ROS topic
-  `/goal_pose` via rosbridge (Nav2-compatible). If rosbridge isn't
-  reachable on `ws://localhost:9090`, the button shows `Failed`.
-
----
-
-## Status pill cheat sheet
-
-| Pill | Color | Meaning |
+| File | Role | Open this when you need to… |
 |---|---|---|
-| `LOC: LIVE x.xx,y.yy` | 🟢 green | Localized; visual match within last 5 s |
-| `LOC: DEAD-RECK Xs` | 🟠 orange | TF tracking but no fresh visual match in X seconds |
-| `LOC: SEARCHING Xs` | 🔴 red | RTAB-Map hasn't matched yet |
-| `LOC: STALE Xs` | 🔴 red | Server hasn't received a pose POST in > 2 s — bridge died |
-| `LOC: NO BRIDGE` | 🔴 red | Server up but no bridge has ever posted — bridge never started |
-| `LOC: SERVER DOWN` | 🔴 red | Browser can't reach `/pose` — Flask server died |
+| `db_to_map_json.py` | RTAB-Map `.db` → `map.json` (3D cloud → 2D grid) | …regenerate the map after a new mapping run |
+| `inpaint_floor.py` | Fills floor holes inside the room | …the planner refuses to route through a clearly-walkable patch |
+| `tighten_obstacles.py` | Promotes short objects from "ground" to "obstacle" | …the planner thinks a tire stack or panel is floor |
+| `astar_planner.py` | A* + APF smoothing + arc-length resample | …tune planner clearance, smoothness, or step size |
+| `server.py` | Flask backend (map, plan, pose endpoints) on :5002 | …change endpoints, ports, or the wire format |
+| `index.html` | The web UI: 3D view, click-to-goal, Plan Path, 2D path view | …adjust visuals, button behaviour, or rosbridge bindings |
+| `sim_navigator.py` | ROS-free mock of the robot for end-to-end preview | …test the full pipeline without real hardware |
+| `ros_pose_bridge.py` | ROS-side script that POSTs `/tb3_*/pose` to Flask `/pose` over HTTP, so the GUI can display live localization | …the LOC pill is stuck on `NO BRIDGE` |
+| `map_to_obstacles.py` | Extracts obstacle blobs as (x, y, radius) circles | …the navigation node needs an obstacle list |
+| `mock_ros_bridge.py` | Stand-in for the Pi-side ROS bridge during Mac dev | …you're testing on a laptop with no ROS install |
+| `path_plan.json` | The current plan (regenerated on every Plan Path click) | …debug what the Pi is about to receive |
+| `map.json` | The currently-served floor plan | …confirm preprocessing produced something sane |
 
-Full troubleshooting for each of these states is in the runbook.
+## What gets sent to the Pi
 
----
+When you click **Plan Path**, the planner writes `path_plan.json` — a Python dictionary serialized as JSON, listing every waypoint as `(x, y, yaw)` plus formation metadata. The JSON file is **a Mac-side artifact** for the GUI and `sim_navigator` to consume; it is NOT itself the wire format to the Pi.
 
-## Mapping advice (separate from this folder's runtime)
+In the **dev sandbox**, the browser auto-publishes the waypoints over rosbridge on `/navigation/waypoints` (`geometry_msgs/PoseArray`) as soon as `path_plan.json` updates — Plan Path is the trigger; you do not need to click anything else. The **Send Goal** button does something different: it publishes a single `PoseStamped` on `/goal_pose`. In the dev sandbox these two flows are independent.
 
-The localization can only do as well as the underlying map. **Better
-source data beats more aggressive cleanup every time.** When doing a
-fresh mapping run:
+In the **deployed system**, only `/goal_pose` and `/formation/path` exist: the laptop's `path_planner_node` subscribes to `/goal_pose`, plans, and publishes `/formation/path` (latched `PoseArray`); the leader's `navigation_node` consumes it. The full topic table, message schemas, and the leader's per-tick control loop are documented in **[`NAVIGATION_PIPELINE.md`](NAVIGATION_PIPELINE.md)** — go there for the technical reference.
 
-1. Drive **slowly** (0.1–0.15 m/s) — fast motion → blur → bad ORB → bad map
-2. **Pause + spin 360°** at every station — captures features from all angles
-3. **Multiple passes** through the same area — drives loop closures (the main quality signal)
-4. **Return to start** — forces a global loop closure that tightens the trajectory
-5. Avoid: glass, mirrors, blank walls, fast turns, dim light
+## Glossary
 
-A healthy mapping run for a small room produces 20–30 loop closures.
-If your `.db` shows fewer, expect localization to be twitchy or
-require initial-pose hints in more areas.
+- **A\*** — a shortest-path search algorithm; explores grid cells in order of "cost so far + estimated remaining cost."
+- **APF (Artificial Potential Field)** — treats the goal as an attractive force and obstacles as repulsive forces; the robot follows the resulting "wind."
+- **holonomic** — can move in any direction without first turning; this robot can strafe sideways.
+- **swerve** — a wheel module that can both spin (drive) and pivot (steer) independently. Four of these give the robot its holonomic motion.
+- **virtual center** — an imaginary point in the middle of the formation; the planner plans for *that* point and each robot keeps a fixed offset from it.
+- **lookahead** — how far ahead on the path the controller is aiming at any instant.
+- **formation** — the group of robots moving together while keeping a fixed shape.
+- **occupancy grid** — a 2D top-down array where each cell is "ground", "obstacle", or "unknown".
+- **inflation** — bloating obstacles by the robot's radius so the planner can treat the robot as a point.
+- **EKF (Extended Kalman Filter)** — a sensor-fusion math trick that combines wheel odometry and visual pose into a smooth best-guess of where the robot is.
+- **RANSAC** — fits a flat plane through a noisy point cloud; used here to find the floor.
+- **DBSCAN** — clusters nearby points and tags lonely ones as outliers; used here to drop ghost blobs.
+- **rosbridge** — a small WebSocket server that lets a browser talk to ROS as if it were a native client.
+- **PoseArray** — a standard ROS message containing an ordered list of `(position, orientation)` poses; the format the Pi expects waypoints in.
+
+## Tuning knobs you'll actually touch
+
+| Parameter | Where | Raise it to… | Lower it to… |
+|---|---|---|---|
+| `formation_radius` | `compute_plan()` arg in `server.py` | get a wider berth around walls; refuses tighter gaps | squeeze through narrower doorways; less safety margin |
+| `target_spacing` | `arclength_resample()` default (0.15 m) | give the controller fewer, longer waypoints (smoother but lazier) | give it more, shorter ones (twitchier but tighter tracking) |
+| `yaw_policy` | `compute_plan()` arg | set to `"tangent"` to face direction of motion, or `"hold"` to keep start yaw |  |
+| `--dbscan-min-cluster-size` | `db_to_map_json.py` flag | drop more ghost blobs; risk losing real small objects | keep more detail; risk more noise in the map |
+| `--robot-height` | `db_to_map_json.py` flag | only count obstacles up to this height; ignore tall stuff | include more of the column above the robot |
+
+## Project structure
+
+```
+robot_path_planner/
+├── README.md                 ← you are here
+├── NAVIGATION_PIPELINE.md    ← end-to-end control flow + JSON/ROS schemas + citations
+├── RUNBOOK.md                ← step-by-step operator manual + smoke test + troubleshooting
+│
+├── db_to_map_json.py         ← stage 1a: 3D cloud → 2D grid
+├── inpaint_floor.py          ← stage 1b: fill floor holes
+├── tighten_obstacles.py      ← stage 1c: rescue short obstacles
+│
+├── astar_planner.py          ← stages 2-3: A* + APF refinement + resample
+├── map_to_obstacles.py       ← grid → obstacle circles for the controller
+│
+├── server.py                 ← Flask backend (port 5002)
+├── ros_pose_bridge.py        ← ROS TF → HTTP relay for the live-pose pill
+├── mock_ros_bridge.py        ← laptop-only stand-in for the above
+│
+├── sim_navigator.py          ← ROS-free mock of the robot driving the path
+├── index.html                ← web UI (3D view + 2D path tab)
+├── path_viewer.html          ← lightweight standalone path-only viewer
+│
+├── map.json                  ← currently-served floor plan
+├── path_plan.json            ← latest planned route (overwritten on Plan)
+├── tb3_1_room.db             ← source RTAB-Map mapping run
+└── run_test.sh               ← convenience launcher
+```
+
+## Where to read next
+
+- **[`NAVIGATION_PIPELINE.md`](NAVIGATION_PIPELINE.md)** — full control flow from browser click to wheel command. Covers the Mac↔Pi data boundary, the exact `geometry_msgs/PoseArray` shape sent to the robot, every `path_plan.json` field, and academic citations for all 15 algorithms in the stack.
+- **[`RUNBOOK.md`](RUNBOOK.md)** — operator manual: prerequisites, first-run sequence, day-to-day commands, curl smoke test, and the top-5 failure modes with fixes. Aim is "from a fresh checkout to a working **Plan Path** click in under ten minutes."
+- The header docstring at the top of each `.py` file is a self-contained mini-spec for that file. They are the source of truth when this README and the code disagree.
+
+## Acknowledgements / citations
+
+This project stands on classical mobile-robotics work — A\* search, Khatib's potential-field method for obstacle avoidance, Laplacian consensus for multi-robot formation control, and the RANSAC/DBSCAN family of cloud-cleaning algorithms. Full citations and the specific formulations used live in `NAVIGATION_PIPELINE.md` alongside the technical write-up of each layer.

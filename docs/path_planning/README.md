@@ -2,6 +2,8 @@
 
 A laptop-side planning brain that turns a 3D room scan into a safe, smooth route for a small mobile robot — and lets you preview that route in the browser before sending it to the hardware.
 
+> **Scope of this repo.** This is the **Mac-side dev sandbox**: Flask + JSON files + a browser preview + a mock executor. It is where the planning *algorithm* lives and gets tuned. The deployed system (per Tankhun's swerve-transport architecture) is a ROS 2 node `path_planner_node` running on the laptop, subscribing to `/goal_pose` + `/formation/footprint` + `/tb3_*/pose`, and publishing `/formation/path` (latched `geometry_msgs/PoseArray`). The **algorithm** in `astar_planner.compute_plan()` is reused as-is; the integration glue is the only thing that changes between sandbox and deployment. The wrapper node lives at `ros2_ws/src/swerve_formation/swerve_formation/path_planner_node.py` in the team repo.
+
 ## What this is
 
 This project takes a 3D scan of a real room, cleans it into a simple top-down floor plan, and figures out a route from where the robot is to where you want it to go. You click a goal in a 3D web view, the planner draws the route in yellow, and a browser-based simulation plays back what the robot *would* do on that route. When everything looks right, the same route is shipped over to a Raspberry Pi on the robot, which actually drives it. Think of this repo as the part that does the *thinking* — the Pi does the *moving*.
@@ -32,7 +34,7 @@ This project takes a 3D scan of a real room, cleans it into a simple top-down fl
 
 ## How it works (5 stages, plain English)
 
-1. **Stage 1 — From 3D scan to 2D floor plan.** *(map preparation)* The robot drives around the room with a depth camera and builds up a 3D point cloud (`tb3_1_room.db`). `db_to_map_json.py` exports that cloud, throws away noise (Statistical Outlier Removal — drops lonely floating points; DBSCAN — drops small disconnected blobs), and slices it into a simple top-down grid where every 5 cm cell is labelled "ground", "obstacle" or "unknown". `inpaint_floor.py` then fills in floor holes the camera missed, and `tighten_obstacles.py` rescues short objects (panel rims, tire bases) that the floor-detection step accidentally labelled as ground.
+1. **Stage 1 — From 3D scan to 2D floor plan.** *(map preparation)* The robot drives around the room with a depth camera and builds up a 3D point cloud (`tb3_1_room.db`). `db_to_map_json.py` exports that cloud, throws away noise (Statistical Outlier Removal — drops lonely floating points; DBSCAN — drops small disconnected blobs), and slices it into a simple top-down grid where every 2 cm cell is labelled "ground", "obstacle" or "unknown". `inpaint_floor.py` then fills in floor holes the camera missed, and `tighten_obstacles.py` rescues short objects (panel rims, tire bases) that the floor-detection step accidentally labelled as ground.
 
 2. **Stage 2 — Drawing the route.** *(global path planning with A\*)* Given the cleaned grid and a click-selected goal, `astar_planner.compute_plan()` first inflates every obstacle by the robot's footprint so the planner can safely treat the robot as a single point. Then it runs *A\** — the classic shortest-path search that explores cells in order of "how far have I gone + how far do I still have to go" — to produce a sequence of grid waypoints from start to goal.
 
@@ -40,7 +42,7 @@ This project takes a 3D scan of a real room, cleans it into a simple top-down fl
 
 4. **Stage 4 — Hand-off to the robot.** *(JSON path file)* The planner saves the finished route to `path_plan.json` — a plain text file listing every waypoint with its (x, y) position and yaw (which way the robot should be facing there), plus metadata like the inflation radius that was actually used. The browser reads this file and offers two views: the 3D map with the route drawn on top, and a clean 2D "path-only" tab that shows exactly what the robot will receive.
 
-5. **Stage 5 — Execution.** *(Pi takes over)* The Raspberry Pi on the robot is subscribed to a standard ROS topic. When the browser publishes the path on that topic (or the user uploads the JSON file directly), the Pi's `navigation_node.py` runs its own onboard control loop — closing the small remaining gap between "planned point" and "actual position" with a velocity ramp, a yaw controller, and the same APF math as a safety net. The laptop is no longer in the loop once execution starts.
+5. **Stage 5 — Execution.** *(Pi takes over)* In the deployed system, the elected leader robot subscribes to `/formation/path` (latched `PoseArray`) which `path_planner_node` publishes on the laptop. The leader's `navigation_node.py` runs the onboard control loop — closing the small remaining gap between "planned point" and "actual position" with pure-pursuit, a velocity ramp on (vx, vy), and a local APF safety layer that fires on **dynamic** obstacles seen on `/navigation/obstacles` (the static map is already kept clear by the planner's inflation; the runtime APF is for unmapped objects). The laptop is no longer in the path-following loop once execution starts; it just hosts the Zenoh router for inter-robot consensus.
 
 ## What this project IS NOT
 
@@ -79,7 +81,7 @@ In the browser: click **Sim Pose** (or wait for a real localized pose), click so
 | `server.py` | Flask backend (map, plan, pose endpoints) on :5002 | …change endpoints, ports, or the wire format |
 | `index.html` | The web UI: 3D view, click-to-goal, Plan Path, 2D path view | …adjust visuals, button behaviour, or rosbridge bindings |
 | `sim_navigator.py` | ROS-free mock of the robot for end-to-end preview | …test the full pipeline without real hardware |
-| `ros_pose_bridge.py` | Streams the live robot pose from ROS TF into the GUI | …the LOC pill is stuck on `NO BRIDGE` |
+| `ros_pose_bridge.py` | ROS-side script that POSTs `/tb3_*/pose` to Flask `/pose` over HTTP, so the GUI can display live localization | …the LOC pill is stuck on `NO BRIDGE` |
 | `map_to_obstacles.py` | Extracts obstacle blobs as (x, y, radius) circles | …the navigation node needs an obstacle list |
 | `mock_ros_bridge.py` | Stand-in for the Pi-side ROS bridge during Mac dev | …you're testing on a laptop with no ROS install |
 | `path_plan.json` | The current plan (regenerated on every Plan Path click) | …debug what the Pi is about to receive |
@@ -87,7 +89,11 @@ In the browser: click **Sim Pose** (or wait for a real localized pose), click so
 
 ## What gets sent to the Pi
 
-When you click **Plan Path**, the planner writes `path_plan.json` — a Python dictionary serialized as JSON, listing every waypoint as `(x, y, yaw)` plus formation metadata. The browser reads that file back, draws it, and re-publishes it on the standard ROS topic `/navigation/waypoints` as a `geometry_msgs/PoseArray` message (via rosbridge over WebSocket). The Pi subscribes to that topic, drops the points into its own waypoint queue, and starts driving. The full topic table, message schemas, and the leader's per-tick control loop are documented in **[`NAVIGATION_PIPELINE.md`](NAVIGATION_PIPELINE.md)** — go there for the technical reference.
+When you click **Plan Path**, the planner writes `path_plan.json` — a Python dictionary serialized as JSON, listing every waypoint as `(x, y, yaw)` plus formation metadata. The JSON file is **a Mac-side artifact** for the GUI and `sim_navigator` to consume; it is NOT itself the wire format to the Pi.
+
+In the **dev sandbox**, the browser auto-publishes the waypoints over rosbridge on `/navigation/waypoints` (`geometry_msgs/PoseArray`) as soon as `path_plan.json` updates — Plan Path is the trigger; you do not need to click anything else. The **Send Goal** button does something different: it publishes a single `PoseStamped` on `/goal_pose`. In the dev sandbox these two flows are independent.
+
+In the **deployed system**, only `/goal_pose` and `/formation/path` exist: the laptop's `path_planner_node` subscribes to `/goal_pose`, plans, and publishes `/formation/path` (latched `PoseArray`); the leader's `navigation_node` consumes it. The full topic table, message schemas, and the leader's per-tick control loop are documented in **[`NAVIGATION_PIPELINE.md`](NAVIGATION_PIPELINE.md)** — go there for the technical reference.
 
 ## Glossary
 

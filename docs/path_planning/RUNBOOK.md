@@ -5,6 +5,11 @@ the operator's manual: someone who has never touched the system before
 should be able to follow it top-to-bottom and reach a successful
 **Plan Path** click in under ten minutes.
 
+> **Scope.** This runbook covers the **Mac-side dev sandbox** (Flask + rosbridge
+> + sim_navigator). The deployed system uses `path_planner_node` as a ROS 2
+> node — its bring-up is documented in `swerve_bringup/launch/` in the team
+> repo, not here.
+
 ---
 
 ## Prerequisites
@@ -121,10 +126,16 @@ Click in this order — `sim_navigator` will refuse to start until step 1 is don
 3. Drag the orientation slider for the goal yaw.
 4. Click **Plan Path** — `server.py` runs A\* + APF refinement, writes
    `path_plan.json`, and the browser polls it. A yellow polyline appears.
+   The browser AUTO-publishes the new waypoints on `/navigation/waypoints`
+   (`geometry_msgs/PoseArray`) as soon as it sees the new file — you do
+   not need to click anything else for the Pi to receive them.
 5. Switch to the **2D Path** tab to inspect the exact `(x, y, yaw)`
    waypoints that will be sent to the robot.
-6. (Optional) Click **Send Goal** to publish the plan over rosbridge to
-   the real Pi.
+6. (Optional) **Send Goal** publishes a single `geometry_msgs/PoseStamped`
+   on `/goal_pose` — that's the input to `path_planner_node` in the
+   deployed system. It does NOT publish the waypoint list; that
+   already happened in step 4. If a goal goes stale, re-run Plan Path
+   (Send Goal would only re-publish the goal pose, not a new path).
 
 ---
 

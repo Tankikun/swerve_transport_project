@@ -193,10 +193,6 @@ def synthesize_floor_points(map_data: dict, density_cm: float = 5.0,
     new_pts  = new_pts[:k]
     new_cols = new_cols[:k]
 
-    skipped_too_close = (len(range(0, H, cells_per_point))
-                         * len(range(0, W, cells_per_point))
-                         - len(cell_xy)) if False else 0  # not tracked here
-
     print(f"[3d] {len(cell_xy)} empty cells found at {density_cm}cm spacing "
           f"(search radius {search_radius_m}m, floor band)")
     print(f"[3d] {pts_per_cell} jittered points per cell "

@@ -320,6 +320,12 @@ def plan_explicit():
     goal_xy  = (float(g["x"]), float(g["y"]))
     print(f"[plan] explicit start={start_xy} goal={goal_xy}")
 
+    # Optional knobs the GUI can pass in the request body
+    start_yaw = float(s.get("yaw", 0.0))
+    goal_yaw  = float(g.get("yaw", 0.0))
+    yaw_policy = str(body.get("yaw_policy", "tangent"))   # "tangent" | "free" | "smooth_to_goal"
+    target_spacing = float(body.get("target_spacing", 0.15))   # 0 disables resampling
+
     try:
         from astar_planner import compute_plan
         formation_radius = PLAN_FORMATION_DISTANCE / 2 + PLAN_ROBOT_RADIUS
@@ -330,7 +336,11 @@ def plan_explicit():
         ]
         plan = compute_plan(map_data, start_xy, goal_xy,
                             formation_radius=formation_radius,
-                            robots=robots)
+                            robots=robots,
+                            yaw_policy=yaw_policy,
+                            start_yaw=start_yaw,
+                            goal_yaw=goal_yaw,
+                            target_spacing=target_spacing)
     except Exception as e:
         print(f"[plan] explicit A* failed: {e}")
         return jsonify({"error": str(e)}), 500
@@ -340,6 +350,12 @@ def plan_explicit():
         plan["seq"] = _plan_seq
         plan["wall_clock_iso"] = datetime.now(timezone.utc).isoformat()
         plan["start_source"] = "explicit (user click)"
+        # compute_plan already wrote yaw_policy / goal_yaw / start_yaw into
+        # metadata, but make sure they reflect what the request asked for
+        # (in case compute_plan defaulted them).
+        plan["metadata"]["goal_yaw"]   = goal_yaw
+        plan["metadata"]["start_yaw"]  = start_yaw
+        plan["metadata"]["yaw_policy"] = yaw_policy
 
     with open(PLAN_PATH, "w") as f:
         json.dump(plan, f, separators=(",", ":"))
