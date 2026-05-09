@@ -81,6 +81,33 @@ static uint32_t g_odom_prev_ms = 0;
 // Debug counter for encoder-read failures (for occasional reporting)
 static uint32_t g_enc_read_fail_count = 0;
 
+// ── Cosine drive ramp ────────────────────────────────────────────────────────
+// Last cycle's measured per-module state, used to attenuate the wheel
+// drive command while the joint is slewing toward a new commanded δ.
+//
+// The slip mode this addresses: drive motors reach their commanded ω in
+// ~10 ms (Dynamixel velocity-mode PI loop) but joint motors take 100-300
+// ms to physically traverse a δ change. During that window, if the
+// commanded δ jumped by tens of degrees (general turn) or all the way
+// across the ±π/2 boundary via the IK's k=1 selection (true flip), the
+// wheel produces force in a direction misaligned with the desired body
+// twist — the four wheels fight each other through the chassis, slip,
+// and corrupt encoder odometry (which can't see slip).
+//
+// The ramp scales each module's drive output by cos(commanded_δ −
+// measured_δ), clamped to [0, 1]. Aligned → full drive. 90° off →
+// zero drive. Smooth in between. Drive output is therefore physically
+// synchronised to actual joint angle, so no wrong-direction thrust is
+// produced while the joint is in flight.
+//
+// DEADBAND below sits well above the XL430 encoder's ~0.088° resolution
+// and typical ±0.5° steady-state jitter so small fluctuations don't
+// attenuate drive in steady state.
+static const float DRIVE_RAMP_DEADBAND_RAD = 0.05f;   // ~3°
+static ModuleState g_last_measured[4] = {{0.0f, 0.0f}, {0.0f, 0.0f},
+                                          {0.0f, 0.0f}, {0.0f, 0.0f}};
+static bool g_have_measured = false;
+
 // POSE is sent every ODOM_DIV motor cycles. Motor cycle is 30 ms,
 // so ODOM_DIV = 1 gives 33 Hz POSE rate (the previous 10 → 3 Hz was
 // too slow for the EKF prediction step and for RTAB-Map's motion
@@ -384,6 +411,28 @@ void loop()
     int32_t joint_vals[4], wheel_vals[4];
     ik_to_dynamixel(g_modules, joint_vals, wheel_vals);
 
+    // Cosine drive ramp — see g_last_measured comment for rationale.
+    // Skipped on the first cycle (no measured value yet) and after an
+    // encoder read failure; in those cases drive runs full and the
+    // existing watchdog / FK fallback handles the brief unprotected
+    // window. Negative cos values (>90° misalignment) clamp to 0,
+    // producing zero drive when the joint is far enough off that any
+    // wheel force would push the chassis the wrong way.
+    if (g_have_measured) {
+      for (int ik = 0; ik < 4; ik++) {
+        float diff = g_modules[ik].delta - g_last_measured[ik].delta;
+        float scale;
+        if (fabsf(diff) < DRIVE_RAMP_DEADBAND_RAD) {
+          scale = 1.0f;
+        } else {
+          scale = cosf(diff);   // cos is even; no need to abs
+          if (scale < 0.0f) scale = 0.0f;
+        }
+        int m = IK_TO_MOTOR[ik];
+        wheel_vals[m] = (int32_t)((float)wheel_vals[m] * scale);
+      }
+    }
+
     bool j_ok = motor_driver.controlJoints(joint_vals);
     bool w_ok = motor_driver.controlWheels(wheel_vals);
 
@@ -400,6 +449,11 @@ void loop()
     bool used_encoders = read_measured_module_states(measured);
     if (used_encoders) {
       fk_from_module_states(measured, vx, vy, wz);
+      // Cache for next cycle's drive ramp. Done only on a successful
+      // read so a transient bus glitch doesn't poison the ramp with
+      // a half-populated array.
+      for (int i = 0; i < 4; i++) g_last_measured[i] = measured[i];
+      g_have_measured = true;
     } else {
       g_enc_read_fail_count++;
       fk_from_module_states(g_modules, vx, vy, wz);
