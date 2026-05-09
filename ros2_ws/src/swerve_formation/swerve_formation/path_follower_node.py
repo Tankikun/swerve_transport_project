@@ -4,12 +4,18 @@ path_follower_node.py
 Waypoint follower for the elected formation leader.
 
 Inputs come from the laptop UI as two one-shot messages:
-  1. After localization:  /formation/leader_offset   — (x, y) offset of the
-                                                       leader from the virtual
-                                                       centre, in the leader's
-                                                       BODY frame [m].
-  2. After goal click:    /navigation/waypoints      — ordered waypoint list
-                                                       (planned with A* + APF).
+  1. After localization:  /formation/offset    — PoseArray (frame_id "map")
+                                                  with one pose per robot, where
+                                                  pose.position.(x, y) is that
+                                                  robot's WORLD-frame offset from
+                                                  the virtual centre. This node
+                                                  reads the entry at the
+                                                  `formation_index` parameter and
+                                                  uses it directly to compute the
+                                                  virtual centre as
+                                                  centre = leader_xy − offset.
+  2. After goal click:    /navigation/waypoints — ordered waypoint list
+                                                  (planned with A* + APF).
 
 The follower drives /virtual_center/cmd_vel toward each waypoint in turn,
 advancing when the virtual centre is within tolerance of the current target,
@@ -22,8 +28,9 @@ Subscriptions
   /formation/leader        std_msgs/String         — robot_id of current leader
   /{robot_id}/ekf/odom     nav_msgs/Odometry       — authoritative pose (EKF output)
   /navigation/waypoints    geometry_msgs/PoseArray — ordered waypoint list (in map frame)
-  /formation/leader_offset geometry_msgs/Vector3   — leader offset from virtual centre,
-                                                     in leader BODY frame [m]; z ignored
+  /formation/offset        geometry_msgs/PoseArray — per-robot offsets from virtual
+                                                     centre, in WORLD/map frame.
+                                                     Read poses[formation_index].position
 
 Publications
   /virtual_center/cmd_vel  geometry_msgs/Twist     — velocity for the formation
@@ -33,7 +40,7 @@ Publications
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseArray, Vector3
+from geometry_msgs.msg import Twist, PoseArray
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
@@ -77,7 +84,9 @@ class PathFollowerNode(Node):
     def __init__(self):
         super().__init__('path_follower_node')
         self.declare_parameter('robot_id', 'tb3_1')
-        self._robot_id = self.get_parameter('robot_id').value
+        self.declare_parameter('formation_index', 0)
+        self._robot_id        = self.get_parameter('robot_id').value
+        self._formation_index = int(self.get_parameter('formation_index').value)
 
         # ── State ────────────────────────────────────────────────────────────
         self._is_leader  = False
@@ -89,11 +98,10 @@ class PathFollowerNode(Node):
         self._vel_actual   = np.zeros(2)
         self._omega_actual = 0.0
 
-        # Leader's offset from the virtual centre, in the leader's BODY frame,
-        # in metres. Sent once by the UI after localization completes. Until it
-        # arrives, fall back to using the leader's pose as the virtual centre
-        # and warn once so testing isn't blocked.
-        self._leader_offset_body: np.ndarray | None = None
+        # Offset of THIS robot from the virtual centre, in the WORLD/map frame
+        # [m]. Sent once by the UI after localization. Used directly to compute
+        # the virtual centre as centre = leader_xy − offset.
+        self._offset_world: np.ndarray | None = None
         self._warned_no_offset = False
 
         # ── Subscriptions ────────────────────────────────────────────────────
@@ -103,8 +111,8 @@ class PathFollowerNode(Node):
                                  self._pose_cb, 10)
         self.create_subscription(PoseArray, '/navigation/waypoints',
                                  self._waypoints_cb, 10)
-        self.create_subscription(Vector3, '/formation/leader_offset',
-                                 self._leader_offset_cb, 10)
+        self.create_subscription(PoseArray, '/formation/offset',
+                                 self._offset_cb, 10)
 
         # ── Publishers ───────────────────────────────────────────────────────
         self._cmd_pub    = self.create_publisher(Twist,  '/virtual_center/cmd_vel', 10)
@@ -150,14 +158,32 @@ class PathFollowerNode(Node):
         self._reset_ramp()
         self.get_logger().info(f'Received {len(wps)} waypoints.')
 
-    def _leader_offset_cb(self, msg: Vector3):
-        """Cache the leader's body-frame offset from the virtual centre."""
-        offset = np.array([float(msg.x), float(msg.y)])
-        if self._leader_offset_body is None:
-            self.get_logger().info(
-                f'Leader offset received: x={offset[0]:.3f} m, y={offset[1]:.3f} m (body frame)'
+    def _offset_cb(self, msg: PoseArray):
+        """
+        Cache this robot's WORLD-frame offset from the virtual centre.
+
+        Message contract: PoseArray in the map frame, one pose per robot.
+        We pick poses[formation_index] and store its (x, y) directly — no
+        rotation. The virtual centre is then simply leader_xy − offset_world.
+        """
+        if self._formation_index >= len(msg.poses):
+            self.get_logger().warn(
+                f'Offset PoseArray has {len(msg.poses)} entries; '
+                f'formation_index={self._formation_index} is out of range — ignoring.'
             )
-        self._leader_offset_body = offset
+            return
+
+        p = msg.poses[self._formation_index].position
+        offset = np.array([float(p.x), float(p.y)])
+
+        first = self._offset_world is None
+        self._offset_world = offset
+
+        if first:
+            self.get_logger().info(
+                f'Offset received (idx={self._formation_index}): '
+                f'({offset[0]:.3f}, {offset[1]:.3f}) m in map frame.'
+            )
 
     # ── Control loop ─────────────────────────────────────────────────────────
 
@@ -229,27 +255,21 @@ class PathFollowerNode(Node):
         """
         Compute the virtual centre's (x, y) in the world/map frame.
 
-        The leader sits at  centre + R(theta) @ leader_offset_body,
-        so reverse the transform to recover the centre from the leader's pose:
+            centre = leader_xy − offset_world
 
-            centre = leader_xy - R(theta) @ leader_offset_body
-
-        If the offset hasn't been received yet, fall back to the leader's
-        raw pose and warn once so testing isn't blocked.
+        Both terms live in the map frame, so it's a plain subtraction — no
+        rotation. If the offset hasn't been received yet, fall back to the
+        leader's raw pose and warn once so testing isn't blocked.
         """
-        if self._leader_offset_body is None:
+        if self._offset_world is None:
             if not self._warned_no_offset:
                 self.get_logger().warn(
-                    'No leader offset yet — using leader pose as virtual centre.'
+                    'No offset yet — using leader pose as virtual centre.'
                 )
                 self._warned_no_offset = True
             return self._pose[:2].copy()
 
-        th   = self._pose[2]
-        c, s = np.cos(th), np.sin(th)
-        R    = np.array([[c, -s], [s, c]])
-        offset_world = R @ self._leader_offset_body
-        return self._pose[:2] - offset_world
+        return self._pose[:2] - self._offset_world
 
     def _apply_ramp(self, v_des: np.ndarray, omega_des: float):
         """Move actual velocity toward desired by at most ACC_MAX*DT (and ALPHA_MAX*DT)."""
