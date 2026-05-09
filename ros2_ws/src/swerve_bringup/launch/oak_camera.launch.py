@@ -147,7 +147,7 @@ def launch_setup(context, *args, **kwargs):
             name='oak_tf_static' + suffix,
             arguments=[
                 '--x', cam_x, '--y', cam_y, '--z', cam_z,
-                '--roll', '-1.5707963', '--pitch', '0', '--yaw', '-1.5707963',
+                '--roll', '-1.5707963', '--pitch', '0', '--yaw', '-1.5934856',
                 '--frame-id', f'{robot_id}_base_link',
                 '--child-frame-id', optical_frame,
             ],
