@@ -47,16 +47,56 @@
   .status-pill.lost .dot           { background: var(--accent2); }
   .status-pill.lost                { color: var(--accent2); border-color: var(--accent2); }
 
-  /* "Set Initial Pose" tool button — RViz "2D Pose Estimate" equivalent.
-     Idle: outlined accent. Active (placing/yaw): filled accent. */
+  /* Combined Set-Initial-Pose + R1/R2 target picker.
+     One outlined pill, three internal segments separated by 1 px lines:
+       [📍 Set Initial Pose] | [for] | [R1] | [R2]
+     Inner buttons draw no border of their own; the outer .pose-control-group
+     owns the rounded outline so the whole control reads as a single box. */
+  .pose-control-group {
+    display: inline-flex; align-items: stretch;
+    border: 1px solid var(--accent); border-radius: 20px;
+    overflow: hidden; font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.04em;
+  }
+  /* "Set Initial Pose" segment — RViz "2D Pose Estimate" equivalent.
+     Idle: outlined accent (lives on the parent). Active (placing/yaw): filled. */
   .set-pose-btn {
-    font-family: var(--font-mono); font-size: 11px;
-    padding: 4px 12px; border-radius: 20px;
-    border: 1px solid var(--accent); background: transparent;
+    font-family: inherit; font-size: inherit;
+    padding: 4px 14px; border: none; background: transparent;
     color: var(--accent); cursor: pointer; transition: background 0.2s;
+    border-right: 1px solid var(--accent);
   }
   .set-pose-btn:hover  { background: rgba(0, 229, 255, 0.1); }
   .set-pose-btn.active { background: var(--accent); color: var(--bg); }
+
+  /* "for" label between the action and the target picker. */
+  .init-target-label {
+    padding: 4px 10px; color: var(--muted);
+    border-right: 1px solid var(--accent); background: transparent;
+    display: flex; align-items: center; user-select: none;
+    font-size: 10px;
+  }
+  /* R1 / R2 segments — outlined siblings; the one matching the chosen
+     target is filled. */
+  .init-target-btn {
+    padding: 4px 12px; background: transparent; border: none;
+    color: var(--accent); cursor: pointer; transition: background 0.15s;
+    font-family: inherit; font-size: 10px;
+  }
+  .init-target-btn:hover  { background: rgba(0, 229, 255, 0.1); }
+  .init-target-btn.active { background: var(--accent); color: var(--bg); }
+  .init-target-btn + .init-target-btn { border-left: 1px solid var(--accent); }
+
+  /* Map-stats text — plain muted line shown beneath the 3D panel label,
+     no border, no background. Just there if you need the numbers. */
+  .map-stats {
+    position: absolute; top: 30px; left: 16px;
+    font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: 0.04em; color: var(--muted);
+    opacity: 0.55; pointer-events: none; z-index: 10;
+    max-width: calc(100% - 32px);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
 
   .workspace { display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr auto;
                gap: 1px; background: var(--border); flex: 1; overflow: hidden; }
@@ -131,22 +171,27 @@
 
 <header>
   <h1>&#9632; Cooperative Multi-Robot Transport System</h1>
-  <div style="display:flex; gap:10px; align-items:center;">
-    <button id="setPoseBtn" class="set-pose-btn"
-            title="Click to seed RTAB-Map's pose estimate (RViz 2D Pose Estimate equivalent)">
-      &#128205; Set Initial Pose
-    </button>
-    <div class="status-pill" id="statusPill">
-      <span class="dot"></span>
-      <span id="statusText">Awaiting map...</span>
+  <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+    <div id="initPoseTarget" class="pose-control-group"
+         title="Click 'Set Initial Pose', then click on the map. The hint goes to whichever robot is selected here.">
+      <button id="setPoseBtn" class="set-pose-btn">
+        &#128205; Set Initial Pose
+      </button>
+      <span class="init-target-label">for</span>
+      <button class="init-target-btn active" data-robot-id="tb3_0">R1</button>
+      <button class="init-target-btn"        data-robot-id="tb3_1">R2</button>
     </div>
     <div class="status-pill" id="rosPill">
       <span class="dot"></span>
       <span class="ros-text">ROS Disconnected</span>
     </div>
-    <div class="status-pill" id="locStatus">
+    <div class="status-pill" id="locStatus1">
       <span class="dot"></span>
-      <span id="locStatusText">LOC: ...</span>
+      <span id="locStatus1Text">R1: ...</span>
+    </div>
+    <div class="status-pill" id="locStatus2">
+      <span class="dot"></span>
+      <span id="locStatus2Text">R2: ...</span>
     </div>
   </div>
 </header>
@@ -154,6 +199,7 @@
 <div class="workspace">
   <div class="panel" id="panel3d">
     <div class="panel-label">3D Environment — Drag to orbit · Scroll to zoom · Click on the floor to set destination · Dbl-click to refit</div>
+    <div class="map-stats" id="mapStatsLine">Awaiting map…</div>
     <div class="loading" id="loading3d">
       <div class="spinner"></div>
       <span>Loading point cloud...</span>
@@ -194,18 +240,19 @@
 
 <script>
 // =======================================================================
-// Cooperative Multi-Robot Transport System — 3D + localization
+// Cooperative Multi-Robot Transport System — 3D + dual-robot localization
 //
 //   • Z-up world frame from the .db (REP-103, no axis remap).
 //   • Single THREE.Scene, single canvas — all interaction in 3D.
 //   • Click on the floor → raycast → world (X, Y, floor_z) → goal.
-//   • "Set Initial Pose" tool seeds RTAB-Map's pose estimate (RViz
-//     "2D Pose Estimate" equivalent) — click to anchor, move to set
-//     yaw, click again to confirm + POST /set_initial_pose.
-//   • LOC status pill polls /pose every 200 ms — green/yellow/red
-//     based on RTAB-Map's localization freshness.
-//   • A cyan cone shows RTAB-Map's reported robot pose; a green
-//     sphere shows the rosbridge /tb3_0/pose feed (typically EKF).
+//   • "Set Initial Pose" tool seeds RTAB-Map's pose estimate.
+//   • TWO robot pose feeds polled in parallel (one per robot). Each
+//     robot has its own /pose/{id} endpoint:
+//       - When ONE finishes localizing → its 35 × 35 × 10 cm box +
+//         heading arrow appears.
+//       - When BOTH finish → both boxes show (with NO per-robot
+//         heading arrows), wrapped in an outer frame, plus a virtual
+//         centre marker at the midpoint with the system heading arrow.
 // =======================================================================
 
 const ROSBRIDGE_URL    = "ws://localhost:9090";
@@ -214,19 +261,55 @@ const GOAL_TOPIC       = "/goal_pose";
 const POSE_POLL_MS     = 200;
 
 // =======================================================================
+// Robot configuration — one entry per pose feed. Each robot is a 35 × 35
+// × 10 cm body. The endpoint URL is what the GUI polls. Server-side, an
+// instance of ros_pose_bridge.py running with `robot_id:=<id>` should
+// POST to /pose; the server demuxes by robot_id and exposes per-robot
+// reads at /pose/{id}. (See server.py for the bridge code.)
+// =======================================================================
+const ROBOTS = [
+  { id: 'tb3_0', label: 'R1', url: '/pose/tb3_0' },
+  { id: 'tb3_1', label: 'R2', url: '/pose/tb3_1' },
+];
+const ROBOT_BODY_M   = 0.35;     // each robot's footprint side (square)
+const ROBOT_HEIGHT_M = 0.10;     // each robot's vertical extent
+
+// Goal-box dimensions (used by the goal envelope + collision check).
+// The goal represents where the multi-robot SYSTEM should end up; its
+// width is one robot's depth (35 cm) and its length is the typical
+// inter-robot separation (50 cm). Kept fixed for now — when both robots
+// are localized you can read the live system extent off the outer frame.
+const GOAL_WIDTH_M  = 0.35;
+const GOAL_LENGTH_M = 0.50;
+
+// Number of samples taken along each side of the goal footprint when
+// checking for obstacle overlap. 24 along a 50 cm edge is one sample
+// every ~2 cm — well under the typical grid resolution.
+const COLLISION_SAMPLES_PER_SIDE = 24;
+
+// =======================================================================
 // State
 // =======================================================================
 let mapData     = null;
 let goal        = null;
-let robotPose   = null;        // from rosbridge /tb3_0/pose subscription
-let livePose    = null;        // from /pose HTTP polling (RTAB-Map output)
+let robotPose   = null;        // from rosbridge /tb3_0/pose subscription (legacy)
 
-let cloudObj    = null;
-let goalGroup   = null;
-let robotGroup  = null;        // green sphere — rosbridge feed
-let livePoseGroup = null;      // cyan cone+disk — /pose feed
-let pendingPoseGroup = null;   // visual during Set Initial Pose
+// Per-robot localization state, keyed by robot id.
+//   robotPoses[id] : null | { available, localized, x, y, yaw_rad, ... }
+let robotPoses = {};
+ROBOTS.forEach(r => { robotPoses[r.id] = null; });
 
+let cloudObj   = null;
+let goalGroup  = null;
+let robotGroup = null;          // green sphere — rosbridge feed
+
+// Per-robot 3D markers (single-robot mode) and the combined system
+// marker (when both robots are localized).
+let robotMarkerGroups = {};
+ROBOTS.forEach(r => { robotMarkerGroups[r.id] = null; });
+let combinedMarkerGroup = null; // outer frame + centre marker
+
+let pendingPoseGroup = null;    // visual during Set Initial Pose / Goal placement
 let cloudCenter = new THREE.Vector3();
 let cloudFitR   = 8;
 
@@ -236,30 +319,24 @@ let cloudFitR   = 8;
 //   • Goal:          IDLE -[click]→ GOAL_YAW -[click]→ confirm goal
 const POSE_MODE = {
   IDLE:        'idle',
-  PLACING:     'placing',      // initial-pose: waiting for the first floor click
-  SETTING_YAW: 'setting_yaw',  // initial-pose: yaw being set by mouse
-  GOAL_YAW:    'goal_yaw',     // goal: anchor placed, yaw being set by mouse
+  PLACING:     'placing',
+  SETTING_YAW: 'setting_yaw',
+  GOAL_YAW:    'goal_yaw',
 };
 let poseMode    = POSE_MODE.IDLE;
-let pendingPose = null;        // { x, y, yaw_rad } in world (ROS map) frame
+let pendingPose = null;
 
-// Robot footprint visualisation. Fixed dimensions: the system is a
-// multi-robot pair separated by 50 cm, with each module 35 cm wide and
-// 10 cm tall. Width / height are hardware-fixed; length is set at the
-// system level (passed in here as ROBOT_LENGTH_M, not user-editable).
-// The wireframe box is added as a child of livePoseGroup so it
-// inherits the live pose's position + yaw automatically.
-const ROBOT_LENGTH_M = 0.50;   // metres, transverse extent — the "front side" length
-const ROBOT_WIDTH_M  = 0.35;   // metres, depth along forward direction
-const ROBOT_HEIGHT_M = 0.10;   // metres, vertical
+// Marker colour. Cyan throughout — matches the existing GUI palette.
+const MARKER_COLOR = 0x00e5ff;
+const DANGER_COLOR = 0xff3f6c;
 
-// Simulated-pose mode — when ON, the /pose polling loop ignores the HTTP
-// response and feeds these values to the GUI instead. Lets us check that
-// the marker + envelope render correctly without the full ROS stack.
+// Simulated-pose mode — feeds R1 (tb3_0) a frozen pose so the rendering
+// can be tested without the ROS stack. R2 stays unlocalized in sim mode,
+// which exercises the single-robot rendering path.
 const SIM_POSE = Object.freeze({
   available:          true,
   localized:          true,
-  robot_id:           'sim',
+  robot_id:           'tb3_0',
   frame:              'map',
   x:                  -4.0,
   y:                  -1.3,
@@ -311,7 +388,7 @@ function fitCamera() {
 let dragging       = false;
 let dragMoved      = false;
 let dragStartPos   = { x: 0, y: 0 };
-const DRAG_THRESH  = 5;            // pixels of movement before we count a press as a drag
+const DRAG_THRESH  = 5;
 
 canvas3d.addEventListener("mousedown", e => {
   dragging     = true;
@@ -325,7 +402,6 @@ window.addEventListener("mouseup", () => {
 });
 window.addEventListener("mousemove", e => {
   if (!dragging) return;
-  // Free the mouse for yaw-setting in either flow.
   if (poseMode === POSE_MODE.SETTING_YAW || poseMode === POSE_MODE.GOAL_YAW) return;
   if (!dragMoved) {
     const dx = e.clientX - dragStartPos.x;
@@ -352,8 +428,6 @@ canvas3d.addEventListener("dblclick", () => fitCamera());
 const raycaster = new THREE.Raycaster();
 const ndc       = new THREE.Vector2();
 
-// Hit point on the floor plane at world Z = floor_z, given a mouse event.
-// Returns null if the ray misses the floor or no map is loaded.
 function raycastFloor(e) {
   if (!mapData) return null;
   const rect = canvas3d.getBoundingClientRect();
@@ -369,11 +443,55 @@ function raycastFloor(e) {
 }
 
 // =======================================================================
+// Occupancy-grid collision check for the four sides of the goal footprint
+// =======================================================================
+function cellIsObstacle(wx, wy) {
+  if (!mapData || !mapData.grid) return false;
+  const meta = mapData.metadata;
+  const col = Math.floor((wx - meta.min_x) / meta.resolution);
+  const row = Math.floor((wy - meta.min_y) / meta.resolution);
+  if (col < 0 || col >= meta.grid_width)  return false;
+  if (row < 0 || row >= meta.grid_height) return false;
+  return mapData.grid[row][col] === 2;
+}
+
+function segmentTouchesObstacle(p0, p1, samples) {
+  for (let i = 0; i <= samples; i++) {
+    const t  = i / samples;
+    const wx = p0.x + (p1.x - p0.x) * t;
+    const wy = p0.y + (p1.y - p0.y) * t;
+    if (cellIsObstacle(wx, wy)) return true;
+  }
+  return false;
+}
+
+function localToWorld(lx, ly, yaw, cx, cy) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  return { x: cx + c * lx - s * ly,
+           y: cy + s * lx + c * ly };
+}
+
+function computeCollisionSides(wx, wy, yaw_rad, sx, sy) {
+  if (!mapData || !mapData.grid) return null;
+  const FR = localToWorld( sx/2, -sy/2, yaw_rad, wx, wy);
+  const FL = localToWorld( sx/2,  sy/2, yaw_rad, wx, wy);
+  const BR = localToWorld(-sx/2, -sy/2, yaw_rad, wx, wy);
+  const BL = localToWorld(-sx/2,  sy/2, yaw_rad, wx, wy);
+  const N  = COLLISION_SAMPLES_PER_SIDE;
+  return {
+    front: segmentTouchesObstacle(FR, FL, N),
+    back:  segmentTouchesObstacle(BR, BL, N),
+    left:  segmentTouchesObstacle(BL, FL, N),
+    right: segmentTouchesObstacle(BR, FR, N),
+  };
+}
+
+// =======================================================================
 // Click handler — branches based on poseMode
 // =======================================================================
 canvas3d.addEventListener("click", e => {
   if (!mapData) return;
-  if (dragMoved) return;                           // ignore click that ended a drag
+  if (dragMoved) return;
 
   const hit = raycastFloor(e);
   if (!hit) return;
@@ -383,7 +501,6 @@ canvas3d.addEventListener("click", e => {
   const inside = hit.x >= meta.min_x - margin && hit.x <= meta.max_x + margin &&
                  hit.y >= meta.min_y - margin && hit.y <= meta.max_y + margin;
 
-  // ---- Initial-pose: PLACING (1st click anchors) ----
   if (poseMode === POSE_MODE.PLACING) {
     if (!inside) return;
     pendingPose = { x: hit.x, y: hit.y, yaw_rad: 0 };
@@ -393,19 +510,16 @@ canvas3d.addEventListener("click", e => {
     return;
   }
 
-  // ---- Initial-pose: SETTING_YAW (2nd click confirms + POSTs) ----
   if (poseMode === POSE_MODE.SETTING_YAW) {
     postInitialPose(pendingPose);
     return;
   }
 
-  // ---- Goal: GOAL_YAW (2nd click confirms placement) ----
   if (poseMode === POSE_MODE.GOAL_YAW) {
     confirmGoal(pendingPose);
     return;
   }
 
-  // ---- IDLE: 1st click anchors a new goal; mouse will drive the yaw ----
   if (!inside) {
     showToast("Click is outside the mapped area");
     return;
@@ -413,9 +527,6 @@ canvas3d.addEventListener("click", e => {
   const initialYawRad = parseFloat(document.getElementById("orientSlider").value) * Math.PI / 180;
   pendingPose = { x: hit.x, y: hit.y, yaw_rad: initialYawRad };
   poseMode    = POSE_MODE.GOAL_YAW;
-  // Show the click coords in the bottom bar so the user has immediate
-  // feedback; confirmGoal() will keep them and enable Send Goal on the
-  // second click.
   document.getElementById("valX").textContent = hit.x.toFixed(3);
   document.getElementById("valX").className   = "";
   document.getElementById("valY").textContent = hit.y.toFixed(3);
@@ -426,12 +537,9 @@ canvas3d.addEventListener("click", e => {
 });
 
 // =======================================================================
-// Mousemove during SETTING_YAW — projects cursor onto the floor and
-// computes yaw as the angle from the anchor to the cursor.
+// Mousemove during SETTING_YAW or GOAL_YAW
 // =======================================================================
 canvas3d.addEventListener("mousemove", e => {
-  // Both initial-pose SETTING_YAW and GOAL_YAW use the same logic:
-  // project the cursor onto the floor and aim the arrow at it.
   if ((poseMode !== POSE_MODE.SETTING_YAW && poseMode !== POSE_MODE.GOAL_YAW)
       || !pendingPose) return;
   const hit = raycastFloor(e);
@@ -443,28 +551,52 @@ canvas3d.addEventListener("mousemove", e => {
 // =======================================================================
 // Set Initial Pose — button + state-machine helpers
 // =======================================================================
+
+// Which robot the next Set Initial Pose hint will seed. Wired to the
+// segmented R1 / R2 picker in the header. Defaults to R1 so the
+// behaviour is the same as before the picker was added when the user
+// hasn't touched it.
+let initialPoseTargetRobotId = ROBOTS[0] ? ROBOTS[0].id : "default";
+
+document.querySelectorAll(".init-target-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    initialPoseTargetRobotId = btn.dataset.robotId || "default";
+    document.querySelectorAll(".init-target-btn")
+            .forEach(b => b.classList.toggle(
+              "active", b.dataset.robotId === initialPoseTargetRobotId));
+    // If a Set-Initial-Pose flow is mid-flight, cancel it so the next
+    // anchor click clearly applies to the newly selected target.
+    if (poseMode === POSE_MODE.PLACING || poseMode === POSE_MODE.SETTING_YAW) {
+      cancelInitialPose();
+    }
+  });
+});
+
 document.getElementById("setPoseBtn").addEventListener("click", () => {
-  // Toggle off if we're already in the initial-pose flow.
   if (poseMode === POSE_MODE.PLACING || poseMode === POSE_MODE.SETTING_YAW) {
     cancelInitialPose();
     return;
   }
-  // If the user was mid-goal-placement, drop the pending preview before
-  // we hijack the state machine for the initial-pose flow.
   if (poseMode === POSE_MODE.GOAL_YAW) {
     poseMode    = POSE_MODE.IDLE;
     pendingPose = null;
     removePendingPoseMarker();
   }
-  // Wipe any existing goal marker — starting a fresh Set Initial Pose
-  // means the 3D map should be clean for the new pose.
   clearGoal();
-  // Enter the placing state and update the button.
   poseMode = POSE_MODE.PLACING;
   const btn = document.getElementById("setPoseBtn");
   btn.classList.add("active");
-  btn.textContent = "\u{1F4CD} Click on map to anchor";
+  btn.textContent = "\u{1F4CD} Click on map to anchor "
+                  + targetLabelFor(initialPoseTargetRobotId);
 });
+
+// Map a robot id back to its R1 / R2 label so button text can mention
+// the active target without baking R1=tb3_0 into the string in two
+// places.
+function targetLabelFor(rid) {
+  const r = ROBOTS.find(rr => rr.id === rid);
+  return r ? r.label : rid;
+}
 
 function cancelInitialPose() {
   poseMode    = POSE_MODE.IDLE;
@@ -479,16 +611,26 @@ function cancelInitialPose() {
 }
 
 async function postInitialPose(pose) {
+  // Per-robot endpoint: server stores the hint in the picked robot's
+  // queue and only the matching ros_pose_bridge.py instance picks it up.
+  // robot_id is also included in the body for symmetry / debug-logging.
+  const targetId = initialPoseTargetRobotId || "default";
+  const url      = "/set_initial_pose/" + encodeURIComponent(targetId);
   try {
-    const res = await fetch("/set_initial_pose", {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x: pose.x, y: pose.y, yaw_rad: pose.yaw_rad }),
+      body: JSON.stringify({
+        x:        pose.x,
+        y:        pose.y,
+        yaw_rad:  pose.yaw_rad,
+        robot_id: targetId,
+      }),
     });
     if (res.ok) {
       const j = await res.json();
-      console.log("Initial pose queued, seq=", j.seq);
-      flashConfirmation();
+      console.log("Initial pose queued for", targetId, "seq=", j.seq);
+      flashConfirmation(targetId);
     } else {
       console.warn("Initial pose POST failed:", res.status);
       showToast("Set Initial Pose failed: HTTP " + res.status);
@@ -500,10 +642,13 @@ async function postInitialPose(pose) {
   cancelInitialPose();
 }
 
-function flashConfirmation() {
+function flashConfirmation(targetId) {
   const btn = document.getElementById("setPoseBtn");
   btn._flashing = true;
-  btn.textContent = "✓ Pose sent — RTAB-Map matching…";
+  const lbl = targetId ? targetLabelFor(targetId) : "";
+  btn.textContent = lbl
+    ? `✓ ${lbl} pose sent — RTAB-Map matching…`
+    : "✓ Pose sent — RTAB-Map matching…";
   btn.style.background  = "var(--success)";
   btn.style.color       = "var(--bg)";
   btn.style.borderColor = "var(--success)";
@@ -520,28 +665,18 @@ document.addEventListener("keydown", ev => {
   if (ev.key === "Escape" && poseMode !== POSE_MODE.IDLE) cancelInitialPose();
 });
 
-// Sim Pose toggle — bypasses /pose polling and feeds the GUI a fixed
-// (x, y, yaw) from SIM_POSE so we can verify the marker + envelope render
-// correctly without ROS / RTAB-Map running.
+// =======================================================================
+// Sim Pose toggle — feeds R1 a frozen pose to test rendering offline
+// =======================================================================
 document.getElementById("simPoseBtn").addEventListener("click", () => {
   simModeActive = !simModeActive;
   const btn = document.getElementById("simPoseBtn");
   if (simModeActive) {
     btn.classList.add("active");
     btn.textContent = "\u{1F3AF} Sim ON (-4.0, -1.3)";
-    // Immediately push one frame so feedback is instant; the polling
-    // loop will keep refreshing it on its tick.
-    const simData = { ...SIM_POSE, age_sec: 0,
-                      wall_clock_iso: new Date().toISOString() };
-    livePose = simData;
-    updateLocPill(simData);
-    updateLivePoseMarker(simData);
   } else {
     btn.classList.remove("active");
     btn.textContent = "\u{1F3AF} Sim Pose";
-    // Force the polling loop to re-evaluate from the real /pose endpoint
-    // on the next tick (it'll either restore live data or show NO BRIDGE).
-    livePose = null;
   }
 });
 
@@ -592,7 +727,6 @@ function buildCloud(points, colors) {
 
   scene.add(cloudObj);
 
-  // Floor grid + axes gnomon at the detected floor height
   const xs = geo.boundingBox.max.x - geo.boundingBox.min.x;
   const ys = geo.boundingBox.max.y - geo.boundingBox.min.y;
   const sz = Math.ceil(Math.max(xs, ys, 4)) + 2;
@@ -609,49 +743,270 @@ function buildCloud(points, colors) {
 }
 
 // =======================================================================
-// Markers
+// Generic primitives
 // =======================================================================
 function buildArrow(start, end, color) {
   const geo = new THREE.BufferGeometry().setFromPoints([start, end]);
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
 }
 
-// Goal marker — uses the same shared cone+disk+envelope visual as the
-// live pose and Set-Initial-Pose preview, so the user sees a consistent
-// "robot here" rendering regardless of which mode produced the pose.
+// Heading arrow: cylinder shaft + cone head along robot-local +X.
+// Apex at +0.40 m so the arrow extends past the front face of a 35 cm box.
+function buildHeadingArrow(color) {
+  const grp = new THREE.Group();
+
+  const shaft = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.012, 0.012, 0.32, 12),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  shaft.rotation.z = -Math.PI / 2;
+  shaft.position.x = 0.16;
+  grp.add(shaft);
+
+  const head = new THREE.Mesh(
+    new THREE.ConeGeometry(0.035, 0.08, 12),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  head.rotation.z = -Math.PI / 2;
+  head.position.x = 0.36;
+  grp.add(head);
+
+  return grp;
+}
+
+// 12-edge thick-wireframe box (sx × sy × sz). Bottom on the floor.
+// `collisions` is an optional { front, back, left, right } map; sides
+// flagged true get DANGER_COLOR edges + caps.
+function buildBoxFrame(sx, sy, sz, color, opts = {}) {
+  const env = new THREE.Group();
+  const t   = 0.012;
+  const collisions = opts.collisions || null;
+  const withEndCaps = !!opts.withEndCaps;
+
+  const pickColour = (sides) => {
+    if (!collisions) return color;
+    for (const s of sides) if (collisions[s]) return DANGER_COLOR;
+    return color;
+  };
+
+  // 4 X-axis edges (depth direction)
+  for (const ys of [-sy/2, sy/2]) {
+    for (const zs of [-sz/2, sz/2]) {
+      const sideName = ys > 0 ? 'left' : 'right';
+      const m = new THREE.MeshBasicMaterial({ color: pickColour([sideName]) });
+      const e = new THREE.Mesh(new THREE.BoxGeometry(sx + t, t, t), m);
+      e.position.set(0, ys, zs);
+      env.add(e);
+    }
+  }
+  // 4 Y-axis edges (transverse direction)
+  for (const xs of [-sx/2, sx/2]) {
+    for (const zs of [-sz/2, sz/2]) {
+      const sideName = xs > 0 ? 'front' : 'back';
+      const m = new THREE.MeshBasicMaterial({ color: pickColour([sideName]) });
+      const e = new THREE.Mesh(new THREE.BoxGeometry(t, sy + t, t), m);
+      e.position.set(xs, 0, zs);
+      env.add(e);
+    }
+  }
+  // 4 vertical edges (corners — shared between two adjacent sides)
+  for (const xs of [-sx/2, sx/2]) {
+    for (const ys of [-sy/2, sy/2]) {
+      const fb = xs > 0 ? 'front' : 'back';
+      const lr = ys > 0 ? 'left'  : 'right';
+      const m  = new THREE.MeshBasicMaterial({ color: pickColour([fb, lr]) });
+      const e  = new THREE.Mesh(new THREE.BoxGeometry(t, t, sz + t), m);
+      e.position.set(xs, ys, 0);
+      env.add(e);
+    }
+  }
+
+  env.position.z = sz / 2;
+
+  if (withEndCaps) {
+    const endRect = new THREE.PlaneGeometry(sx, sz);
+    for (const offY of [-sy/2, sy/2]) {
+      const sideName = offY > 0 ? 'left' : 'right';
+      const capColor = pickColour([sideName]);
+      const cap = new THREE.Mesh(endRect, new THREE.MeshBasicMaterial({
+        color: capColor, transparent: true, opacity: 0.18,
+        side: THREE.DoubleSide, depthWrite: false,
+      }));
+      cap.position.set(0, offY, 0);
+      cap.rotation.x = -Math.PI / 2;
+      env.add(cap);
+    }
+  }
+
+  return env;
+}
+
+// Small "I am here" marker for the virtual centre — sphere + floor disk.
+function buildCentreMarker(color) {
+  const grp = new THREE.Group();
+
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.06, 16, 12),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  sphere.position.z = 0.05;
+  grp.add(sphere);
+
+  const disk = new THREE.Mesh(
+    new THREE.CircleGeometry(0.07, 24),
+    new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.5, depthWrite: false
+    })
+  );
+  disk.position.z = 0.005;
+  grp.add(disk);
+
+  return grp;
+}
+
+// =======================================================================
+// Per-robot marker — single 35 × 35 × 10 cm box, optionally with arrow
+// =======================================================================
+function buildRobotBox(color, withArrow) {
+  const grp = new THREE.Group();
+  grp.add(buildBoxFrame(ROBOT_BODY_M, ROBOT_BODY_M, ROBOT_HEIGHT_M, color));
+  if (withArrow) grp.add(buildHeadingArrow(color));
+  return grp;
+}
+
+// =======================================================================
+// Robot-marker dispatcher — decides which view to render based on which
+// robots are localized:
+//   0 robots → nothing
+//   1 robot  → that robot's box + heading arrow
+//   2 robots → both boxes (no arrows) + outer frame + virtual centre + arrow
+// =======================================================================
+function disposeGroup(grp) {
+  if (!grp) return;
+  scene.remove(grp);
+  grp.traverse(c => {
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) {
+      if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+      else c.material.dispose();
+    }
+  });
+}
+
+function clearAllRobotMarkers() {
+  for (const id of Object.keys(robotMarkerGroups)) {
+    if (robotMarkerGroups[id]) {
+      disposeGroup(robotMarkerGroups[id]);
+      robotMarkerGroups[id] = null;
+    }
+  }
+  if (combinedMarkerGroup) {
+    disposeGroup(combinedMarkerGroup);
+    combinedMarkerGroup = null;
+  }
+}
+
+function updateRobotMarkers() {
+  if (!mapData) return;
+
+  // Snapshot of which robots are currently localized.
+  const localized = ROBOTS
+    .map(r => ({ r, p: robotPoses[r.id] }))
+    .filter(({ p }) => p && p.localized);
+
+  clearAllRobotMarkers();
+  if (localized.length === 0) return;
+
+  const floorZ = mapData.metadata.floor_z || 0;
+
+  if (localized.length === 1) {
+    // Single-robot mode — show just that robot with its heading arrow.
+    const { r, p } = localized[0];
+    const grp = buildRobotBox(MARKER_COLOR, /*withArrow=*/true);
+    grp.position.set(p.x, p.y, floorZ + 0.02);
+    grp.rotation.z = p.yaw_rad;
+    scene.add(grp);
+    robotMarkerGroups[r.id] = grp;
+    return;
+  }
+
+  // Both robots localized: per-robot boxes WITHOUT arrows, plus the
+  // combined outer frame + virtual centre with the system heading arrow.
+  for (const { r, p } of localized) {
+    const grp = buildRobotBox(MARKER_COLOR, /*withArrow=*/false);
+    grp.position.set(p.x, p.y, floorZ + 0.02);
+    grp.rotation.z = p.yaw_rad;
+    scene.add(grp);
+    robotMarkerGroups[r.id] = grp;
+  }
+
+  const [a, b] = localized.map(({ p }) => p);
+  combinedMarkerGroup = buildCombinedMarker(a, b, floorZ);
+  scene.add(combinedMarkerGroup);
+}
+
+// Combined marker: outer frame around both robots + virtual centre +
+// system-direction arrow. Oriented by the average of the two robots'
+// yaws; length = inter-robot distance + 35 cm so each robot's full
+// footprint sits inside the outer frame.
+function buildCombinedMarker(p1, p2, floorZ) {
+  const cx = (p1.x + p2.x) / 2;
+  const cy = (p1.y + p2.y) / 2;
+  const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+
+  // Circular mean of two yaws (handles wrap-around correctly).
+  const yawSys = Math.atan2(
+    Math.sin(p1.yaw_rad) + Math.sin(p2.yaw_rad),
+    Math.cos(p1.yaw_rad) + Math.cos(p2.yaw_rad)
+  );
+
+  const outer = new THREE.Group();
+  // Outer frame: length runs perpendicular to the system's forward axis
+  // (i.e. along Y in the system's local frame), spanning both robots.
+  outer.add(buildBoxFrame(
+    ROBOT_BODY_M,                  // depth, along system +X
+    dist + ROBOT_BODY_M,           // length, transverse — covers both robots
+    ROBOT_HEIGHT_M,
+    MARKER_COLOR,
+    { withEndCaps: true }
+  ));
+  // Virtual centre marker (sphere + disk) at the system origin.
+  outer.add(buildCentreMarker(MARKER_COLOR));
+  // System heading arrow at the centre, pointing along local +X.
+  outer.add(buildHeadingArrow(MARKER_COLOR));
+
+  outer.position.set(cx, cy, floorZ + 0.02);
+  outer.rotation.z = yawSys;
+  return outer;
+}
+
+// =======================================================================
+// Goal marker — uses the goal-specific dimensions + collision check.
+// =======================================================================
 function updateGoalMarker() {
   if (goalGroup) {
-    scene.remove(goalGroup);
-    goalGroup.traverse(c => {
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) {
-        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-        else c.material.dispose();
-      }
-    });
+    disposeGroup(goalGroup);
     goalGroup = null;
   }
   if (!goal) return;
 
-  const yawRad = goal.orientation * Math.PI / 180;
-  goalGroup = buildLivePoseVisual();
+  const yawRad     = goal.orientation * Math.PI / 180;
+  const collisions = computeCollisionSides(goal.x, goal.y, yawRad,
+                                           GOAL_WIDTH_M, GOAL_LENGTH_M);
+
+  goalGroup = new THREE.Group();
+  goalGroup.add(buildBoxFrame(GOAL_WIDTH_M, GOAL_LENGTH_M, ROBOT_HEIGHT_M,
+                              MARKER_COLOR, { collisions, withEndCaps: true }));
+  goalGroup.add(buildHeadingArrow(MARKER_COLOR));
+
   goalGroup.position.set(goal.x, goal.y, (goal.z || 0) + 0.02);
   goalGroup.rotation.z = yawRad;
   scene.add(goalGroup);
 }
 
-// Wipe the goal: visual, state, bottom-bar readout, Send Goal button. Used
-// when the user starts a fresh Set Initial Pose flow ("starting over").
 function clearGoal() {
   if (goalGroup) {
-    scene.remove(goalGroup);
-    goalGroup.traverse(c => {
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) {
-        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-        else c.material.dispose();
-      }
-    });
+    disposeGroup(goalGroup);
     goalGroup = null;
   }
   goal = null;
@@ -663,26 +1018,19 @@ function clearGoal() {
   document.getElementById('sendBtn').disabled = true;
 }
 
-// Promote a pending goal pose into the actual `goal`: replace the preview
-// marker with the goal marker, sync the slider, and enable Send Goal.
-// Called from the click handler on the second floor click in GOAL_YAW.
 function confirmGoal(p) {
   if (!mapData) return;
   const meta   = mapData.metadata;
   const floorZ = meta.floor_z || 0;
 
-  // Normalise yaw to 0..359° (slider domain) and store on the goal.
   const yawDeg = ((p.yaw_rad * 180 / Math.PI) % 360 + 360) % 360;
   goal = { x: p.x, y: p.y, z: floorZ, orientation: yawDeg };
 
-  // Sync the orientation slider to whatever yaw the user dragged.
   const slider = document.getElementById('orientSlider');
   const slVal  = document.getElementById('orientVal');
   slider.value      = String(Math.round(yawDeg) % 360);
   slVal.textContent = slider.value + '°';
 
-  // Bottom-bar coords were already filled in on the first click; refresh
-  // them just in case, and enable Send Goal now that the goal is final.
   document.getElementById('valX').textContent = p.x.toFixed(3);
   document.getElementById('valX').className   = '';
   document.getElementById('valY').textContent = p.y.toFixed(3);
@@ -691,16 +1039,13 @@ function confirmGoal(p) {
   document.getElementById('valZ').className   = '';
   document.getElementById('sendBtn').disabled = false;
 
-  // Reset the placement state machine and replace the pending preview
-  // with the final goal marker.
   poseMode    = POSE_MODE.IDLE;
   pendingPose = null;
   removePendingPoseMarker();
   updateGoalMarker();
 }
 
-// Robot marker (green) — driven by rosbridge /tb3_0/pose subscription
-// (typically the EKF-fused output).
+// Robot marker (rosbridge feed) — kept for debugging the EKF output.
 function updateRobotMarker(pose) {
   if (robotGroup) scene.remove(robotGroup);
   robotGroup = new THREE.Group();
@@ -723,157 +1068,33 @@ function updateRobotMarker(pose) {
   scene.add(robotGroup);
 }
 
-// Live RTAB-Map pose marker (cyan cone + disk) — driven by /pose HTTP feed.
-// Distinct from the rosbridge marker so divergence between RTAB-Map's
-// localization output and the EKF estimate is visible.
-function updateLivePoseMarker(p) {
-  if (!mapData || !p || !p.localized) {
-    if (livePoseGroup) livePoseGroup.visible = false;
-    return;
-  }
-  const floorZ = mapData.metadata.floor_z || 0;
-  if (!livePoseGroup) {
-    livePoseGroup = buildLivePoseVisual();
-    scene.add(livePoseGroup);
-  }
-  livePoseGroup.visible = true;
-  // Z-up direct: ROS map (x, y, floor_z) → scene (x, y, z). +0.02 lifts
-  // the disk slightly above the floor grid to avoid z-fighting.
-  livePoseGroup.position.set(p.x, p.y, floorZ + 0.02);
-  livePoseGroup.rotation.z = p.yaw_rad;
-}
-
-// Shared "robot here" visual — small heading cone + translucent floor disk
-// + thick-edge multi-robot envelope. Returned as a Group with origin at
-// the robot's centre on the floor; the caller sets position + yaw.
-//
-// Used by BOTH the live pose marker (livePoseGroup, fed from /pose) AND
-// the pending pose marker shown during the Set Initial Pose flow, so the
-// preview looks identical to what gets rendered once the hint is accepted.
-function buildLivePoseVisual() {
-  const grp = new THREE.Group();
-
-  // Heading arrow — slim shaft + small head along +X (ROS forward).
-  // CylinderGeometry / ConeGeometry both default-point along +Y; rotating
-  // -π/2 about Z aligns the axis with +X.
-  //   Shaft: 32 cm long, 1.2 cm radius, ending where the head starts.
-  //   Head : 8 cm long cone, 3.5 cm radius, base at 0.32, apex at 0.40.
-  // Total arrow length 0.40 — sticks past the envelope's front face so
-  // heading reads at a glance even when looking straight down.
-  const headColor = 0x00e5ff;
-
-  const shaft = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.012, 0.012, 0.32, 12),
-    new THREE.MeshBasicMaterial({ color: headColor })
-  );
-  shaft.rotation.z = -Math.PI / 2;
-  shaft.position.x = 0.16;
-  grp.add(shaft);
-
-  const head = new THREE.Mesh(
-    new THREE.ConeGeometry(0.035, 0.08, 12),
-    new THREE.MeshBasicMaterial({ color: headColor })
-  );
-  head.rotation.z = -Math.PI / 2;
-  head.position.x = 0.36;
-  grp.add(head);
-
-  // Translucent floor disk
-  const disk = new THREE.Mesh(
-    new THREE.CircleGeometry(0.07, 24),
-    new THREE.MeshBasicMaterial({
-      color: 0x00e5ff, transparent: true, opacity: 0.5, depthWrite: false
-    })
-  );
-  grp.add(disk);
-
-  // Multi-robot envelope (thick wireframe + end caps)
-  grp.add(buildRobotEnvelopeMesh());
-
-  return grp;
-}
-
-// The multi-robot envelope as its own subgroup. Box dimensions:
-//   X (depth, forward)   = ROBOT_WIDTH_M    (35 cm)
-//   Y (transverse, left) = ROBOT_LENGTH_M   (50 cm — the "front side" length)
-//   Z (vertical)         = ROBOT_HEIGHT_M   (10 cm)
-// The 12 edges are built as thin solid Box meshes (not LineSegments)
-// because LineBasicMaterial.linewidth is ignored on most browsers.
-function buildRobotEnvelopeMesh() {
-  const env = new THREE.Group();
-
-  const sx = ROBOT_WIDTH_M;
-  const sy = ROBOT_LENGTH_M;
-  const sz = ROBOT_HEIGHT_M;
-  const t  = 0.012;             // edge thickness in metres
-  const edgeMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
-
-  // 4 edges along X (+t so they overlap the perpendicular edges at corners)
-  for (const ys of [-sy/2, sy/2]) {
-    for (const zs of [-sz/2, sz/2]) {
-      const e = new THREE.Mesh(new THREE.BoxGeometry(sx + t, t, t), edgeMat);
-      e.position.set(0, ys, zs);
-      env.add(e);
-    }
-  }
-  // 4 edges along Y (the long edges — front and back, top and bottom)
-  for (const xs of [-sx/2, sx/2]) {
-    for (const zs of [-sz/2, sz/2]) {
-      const e = new THREE.Mesh(new THREE.BoxGeometry(t, sy + t, t), edgeMat);
-      e.position.set(xs, 0, zs);
-      env.add(e);
-    }
-  }
-  // 4 vertical edges along Z
-  for (const xs of [-sx/2, sx/2]) {
-    for (const ys of [-sy/2, sy/2]) {
-      const e = new THREE.Mesh(new THREE.BoxGeometry(t, t, sz + t), edgeMat);
-      e.position.set(xs, ys, 0);
-      env.add(e);
-    }
-  }
-
-  // Lift the envelope so its bottom sits on the floor.
-  env.position.z = sz / 2;
-
-  // Per-robot transverse caps at ±length/2 along Y (the two robots' positions).
-  // PlaneGeometry default lies in XY plane, normal +Z. Rotate -π/2 about X
-  // to make it lie in XZ plane with normal +Y (so it's an end cap).
-  const endRect = new THREE.PlaneGeometry(sx, sz);
-  const endMat  = new THREE.MeshBasicMaterial({
-    color: 0x00e5ff, transparent: true, opacity: 0.18,
-    side: THREE.DoubleSide, depthWrite: false
-  });
-  for (const offY of [-sy/2, sy/2]) {
-    const cap = new THREE.Mesh(endRect, endMat.clone());
-    cap.position.set(0, offY, 0);
-    cap.rotation.x = -Math.PI / 2;
-    env.add(cap);
-  }
-
-  return env;
-}
-
-// Pending-pose marker shown during PLACING/SETTING_YAW so the user sees
-// where they're aiming + which way the arrow points before confirming.
+// =======================================================================
+// Pending-pose preview (Set Initial Pose / Goal placement)
+// =======================================================================
 function updatePendingPoseMarker() {
   if (pendingPoseGroup) {
-    scene.remove(pendingPoseGroup);
-    pendingPoseGroup.traverse(c => {
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) {
-        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-        else c.material.dispose();
-      }
-    });
+    disposeGroup(pendingPoseGroup);
     pendingPoseGroup = null;
   }
   if (!pendingPose || !mapData) return;
 
-  // Build the same cone + disk + envelope visual as the live marker, so
-  // the user sees exactly what will be rendered once the hint is accepted.
-  const floorZ = mapData.metadata.floor_z || 0;
-  pendingPoseGroup = buildLivePoseVisual();
+  const floorZ        = mapData.metadata.floor_z || 0;
+  const isGoalPreview = (poseMode === POSE_MODE.GOAL_YAW);
+
+  pendingPoseGroup = new THREE.Group();
+  if (isGoalPreview) {
+    // Use the goal envelope so the preview matches the final goal marker.
+    const collisions = computeCollisionSides(pendingPose.x, pendingPose.y,
+                                             pendingPose.yaw_rad,
+                                             GOAL_WIDTH_M, GOAL_LENGTH_M);
+    pendingPoseGroup.add(buildBoxFrame(GOAL_WIDTH_M, GOAL_LENGTH_M, ROBOT_HEIGHT_M,
+                                       MARKER_COLOR, { collisions, withEndCaps: true }));
+    pendingPoseGroup.add(buildHeadingArrow(MARKER_COLOR));
+  } else {
+    // Initial-pose preview — single-robot 35 × 35 box + heading arrow.
+    pendingPoseGroup.add(buildBoxFrame(ROBOT_BODY_M, ROBOT_BODY_M, ROBOT_HEIGHT_M, MARKER_COLOR));
+    pendingPoseGroup.add(buildHeadingArrow(MARKER_COLOR));
+  }
   pendingPoseGroup.position.set(pendingPose.x, pendingPose.y, floorZ + 0.02);
   pendingPoseGroup.rotation.z = pendingPose.yaw_rad;
   scene.add(pendingPoseGroup);
@@ -881,7 +1102,7 @@ function updatePendingPoseMarker() {
 
 function removePendingPoseMarker() {
   if (pendingPoseGroup) {
-    scene.remove(pendingPoseGroup);
+    disposeGroup(pendingPoseGroup);
     pendingPoseGroup = null;
   }
 }
@@ -929,19 +1150,22 @@ document.getElementById("sendBtn").addEventListener("click", () => {
 // Status helpers
 // =======================================================================
 function setStatus(connected, text) {
-  const pill = document.getElementById("statusPill");
-  document.getElementById("statusText").textContent = text;
-  pill.className = "status-pill" + (connected ? " connected" : "");
+  // Map stats are now a muted plain-text line under the panel label, not a
+  // pill. The `connected` arg is kept for API compatibility with callers
+  // (e.g. the load-failure path) but the line is rendered the same either
+  // way — quiet info, not a status indicator.
+  const line = document.getElementById("mapStatsLine");
+  if (line) line.textContent = text;
 }
 function setRosStatus(connected) {
   const pill = document.getElementById("rosPill");
   pill.className = "status-pill" + (connected ? " connected" : "");
   pill.querySelector(".ros-text").textContent = connected ? "ROS Connected" : "ROS Disconnected";
 }
-function setLocStatus(cls, text) {
-  const pill = document.getElementById("locStatus");
+function setLocPill(slot, cls, text) {
+  const pill = document.getElementById("locStatus" + slot);
   pill.className = "status-pill " + cls;
-  document.getElementById("locStatusText").textContent = text;
+  document.getElementById("locStatus" + slot + "Text").textContent = text;
 }
 function showToast(msg) {
   const t = document.getElementById("toast");
@@ -988,59 +1212,85 @@ function publishGoalToROS(g) {
 }
 
 // =======================================================================
-// /pose polling — RTAB-Map's localization output via ros_pose_bridge.py
+// Multi-robot pose polling
 //
-// /pose JSON shape (see ros_pose_bridge.py docstring):
-//   { available, age_sec, robot_id, localized, x, y, yaw_rad, yaw_deg,
-//     frame, last_match_age_sec, wall_clock_iso }
-//
-// Decoupled from the rosbridge path above — works even when rosbridge is
-// down, as long as ros_pose_bridge.py is POSTing to the Flask server.
+// Each robot's bridge POSTs to /pose with `robot_id` set; the server
+// stores the latest per robot and exposes per-robot reads at /pose/{id}.
+// We poll all configured robots in parallel each tick, then re-render.
 // =======================================================================
-async function pollPose() {
-  // Sim mode: ignore the network entirely and feed the GUI a frozen pose.
-  if (simModeActive) {
-    const simData = { ...SIM_POSE, age_sec: 0,
-                      wall_clock_iso: new Date().toISOString() };
-    livePose = simData;
-    updateLocPill(simData);
-    updateLivePoseMarker(simData);
-    return;
-  }
+async function pollOneRobot(robot) {
   try {
-    const res  = await fetch("/pose");
-    const data = await res.json();
-    if (data.available) {
-      livePose = data;
-      updateLocPill(data);
-      updateLivePoseMarker(data);
-    } else {
-      livePose = null;
-      setLocStatus("lost", "LOC: NO BRIDGE");
-      if (livePoseGroup) livePoseGroup.visible = false;
+    const res  = await fetch(robot.url, { cache: "no-store" });
+    if (!res.ok) {
+      robotPoses[robot.id] = null;
+      return { robot, status: 'http_error', http: res.status };
     }
+    const data = await res.json();
+    if (data && data.available) {
+      robotPoses[robot.id] = data;
+      return { robot, status: 'ok', data };
+    }
+    robotPoses[robot.id] = null;
+    return { robot, status: 'no_bridge', data };
   } catch (e) {
-    setLocStatus("lost", "LOC: SERVER DOWN");
-    if (livePoseGroup) livePoseGroup.visible = false;
+    robotPoses[robot.id] = null;
+    return { robot, status: 'fetch_error', error: e };
   }
 }
-setInterval(pollPose, POSE_POLL_MS);
 
-function updateLocPill(data) {
-  // Server-side staleness: bridge stopped POSTing > 2 s ago.
-  if (data.age_sec > 2) {
-    setLocStatus("lost", `LOC: STALE ${data.age_sec.toFixed(1)}s`);
+async function pollAllRobots() {
+  if (simModeActive) {
+    // Sim: feed R1 a frozen pose, leave R2 unlocalized.
+    robotPoses[ROBOTS[0].id] = { ...SIM_POSE, age_sec: 0,
+                                 wall_clock_iso: new Date().toISOString() };
+    if (ROBOTS.length > 1) robotPoses[ROBOTS[1].id] = null;
+    updateLocPills([
+      { robot: ROBOTS[0], status: 'ok', data: robotPoses[ROBOTS[0].id] },
+      ...(ROBOTS.length > 1 ? [{ robot: ROBOTS[1], status: 'no_bridge' }] : []),
+    ]);
+    updateRobotMarkers();
     return;
   }
-  if (!data.localized) {
-    setLocStatus("lost", `LOC: SEARCHING ${data.age_sec.toFixed(1)}s`);
-  } else if (data.last_match_age_sec !== null && data.last_match_age_sec > 5) {
-    setLocStatus("dead-reckoning",
-      `LOC: DEAD-RECK ${data.last_match_age_sec.toFixed(1)}s`);
-  } else {
-    setLocStatus("localized",
-      `LOC: LIVE ${data.x.toFixed(2)},${data.y.toFixed(2)}`);
-  }
+
+  const results = await Promise.all(ROBOTS.map(pollOneRobot));
+  updateLocPills(results);
+  updateRobotMarkers();
+}
+setInterval(pollAllRobots, POSE_POLL_MS);
+
+function updateLocPills(results) {
+  results.forEach((res, i) => {
+    const slot = i + 1;                   // 1-indexed pill ids
+    const r    = res.robot;
+    if (res.status === 'fetch_error') {
+      setLocPill(slot, 'lost', `${r.label}: SERVER DOWN`);
+      return;
+    }
+    if (res.status === 'http_error') {
+      setLocPill(slot, 'lost', `${r.label}: HTTP ${res.http}`);
+      return;
+    }
+    if (res.status === 'no_bridge') {
+      setLocPill(slot, 'lost', `${r.label}: NO BRIDGE`);
+      return;
+    }
+    const data = res.data;
+    if (data.age_sec > 2) {
+      setLocPill(slot, 'lost', `${r.label}: STALE ${data.age_sec.toFixed(1)}s`);
+      return;
+    }
+    if (!data.localized) {
+      setLocPill(slot, 'lost', `${r.label}: SEARCHING ${data.age_sec.toFixed(1)}s`);
+      return;
+    }
+    if (data.last_match_age_sec !== null && data.last_match_age_sec > 5) {
+      setLocPill(slot, 'dead-reckoning',
+        `${r.label}: DEAD-RECK ${data.last_match_age_sec.toFixed(1)}s`);
+      return;
+    }
+    setLocPill(slot, 'localized',
+      `${r.label}: LIVE ${data.x.toFixed(2)},${data.y.toFixed(2)}`);
+  });
 }
 
 // =======================================================================
@@ -1089,3 +1339,4 @@ window.addEventListener("load", () => {
 </script>
 </body>
 </html>
+</parameter>
