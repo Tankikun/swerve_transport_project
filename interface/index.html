@@ -69,13 +69,6 @@
   .set-pose-btn:hover  { background: rgba(0, 229, 255, 0.1); }
   .set-pose-btn.active { background: var(--accent); color: var(--bg); }
 
-  /* "for" label between the action and the target picker. */
-  .init-target-label {
-    padding: 4px 10px; color: var(--muted);
-    border-right: 1px solid var(--accent); background: transparent;
-    display: flex; align-items: center; user-select: none;
-    font-size: 10px;
-  }
   /* R1 / R2 segments — outlined siblings; the one matching the chosen
      target is filled. */
   .init-target-btn {
@@ -177,7 +170,6 @@
       <button id="setPoseBtn" class="set-pose-btn">
         &#128205; Set Initial Pose
       </button>
-      <span class="init-target-label">for</span>
       <button class="init-target-btn active" data-robot-id="tb3_0">R1</button>
       <button class="init-target-btn"        data-robot-id="tb3_1">R2</button>
     </div>
@@ -222,11 +214,6 @@
       </div>
     </div>
 
-    <button id="simPoseBtn" class="set-pose-btn"
-            title="Toggle a simulated pose feed at (x=-4.0, y=-1.3) — bypasses /pose polling for visualisation testing">
-      &#127919; Sim Pose
-    </button>
-
     <button class="send-btn" id="sendBtn" disabled>Send Goal</button>
   </div>
 </div>
@@ -255,10 +242,11 @@
 //         centre marker at the midpoint with the system heading arrow.
 // =======================================================================
 
-const ROSBRIDGE_URL    = "ws://localhost:9090";
-const ROBOT_POSE_TOPIC = "/tb3_0/pose";
-const GOAL_TOPIC       = "/goal_pose";
-const POSE_POLL_MS     = 200;
+const ROSBRIDGE_URL          = "ws://localhost:9090";
+const ROBOT_POSE_TOPIC       = "/tb3_0/pose";
+const GOAL_TOPIC             = "/goal_pose";
+const FORMATION_OFFSET_TOPIC = "/formation/offset";
+const POSE_POLL_MS           = 200;
 
 // =======================================================================
 // Robot configuration — one entry per pose feed. Each robot is a 35 × 35
@@ -276,11 +264,20 @@ const ROBOT_HEIGHT_M = 0.10;     // each robot's vertical extent
 
 // Goal-box dimensions (used by the goal envelope + collision check).
 // The goal represents where the multi-robot SYSTEM should end up; its
-// width is one robot's depth (35 cm) and its length is the typical
-// inter-robot separation (50 cm). Kept fixed for now — when both robots
-// are localized you can read the live system extent off the outer frame.
-const GOAL_WIDTH_M  = 0.35;
-const GOAL_LENGTH_M = 0.50;
+// width is one robot's depth (35 cm) and its length is the inter-robot
+// separation. Length is DYNAMIC: when both robots are localized it
+// tracks the live `systemFormation.distance` (centre-to-centre);
+// otherwise it falls back to GOAL_LENGTH_M_DEFAULT = 50 cm so a goal
+// can still be placed before the system is fully up.
+const GOAL_WIDTH_M          = 0.35;
+const GOAL_LENGTH_M_DEFAULT = 0.50;
+
+// Resolved length used by the goal envelope and the placement preview.
+// Reads the freshest formation each call so the box stays in sync with
+// the live inter-robot distance whenever both robots are localized.
+function currentGoalLength() {
+  return systemFormation ? systemFormation.distance : GOAL_LENGTH_M_DEFAULT;
+}
 
 // Number of samples taken along each side of the goal footprint when
 // checking for obstacle overlap. 24 along a 50 cm edge is one sample
@@ -309,6 +306,27 @@ let robotMarkerGroups = {};
 ROBOTS.forEach(r => { robotMarkerGroups[r.id] = null; });
 let combinedMarkerGroup = null; // outer frame + centre marker
 
+// Live formation state — populated by updateRobotMarkers() ONLY when
+// both robots are localized; null otherwise. Inspectable from the
+// browser DevTools console as `systemFormation`. Schema:
+//   {
+//     centre:   { x, y, yaw_rad },        // virtual centre + system yaw
+//     distance: <metres between centres>,
+//     offsets: {
+//       <robot_id>: {
+//         world: { x, y },   // robot.xy - centre.xy, ROS map frame
+//         local: { x, y },   // same vector rotated by -yaw_sys, i.e.
+//                            // expressed in the SYSTEM body frame.
+//                            // Stays constant for a rigid formation
+//                            // regardless of rotation — use this when
+//                            // you need formation geometry for control.
+//       },
+//       ...
+//     },
+//   }
+let systemFormation = null;
+let _lastFormationKey = null;   // for change-only logging
+
 let pendingPoseGroup = null;    // visual during Set Initial Pose / Goal placement
 let cloudCenter = new THREE.Vector3();
 let cloudFitR   = 8;
@@ -329,22 +347,6 @@ let pendingPose = null;
 // Marker colour. Cyan throughout — matches the existing GUI palette.
 const MARKER_COLOR = 0x00e5ff;
 const DANGER_COLOR = 0xff3f6c;
-
-// Simulated-pose mode — feeds R1 (tb3_0) a frozen pose so the rendering
-// can be tested without the ROS stack. R2 stays unlocalized in sim mode,
-// which exercises the single-robot rendering path.
-const SIM_POSE = Object.freeze({
-  available:          true,
-  localized:          true,
-  robot_id:           'tb3_0',
-  frame:              'map',
-  x:                  -4.0,
-  y:                  -1.3,
-  yaw_rad:            0.0,
-  yaw_deg:            0.0,
-  last_match_age_sec: 0.0,
-});
-let simModeActive = false;
 
 // =======================================================================
 // Scene + camera + renderer (Z-up, REP-103)
@@ -524,6 +526,12 @@ canvas3d.addEventListener("click", e => {
     showToast("Click is outside the mapped area");
     return;
   }
+  // Wipe any previously-confirmed goal BEFORE drawing the new pending
+  // preview. Without this, a leftover goalGroup from the last
+  // confirm-cycle stays on screen alongside the new preview until the
+  // user clicks again to confirm — the user never wants both at once.
+  clearGoal();
+
   const initialYawRad = parseFloat(document.getElementById("orientSlider").value) * Math.PI / 180;
   pendingPose = { x: hit.x, y: hit.y, yaw_rad: initialYawRad };
   poseMode    = POSE_MODE.GOAL_YAW;
@@ -663,21 +671,6 @@ function flashConfirmation(targetId) {
 
 document.addEventListener("keydown", ev => {
   if (ev.key === "Escape" && poseMode !== POSE_MODE.IDLE) cancelInitialPose();
-});
-
-// =======================================================================
-// Sim Pose toggle — feeds R1 a frozen pose to test rendering offline
-// =======================================================================
-document.getElementById("simPoseBtn").addEventListener("click", () => {
-  simModeActive = !simModeActive;
-  const btn = document.getElementById("simPoseBtn");
-  if (simModeActive) {
-    btn.classList.add("active");
-    btn.textContent = "\u{1F3AF} Sim ON (-4.0, -1.3)";
-  } else {
-    btn.classList.remove("active");
-    btn.textContent = "\u{1F3AF} Sim Pose";
-  }
 });
 
 // =======================================================================
@@ -915,7 +908,18 @@ function updateRobotMarkers() {
     .filter(({ p }) => p && p.localized);
 
   clearAllRobotMarkers();
-  if (localized.length === 0) return;
+
+  // Default: no formation. Recomputed below if (and only if) both
+  // robots are localized. This means consumers can rely on
+  // `systemFormation` being null whenever the dual-robot frame isn't
+  // currently shown.
+  const prevFormation = systemFormation;
+  systemFormation = null;
+
+  if (localized.length === 0) {
+    logFormationChange(prevFormation, null);
+    return;
+  }
 
   const floorZ = mapData.metadata.floor_z || 0;
 
@@ -927,6 +931,7 @@ function updateRobotMarkers() {
     grp.rotation.z = p.yaw_rad;
     scene.add(grp);
     robotMarkerGroups[r.id] = grp;
+    logFormationChange(prevFormation, null);
     return;
   }
 
@@ -940,29 +945,66 @@ function updateRobotMarkers() {
     robotMarkerGroups[r.id] = grp;
   }
 
-  const [a, b] = localized.map(({ p }) => p);
-  combinedMarkerGroup = buildCombinedMarker(a, b, floorZ);
+  // ---- Formation math ----
+  // Virtual centre = midpoint of the two robot centres.
+  // System yaw    = circular mean of the two yaws (handles wrap-around).
+  // Per-robot offset = (robot.xy − centre.xy), stored both in the world
+  // (ROS map) frame and in the system body frame so callers can pick
+  // whichever they need without redoing the rotation.
+  const a = { id: localized[0].r.id, ...localized[0].p };
+  const b = { id: localized[1].r.id, ...localized[1].p };
+
+  const cx     = (a.x + b.x) / 2;
+  const cy     = (a.y + b.y) / 2;
+  const dist   = Math.hypot(b.x - a.x, b.y - a.y);
+  const yawSys = Math.atan2(
+    Math.sin(a.yaw_rad) + Math.sin(b.yaw_rad),
+    Math.cos(a.yaw_rad) + Math.cos(b.yaw_rad)
+  );
+
+  const cYaw = Math.cos(yawSys), sYaw = Math.sin(yawSys);
+  const offsets = {};
+  for (const robot of [a, b]) {
+    const wx = robot.x - cx;
+    const wy = robot.y - cy;
+    // Inverse rotation by yawSys → body-frame offset (R(-yaw) · w).
+    const lx =  cYaw * wx + sYaw * wy;
+    const ly = -sYaw * wx + cYaw * wy;
+    offsets[robot.id] = {
+      world: { x: wx, y: wy },
+      local: { x: lx, y: ly },
+    };
+  }
+
+  systemFormation = {
+    centre:   { x: cx, y: cy, yaw_rad: yawSys },
+    distance: dist,
+    offsets,
+  };
+
+  combinedMarkerGroup = buildCombinedMarker(systemFormation, floorZ);
   scene.add(combinedMarkerGroup);
+
+  // Same publish path as Send Goal — direct over rosbridge to
+  // /formation/offset (geometry_msgs/PoseArray, one pose per robot,
+  // ordered parallel to ROBOTS).
+  publishFormationOffset(systemFormation);
+
+  logFormationChange(prevFormation, systemFormation);
 }
 
 // Combined marker: outer frame around both robots + virtual centre +
-// system-direction arrow. Oriented by the average of the two robots'
-// yaws; length = inter-robot distance + 35 cm so each robot's full
-// footprint sits inside the outer frame.
-function buildCombinedMarker(p1, p2, floorZ) {
-  const cx = (p1.x + p2.x) / 2;
-  const cy = (p1.y + p2.y) / 2;
-  const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-
-  // Circular mean of two yaws (handles wrap-around correctly).
-  const yawSys = Math.atan2(
-    Math.sin(p1.yaw_rad) + Math.sin(p2.yaw_rad),
-    Math.cos(p1.yaw_rad) + Math.cos(p2.yaw_rad)
-  );
+// system-direction arrow. Geometry is fully described by the formation
+// object built in updateRobotMarkers — this function just turns numbers
+// into THREE objects.
+function buildCombinedMarker(formation, floorZ) {
+  const { centre: { x: cx, y: cy, yaw_rad: yawSys },
+          distance: dist } = formation;
 
   const outer = new THREE.Group();
-  // Outer frame: length runs perpendicular to the system's forward axis
-  // (i.e. along Y in the system's local frame), spanning both robots.
+  // Outer frame: length runs along the system's transverse axis (Y in
+  // local frame), so it spans both robot centres plus a half-body of
+  // pad on each end so each footprint sits fully inside.
   outer.add(buildBoxFrame(
     ROBOT_BODY_M,                  // depth, along system +X
     dist + ROBOT_BODY_M,           // length, transverse — covers both robots
@@ -970,14 +1012,31 @@ function buildCombinedMarker(p1, p2, floorZ) {
     MARKER_COLOR,
     { withEndCaps: true }
   ));
-  // Virtual centre marker (sphere + disk) at the system origin.
-  outer.add(buildCentreMarker(MARKER_COLOR));
-  // System heading arrow at the centre, pointing along local +X.
-  outer.add(buildHeadingArrow(MARKER_COLOR));
+  outer.add(buildCentreMarker(MARKER_COLOR));   // virtual centre
+  outer.add(buildHeadingArrow(MARKER_COLOR));   // system heading arrow
 
   outer.position.set(cx, cy, floorZ + 0.02);
   outer.rotation.z = yawSys;
   return outer;
+}
+
+// Log only on the null↔non-null transition (one robot losing/regaining
+// lock, etc.). Continuous per-tick logs would flood the console at the
+// 200 ms poll rate; if you want the live values, read `systemFormation`
+// directly in DevTools — it's updated in place every poll.
+function logFormationChange(prev, curr) {
+  const key = (prev ? '1' : '0') + (curr ? '1' : '0');
+  if (key === _lastFormationKey) return;
+  _lastFormationKey = key;
+  if (!prev && curr) {
+    console.log('[formation] both robots localized →',
+      `centre=(${curr.centre.x.toFixed(3)}, ${curr.centre.y.toFixed(3)})`,
+      `yaw=${(curr.centre.yaw_rad * 180 / Math.PI).toFixed(1)}deg`,
+      `dist=${curr.distance.toFixed(3)}m`,
+      'offsets=', curr.offsets);
+  } else if (prev && !curr) {
+    console.log('[formation] cleared (one or both robots no longer localized)');
+  }
 }
 
 // =======================================================================
@@ -991,11 +1050,12 @@ function updateGoalMarker() {
   if (!goal) return;
 
   const yawRad     = goal.orientation * Math.PI / 180;
+  const goalLen    = currentGoalLength();
   const collisions = computeCollisionSides(goal.x, goal.y, yawRad,
-                                           GOAL_WIDTH_M, GOAL_LENGTH_M);
+                                           GOAL_WIDTH_M, goalLen);
 
   goalGroup = new THREE.Group();
-  goalGroup.add(buildBoxFrame(GOAL_WIDTH_M, GOAL_LENGTH_M, ROBOT_HEIGHT_M,
+  goalGroup.add(buildBoxFrame(GOAL_WIDTH_M, goalLen, ROBOT_HEIGHT_M,
                               MARKER_COLOR, { collisions, withEndCaps: true }));
   goalGroup.add(buildHeadingArrow(MARKER_COLOR));
 
@@ -1084,10 +1144,13 @@ function updatePendingPoseMarker() {
   pendingPoseGroup = new THREE.Group();
   if (isGoalPreview) {
     // Use the goal envelope so the preview matches the final goal marker.
+    // Length tracks the live inter-robot distance when both robots are
+    // localized, falling back to the 50 cm default otherwise.
+    const goalLen    = currentGoalLength();
     const collisions = computeCollisionSides(pendingPose.x, pendingPose.y,
                                              pendingPose.yaw_rad,
-                                             GOAL_WIDTH_M, GOAL_LENGTH_M);
-    pendingPoseGroup.add(buildBoxFrame(GOAL_WIDTH_M, GOAL_LENGTH_M, ROBOT_HEIGHT_M,
+                                             GOAL_WIDTH_M, goalLen);
+    pendingPoseGroup.add(buildBoxFrame(GOAL_WIDTH_M, goalLen, ROBOT_HEIGHT_M,
                                        MARKER_COLOR, { collisions, withEndCaps: true }));
     pendingPoseGroup.add(buildHeadingArrow(MARKER_COLOR));
   } else {
@@ -1212,6 +1275,41 @@ function publishGoalToROS(g) {
 }
 
 // =======================================================================
+// /formation/offset — published while BOTH robots are localized.
+//
+// One geometry_msgs/PoseArray per tick; poses[i].position.{x,y} carries
+// robot i's WORLD-frame offset from the virtual centre (i.e.
+// robot.xy − centre.xy in the ROS map frame). Pose ordering matches
+// the ROBOTS config exactly: poses[0] is tb3_0/R1, poses[1] is tb3_1/R2.
+// orientation is identity (each robot's own yaw is already on
+// /<robot_id>/pose via ros_pose_bridge).
+//
+// Same publish path as Send Goal — direct over rosbridge. The Flask
+// server is not involved.
+// =======================================================================
+const formationOffsetTopic = new ROSLIB.Topic({
+  ros,
+  name:        FORMATION_OFFSET_TOPIC,
+  messageType: "geometry_msgs/PoseArray",
+});
+
+function publishFormationOffset(formation) {
+  if (!formation) return;
+  const poses = ROBOTS.map(r => {
+    const off = formation.offsets[r.id]?.world ?? { x: 0, y: 0 };
+    return {
+      position:    { x: off.x, y: off.y, z: 0.0 },
+      orientation: { x: 0.0,   y: 0.0,   z: 0.0, w: 1.0 },
+    };
+  });
+  const msg = new ROSLIB.Message({
+    header: { frame_id: "map", stamp: { secs: 0, nsecs: 0 } },
+    poses,
+  });
+  formationOffsetTopic.publish(msg);
+}
+
+// =======================================================================
 // Multi-robot pose polling
 //
 // Each robot's bridge POSTs to /pose with `robot_id` set; the server
@@ -1239,19 +1337,6 @@ async function pollOneRobot(robot) {
 }
 
 async function pollAllRobots() {
-  if (simModeActive) {
-    // Sim: feed R1 a frozen pose, leave R2 unlocalized.
-    robotPoses[ROBOTS[0].id] = { ...SIM_POSE, age_sec: 0,
-                                 wall_clock_iso: new Date().toISOString() };
-    if (ROBOTS.length > 1) robotPoses[ROBOTS[1].id] = null;
-    updateLocPills([
-      { robot: ROBOTS[0], status: 'ok', data: robotPoses[ROBOTS[0].id] },
-      ...(ROBOTS.length > 1 ? [{ robot: ROBOTS[1], status: 'no_bridge' }] : []),
-    ]);
-    updateRobotMarkers();
-    return;
-  }
-
   const results = await Promise.all(ROBOTS.map(pollOneRobot));
   updateLocPills(results);
   updateRobotMarkers();
