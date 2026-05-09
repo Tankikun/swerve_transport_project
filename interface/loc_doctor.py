@@ -354,9 +354,12 @@ class LocDoctor(Node):
             quat_to_yaw(p.orientation.x, p.orientation.y,
                         p.orientation.z, p.orientation.w))
         # Covariance is row-major 6x6: indices 0,7,35 are var(x), var(y), var(yaw).
+        # Note: msg.pose.covariance is a numpy array — `if cov` raises
+        # "truth value of an array with more than one element is ambiguous",
+        # so check length explicitly. Cast to float for clean JSON serialization.
         cov = msg.pose.covariance
-        if cov and len(cov) >= 36:
-            self.last_loc_cov_diag = (cov[0], cov[7], cov[35])
+        if cov is not None and len(cov) >= 36:
+            self.last_loc_cov_diag = (float(cov[0]), float(cov[7]), float(cov[35]))
 
     def _info_cb(self, msg):
         self.hz_info.tick()

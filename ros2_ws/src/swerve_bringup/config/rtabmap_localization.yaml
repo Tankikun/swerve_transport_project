@@ -38,11 +38,37 @@
     # Geometry
     Reg/Force3DoF: "true"
     Vis/EstimationType: "1"
-    Vis/MinInliers: "15"
-    
+    # Lowered from 15 → 10. In low-texture environments (white walls,
+    # terrazzo floor) RANSAC PnP regularly produces 0/15 inliers despite
+    # 30-50 raw feature matches. 10 is permissive but still rejects
+    # pure-coincidence matches. Verified May 2026: this lets RTAB-Map
+    # publish confident loc_pose (σ ≈ 4-35 mm) on the lab map.
+    Vis/MinInliers: "10"
+
     # Disable expensive features not needed for localization
     RGBD/ProximityBySpace: "false"
     RGBD/ProximityByTime: "false"
-    
+
     # Stats publishing (useful during validation)
     Rtabmap/PublishStats: "true"
+
+    # CRITICAL — publish the first good visual match immediately with
+    # its real registration covariance. Default is 10, which makes
+    # RTAB-Map cache the match and wait for a SECOND confirming one
+    # before publishing /rtabmap/localization_pose. While waiting it
+    # publishes a sentinel covariance (σ_x = 99.995 m, σ_yaw = 5729°)
+    # that the GUI and EKF can't use — visually the LOC pill goes
+    # green but the cone is anchored to wheel-odom dead-reckoning, not
+    # the visual match. On a small / low-texture map the second
+    # confirming match often never arrives, so localization stays
+    # stuck at "publishing but useless." Setting this to 0 makes the
+    # first match's covariance the published one (typically 4-35 mm σ).
+    RGBD/MaxOdomCacheSize: "0"
+
+    # Slightly relaxed loop-closure / global-relocalization threshold
+    # (default ≈ 0.11). 0.08 gives the matcher a chance to latch onto
+    # a weaker candidate before falling through to "no match found."
+    # Combined with the GUI's 📍 Set Initial Pose hint (which seeds
+    # the search with a known pose and bypasses global relocalization
+    # entirely), this is what gets the lab map confidently localized.
+    Rtabmap/LoopThr: "0.08"
