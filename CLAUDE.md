@@ -50,29 +50,76 @@ python3 -m pytest test/test_flake8.py -v
 
 Tests live in `ros2_ws/src/swerve_formation/test/` and only cover lint/style (flake8, pep257, copyright). There are no unit tests yet.
 
-## Software Architecture (per robot)
+## Software Architecture
 
-All nodes are Python 3. Always use numpy for matrix math in control loops (Pi 4 is compute-limited).
+The system is split across **the laptop** and **every robot**. All robot Pis run an *identical* node stack — there is no leader-only or follower-only variant of the runtime image, only runtime *state* differs (the leader has its `path_follower_node` active, others have it dormant). All nodes are Python 3. Always use numpy for matrix math in control loops (Pi 4 is compute-limited).
+
+### Laptop nodes
 
 | Node | Role |
 |---|---|
-| `conveyor_base_node` | Lifecycle node; serial bridge to OpenCR over USB-CDC. Publishes `/{robot_id}/odom` + TF `{robot_id}_odom → {robot_id}_base_link` |
-| `ekf_node` | Extended Kalman filter: prediction from `/{robot_id}/odom`, correction from `/{robot_id}/slam/pose`. Publishes authoritative `/{robot_id}/ekf/odom`. Fixed observation noise `R = diag(0.05, 0.05, 0.02)`. **In localization (production), this is the sole consumer of raw `/odom`** — rtabmap reads `/ekf/odom` instead. During mapping, rtabmap reads raw `/odom` directly (ekf is typically not running there). |
-| OAK camera (`depthai_ros_driver::Camera` component) | RGB + aligned stereo depth. Loaded into a `ComposableNodeContainer` by `oak_camera.launch.py`, configured by `swerve_bringup/config/depthai_oak_d_lite.yaml`. Owns the OAK-D USB device exclusively. Publishes `/{robot_id}/camera/rgb/image_raw`, `/{robot_id}/camera/rgb/camera_info`, `/{robot_id}/camera/depth/image_raw`, `/{robot_id}/camera/depth/camera_info`. Depth aligned to RGB optical frame. |
-| `ai_camera_node` | Subscribes to published detection topics from `oak_camera_node`. Does NOT open its own depthai device — the OAK-D only allows one host connection. |
-| `slam_pose_relay_node` | Type-conversion glue: converts `/{robot_id}/rtabmap/localization_pose` (`PoseWithCovarianceStamped`) → `/{robot_id}/slam/pose` (`PoseStamped`) for `ekf_node`. Covariance is dropped; `ekf_node` uses a fixed R matrix. Do not remove this node — the message types are incompatible and cannot be fixed with a remap alone. |
-| `laplacian_formation_node` | Rigid-body feedforward + optional Laplacian consensus correction. Publishes `/{robot_id}/cmd_vel` and `/formation/state`. Consensus (`enable_consensus`) is **OFF by default** — see node docstring for why. |
-| `leader_election_node` | Bully-inspired election over `/formation/heartbeat`. Lowest-priority active robot wins. Publishes `/formation/leader`. |
-| `navigation_node` | Runs on all robots; only the elected leader activates its APF + velocity-ramp control loop. Drives `/virtual_center/cmd_vel`. |
-| `formation_size_node` | Leader-only. Computes formation bounding envelope from `/formation/state` + camera object size; publishes footprint to navigation. |
-| `alignment_node` | Pre-run depth-based spacing correction. Leader measures depth to payload via OAK-D central ROI, nudges all robots to equal depth, then publishes final offset PoseArray. |
+| `rmw_zenohd` | Zenoh router on TCP `:7447`. Every Pi connects to this router as a client. Must be up before any robot or interface node starts. |
+| `flask_frontend` + `goal_publisher` | Locally-hosted Flask UI (built by a teammate) that lets a human submit a target. Publishes `/goal_pose` (`PoseStamped`) when the user clicks submit. **This is the production user interface** — RViz is debug-only and is not in any control-loop data path. |
+| `formation_manager_node` | Two responsibilities: (1) ONE-SHOT — at startup, snapshots `/tb3_0/pose` and `/tb3_1/pose`, computes virtual centre `C = (P0 + P1)/2` and per-robot offsets `δᵢ = Pᵢ − C`, and publishes `/formation/offsets` (`Float64MultiArray`, latched / `transient_local`). (2) CONTINUOUS — recomputes the formation's convex-hull `/formation/footprint` (`Polygon`) on every pose update and feeds it to `path_planner_node`. Replaces the old `formation_size_node`. |
+| `path_planner_node` | Subscribes to `/goal_pose` and `/formation/footprint`. Plans a footprint-aware path and publishes `/formation/path` (`PoseArray`) once per goal, latched. |
+| (optional) monitoring tools | `rqt`, `rviz2`, dashboards. Strictly observational — never in a control loop. |
+
+### Per-robot nodes (identical stack on tb3_0 and tb3_1)
+
+| Node | Role |
+|---|---|
+| `conveyor_base_node` | Lifecycle node; serial bridge to OpenCR over USB-CDC. Publishes `/{robot_id}/odom` + TF `{robot_id}_odom → {robot_id}_base_link`. |
+| `rtabmap_node` | Localization-only against the shared `.db`. GFTT+ORB features, 5 Hz detection. Publishes `/{robot_id}/visual_pose` (the per-robot localization pose). |
+| `ai_camera_node` | **DEFERRED — stub only.** Architecture preserved: when re-enabled it will subscribe to `depthai_ros_driver` detection topics. The OAK-D allows only one host connection, so this node must never open its own depthai device handle. **No current node depends on its output.** |
+| `ekf_node` | Fuses `/{robot_id}/odom` (prediction) + `/{robot_id}/visual_pose` (correction). Publishes `/{robot_id}/pose` at 20 Hz. Fixed observation noise `R = diag(0.05, 0.05, 0.02)`. |
+| `laplacian_formation_node` | Graph Laplacian consensus on `/{robot_id}/pose` from all peers + `/formation/offsets` + `/virtual_center/cmd_vel`. Publishes `/{robot_id}/cmd_vel` to `conveyor_base_node`. |
+| `path_follower_node` | Runs on **every** robot. **ACTIVE on the elected leader** — consumes `/formation/path`, publishes `/virtual_center/cmd_vel` at 20 Hz. **DORMANT on followers** — caches the latest `/formation/path` so on leader handover the newly elected robot activates against cached path with zero re-init. (This is "Option B": identical stack everywhere, runtime activation gated by `/formation/leader`.) |
+| `leader_election_node` | Bully/Raft-style election over `/formation/heartbeat` (`Empty`, 2 Hz). Lowest-priority active robot wins. Publishes `/formation/leader`. |
+| `slam_pose_relay_node` | Type-conversion glue: converts RTAB-Map's native `PoseWithCovarianceStamped` to the `PoseStamped` consumed by `ekf_node`. Do not remove — the message types cannot be bridged with a remap alone. |
+| OAK camera (`depthai_ros_driver::Camera` component) | RGB + aligned stereo depth. Loaded into a `ComposableNodeContainer` by `oak_camera.launch.py`, configured by `swerve_bringup/config/depthai_oak_d_lite.yaml`. Owns the OAK-D USB device exclusively. |
 | `fake_swerve_simulator` | Software-only robot for local nav testing — no hardware needed. |
 
-**Pose data flow (localization, i.e. production runtime)**: `/{robot_id}/odom` (raw) → `ekf_node` (prediction); `ekf_node` publishes `/{robot_id}/ekf/odom` → RTAB-Map (used as a clean prior; the static `.db` prevents feedback drift). RTAB-Map → `/{robot_id}/rtabmap/localization_pose` → `slam_pose_relay_node` → `/{robot_id}/slam/pose` → `ekf_node` (correction) → `/{robot_id}/ekf/odom` (authoritative). Raw `/odom` has exactly one consumer: `ekf_node`.
+### Cross-machine topics
 
-**Pose data flow (mapping)**: `/{robot_id}/odom` (raw) → RTAB-Map directly. ekf is typically not running. There is no SLAM-correction loop yet — rtabmap is building the `.db`, not consulting it — so raw odom is the right input and matches the `{robot_id}_odom → base_link` TF that `conveyor_base_node` publishes.
+| Topic | Type | Rate | Producer → Consumer |
+|---|---|---|---|
+| `/tb3_0/pose` | `PoseStamped` | 20 Hz | `ekf_node@tb3_0` → `laplacian_formation_node@all`, `formation_manager@laptop`, `path_planner@laptop` |
+| `/tb3_1/pose` | `PoseStamped` | 20 Hz | `ekf_node@tb3_1` → `laplacian_formation_node@all`, `formation_manager@laptop`, `path_planner@laptop` |
+| `/formation/offsets` | `Float64MultiArray` | one-shot (latched, `transient_local`) | `formation_manager@laptop` → `laplacian_formation_node@all` |
+| `/formation/footprint` | `Polygon` | on-change | `formation_manager@laptop` → `path_planner@laptop` |
+| `/formation/path` | `PoseArray` | one-shot per goal (latched) | `path_planner@laptop` → `path_follower_node@all` |
+| `/virtual_center/cmd_vel` | `Twist` | 20 Hz | `path_follower_node@leader` → `laplacian_formation_node@all` |
+| `/formation/heartbeat` | `Empty` | 2 Hz | `leader_election@leader` → `leader_election@all` |
+| `/goal_pose` | `PoseStamped` | on-submit | `flask_frontend@laptop` → `path_planner@laptop` |
 
-**Command data flow**: `/virtual_center/cmd_vel` (formation centre) → `laplacian_formation_node` → `/{robot_id}/cmd_vel` → `conveyor_base_node` → OpenCR.
+### Pose data flow (production runtime, localization mode)
+
+`/{robot_id}/odom` (raw) → `ekf_node` (prediction). `ekf_node` publishes `/{robot_id}/pose`, which is shared over the network and consumed by every robot's `laplacian_formation_node` and the laptop's `formation_manager` + `path_planner`. RTAB-Map → `slam_pose_relay_node` → `/{robot_id}/visual_pose` → `ekf_node` (correction). Raw `/odom` has exactly one consumer: the local `ekf_node`.
+
+### Pose data flow (mapping)
+
+`/{robot_id}/odom` (raw) → RTAB-Map directly. `ekf_node` is typically not running. There is no SLAM-correction loop yet — rtabmap is *building* the `.db`, not consulting it — so raw odom is the right input and matches the `{robot_id}_odom → base_link` TF.
+
+### Command data flow
+
+Goal: `flask_frontend → /goal_pose → path_planner → /formation/path` (latched). Then on the leader: `path_follower_node → /virtual_center/cmd_vel → laplacian_formation_node → /{robot_id}/cmd_vel → conveyor_base_node → OpenCR`. Followers receive the same `/virtual_center/cmd_vel` and the same `/formation/offsets`, so each robot independently arrives at its own corrected wheel commands without any per-robot dispatch from the laptop.
+
+## Initialization sequence
+
+The system comes up in five distinct phases. A failure in an earlier phase should *halt* the later phases (no partial activation).
+
+1. **Bringup + election.** Laptop brings up `rmw_zenohd`, `flask_frontend`, `formation_manager`, `path_planner`. Each Pi launches its full node stack. `leader_election_node` instances exchange `/formation/heartbeat` and converge on a leader.
+2. **Localization.** Each Pi's `rtabmap_node` scans the shared `.db` for a visual match (5–30 s typical). Until matched, `/{robot_id}/visual_pose` is silent and `ekf_node` runs as pure dead-reckoning. Phase 3 must not start until *all* robots are localized.
+3. **Pose-sharing + formation init.** All `ekf_node`s publish `/{robot_id}/pose` at 20 Hz. `formation_manager_node` snapshots the first synchronized pose pair, computes `C` and `δᵢ`, latches `/formation/offsets`. Every `laplacian_formation_node` receives the offsets via `transient_local` QoS.
+4. **Goal + planning.** User submits a target via the Flask frontend → `/goal_pose` → `path_planner_node` plans against `/formation/footprint`, publishes `/formation/path` (latched). All `path_follower_node`s cache it; only the leader activates against it.
+5. **Execution.** Leader's `path_follower_node` publishes `/virtual_center/cmd_vel` at 20 Hz; followers' `path_follower_node`s remain dormant but keep the cached path warm.
+
+## Failure modes
+
+- **Laptop dies mid-mission.** Robots continue executing the cached `/formation/path` (latched, `transient_local`). The laptop is not in any tight control loop — losing it does not stop motion. Recovery: relaunch laptop nodes; latched topics re-establish.
+- **Leader dies.** `leader_election_node` detects the missing heartbeat after `PEER_TIMEOUT=2.0 s` and promotes the next-priority follower. The newly elected robot's `path_follower_node` activates against its already-cached `/formation/path` — no re-planning, no re-init.
+- **Network hiccup.** `/virtual_center/cmd_vel` stops arriving at the Pis. The OpenCR's 500 ms watchdog zeroes the drive motors. Steering holds. When the network recovers, motion resumes from the next received command.
+- **Partial localization (one robot still searching the `.db`).** Phase 3 should not start until both robots publish `/{robot_id}/pose` from a fused (not pure-dead-reckoning) state, otherwise the `formation_manager` snapshot is poisoned and `δᵢ` will be wrong for the rest of the mission.
 
 ## Localization Stack (RTAB-Map)
 
@@ -173,7 +220,7 @@ Laptop: ros2 launch swerve_bringup rtabmap_laptop_mapping.launch.py robot_id:=tb
 Laptop: ros2 launch swerve_bringup rtabmap_laptop_localization.launch.py robot_id:=tb3_1
 ```
 
-`conveyor.launch.py` is the production full-robot launch: brings up base, EKF, camera, RTAB-Map localization, leader election, navigation, formation controller, and alignment node for a single robot.
+`conveyor.launch.py` is the production full-robot launch and brings up the per-robot stack listed in the Software Architecture section: `conveyor_base_node`, `rtabmap_node` (localization-only), the OAK camera composable container, `slam_pose_relay_node`, `ekf_node`, `laplacian_formation_node`, `path_follower_node`, and `leader_election_node`. `formation_manager_node` and `path_planner_node` are launched from the laptop, not here. The laptop launch additionally starts `rmw_zenohd` and the Flask frontend.
 
 **Simulation (no hardware):**
 ```bash
@@ -193,9 +240,10 @@ The full chain `map → {robot_id}_odom → {robot_id}_base_link → {robot_id}_
 
 ## Middleware
 
-- **Current RMW: `rmw_fastrtps_cpp`** (FastDDS). The project temporarily reverted to FastDDS due to time constraints; treat it as the active middleware for everything below (discovery, QoS tuning, debugging, deployment).
-- Discovery on the laptop is configured via `FASTRTPS_DEFAULT_PROFILES_FILE=~/fastdds_peers.xml` (exported in `~/.bashrc`). The `ROS_DOMAIN_ID` is `30`. The Pis use analogous `~/fastdds_peers.xml` files; see `LOCALIZATION_RUN_LAPTOP.md` and `MAPPING_RUN_LAPTOP.md` for the canonical locator structure.
-- **Zenoh migration is deferred.** The legacy Zenoh config files (`zenoh_client.json5`, any `RMW_ZENOH_CONFIG_FILE` references) are retained in the repo and shell history for the eventual switch back, but they are **not active** right now. Do not propose Zenoh-specific debugging steps, do not assume `rmw_zenohd` is running, and do not set `RMW_IMPLEMENTATION=rmw_zenoh_cpp` unless the user explicitly resumes the migration.
+- **Current RMW: `rmw_zenoh_cpp`.** The laptop runs `rmw_zenohd` on TCP `:7447` as the discovery/transport router; every Pi connects to it as a Zenoh client. `rmw_zenohd` must be up before any robot or interface node starts, or DDS-layer discovery will silently never converge.
+- Per-Pi Zenoh client config is selected via the **`RMW_ZENOH_CONFIG_FILE`** environment variable (point it at `~/zenoh_client.json5`). Do not confuse this with `ZENOH_CONNECT` or `ZENOH_CONFIG_OVERRIDE` — those are upstream Zenoh CLI vars and have no effect on `rmw_zenoh_cpp`.
+- `ROS_DOMAIN_ID` is `30`.
+- **FastDDS fallback is retained but inactive.** The legacy `fastdds_peers.xml` files and `FASTRTPS_DEFAULT_PROFILES_FILE` references in `LOCALIZATION_RUN_LAPTOP.md` / `MAPPING_RUN_LAPTOP.md` are kept for the case where `rmw_zenohd` is down or under investigation, but they are **not active** right now. Do not propose FastDDS-specific debugging steps unless the user explicitly switches back.
 
 ## Namespacing
 
@@ -230,8 +278,8 @@ rsync ~/maps/lab.db pi2@<ip>:~/maps/lab.db
 rtabmap-databaseViewer ~/maps/lab.db
 
 # Verify localization is running (from laptop)
-ros2 topic hz /tb3_1/slam/pose          # should rise to ~1-5 Hz once localized
-ros2 topic echo /tb3_1/ekf/odom         # smooth, drift-corrected
+ros2 topic hz /tb3_1/visual_pose        # should rise to ~1-5 Hz once localized
+ros2 topic echo /tb3_1/pose             # 20 Hz, smooth, drift-corrected
 ros2 run tf2_ros tf2_echo map tb3_1_base_link
 
 # Live odometry display on Pi
@@ -242,14 +290,24 @@ Workspace source order: ROS 2 base → TurtleBot3 ws → project ws (all in `~/.
 
 ## Key Rules
 
-- These are **holonomic** robots — always swerve IK, never differential drive math
-- **Never propose a central master node** — all control must be distributed
-- Use numpy heavily in control loops
-- Formation controller and serial bridge are intentionally separate nodes (allows sim/hardware swap)
-- **OAK-D Lite only allows one host connection.** The `depthai_ros_driver` Camera component owns the device. `ai_camera_node` and any other node must subscribe to published ROS topics, not open a depthai device handle directly.
-- Consensus correction in `laplacian_formation_node` is **off by default** (`enable_consensus:=false`). Turn it on only after confirming every robot loads the **same** `.db` file. Different databases produce incompatible world frames and the correction silently corrupts the formation.
-- RTAB-Map multi-robot requirement: all robots must localize against **the same `.db`** for `/formation/leader`-gated consensus to be meaningful.
+- These are **holonomic** robots — always swerve IK, never differential drive math.
+- **Never propose a central master node.** The laptop runs planning and the UI, but it is not in any control loop and the system survives the laptop dying.
+- **Identical node stack on every robot.** Do not propose a leader-only or follower-only build. Roles are runtime state, not a deployment artifact. `path_follower_node` activates/deactivates against `/formation/leader`; it does not get conditionally launched.
+- **`ai_camera_node` is deferred.** No production node currently consumes its output. Keep the architecture wired so it can be re-enabled, but do not add dependencies on it.
+- **The user interface is the Flask frontend, not RViz.** RViz is debug-only and must never appear in a control-loop data path.
+- Use numpy heavily in control loops (Pi 4 is compute-limited).
+- Formation controller and serial bridge are intentionally separate nodes (allows sim/hardware swap).
+- **OAK-D Lite only allows one host connection.** The `depthai_ros_driver` Camera component owns the device. `ai_camera_node` (when re-enabled) and any other node must subscribe to published ROS topics, not open a depthai device handle directly.
+- RTAB-Map multi-robot requirement: all robots must localize against **the same `.db`** — different databases produce incompatible world frames.
 - **`slam_pose_relay_node` is not redundant glue.** It exists because RTAB-Map publishes `PoseWithCovarianceStamped` and `ekf_node` subscribes to `PoseStamped` — these cannot be bridged with a remap alone. Do not remove it.
+- **Latched topics for one-shot data.** `/formation/offsets` and `/formation/path` use `transient_local` QoS so a late-joining or newly-elected leader receives the latest value without a re-publish. Do not change these to volatile.
 - **Camera mount TF values must be physically measured** for each robot before mapping. Errors here propagate directly into every downstream pose estimate. Add new robots to `_CAMERA_MOUNT` in `swerve_bringup/launch/oak_camera.launch.py` rather than passing one-off launch args — the table is the single source of truth.
 - `conveyor_base_node` is a **lifecycle node** — it must be configured then activated. The `main()` function handles this automatically, but manual lifecycle management in tests requires explicit `trigger_configure()` + `trigger_activate()` calls.
-- New YAML config files in `swerve_bringup/config/` must be registered in `setup.py` `data_files` and the package must be rebuilt before they are accessible at runtime.
+
+### Workflow conventions
+
+- **Namespace via `PushRosNamespace` at launch time; topics are relative inside nodes.** Never combine `PushRosNamespace` with explicit `/{robot_id}/` prefixes inside a node — you will get double-namespaced paths like `/tb3_0/tb3_0/odom`. The cross-machine topic table above shows the *resolved* names; nodes themselves should subscribe to relative names like `pose`, not `/tb3_0/pose`.
+- **Middleware env var is `RMW_ZENOH_CONFIG_FILE`**, not `ZENOH_CONNECT` and not `ZENOH_CONFIG_OVERRIDE`. The latter two are upstream Zenoh CLI vars and do nothing for `rmw_zenoh_cpp`.
+- **Always rsync the full `src/` tree before `colcon build` on a Pi.** Partial syncs leave stale `.pyc` and orphaned `setup.py` entries that cause silent runtime errors.
+- **`setup.py` `data_files` must `glob('launch/*.py')` and `glob('config/*.yaml')`.** New launch files and YAML configs are invisible to `ros2 launch` until they install to the share directory.
+- **Workspace sourcing order in `~/.bashrc`:** ROS 2 base → TurtleBot3 ws → project ws. Each layer overrides the previous; reversing the order loses the project's overrides.

@@ -1,6 +1,28 @@
 # Swerve Transport Project
 
-Single team repository for high-level ROS 2 control and low-level OpenCR firmware.
+Two (scaling to 3+) holonomic swerve-drive TurtleBots cooperatively transport a shared rigid payload. ROS 2 Humble on the robot side, custom OpenCR C++ firmware below it, a Flask frontend on the laptop for the human operator. **All robot-side control is decentralized** — the laptop runs planning and the UI, but the system survives the laptop dying mid-mission.
+
+For the full architecture (per-node responsibilities, cross-machine topic table, init sequence, failure modes), see **[CLAUDE.md](CLAUDE.md)** and **ARCHITECTURE.md**. The three companion diagrams `01_topology.png`, `02_initialization.png`, `03_runtime.png` give the visual reference.
+
+## High-level architecture
+
+**On the laptop:**
+- `rmw_zenohd` — Zenoh router on TCP `:7447`, the discovery/transport hub
+- Flask frontend + `goal_publisher` — the operator UI; emits `/goal_pose` on submit
+- `formation_manager_node` — snapshots initial poses, latches `/formation/offsets`, publishes `/formation/footprint` from the live convex hull
+- `path_planner_node` — plans against `/formation/footprint`, latches `/formation/path`
+
+**On every robot (identical stack on tb3_0 and tb3_1):**
+- `conveyor_base_node` — lifecycle serial bridge to OpenCR, publishes `/odom`
+- `rtabmap_node` — visual localization-only against the shared `.db`, publishes `/visual_pose`
+- `ekf_node` — fuses `/odom` + `/visual_pose` into authoritative `/pose` at 20 Hz
+- `laplacian_formation_node` — Graph Laplacian consensus on neighbor poses + offsets, publishes `/cmd_vel`
+- `path_follower_node` — **active on the elected leader** (publishes `/virtual_center/cmd_vel`), **dormant on followers** (caches `/formation/path` for instant promotion)
+- `leader_election_node` — Bully/Raft heartbeat, publishes `/formation/leader`
+- `ai_camera_node` — **deferred (stub)**; reserved for object-detection input later
+- OAK camera composable container — owns the OAK-D Lite USB device exclusively
+
+The leader's `/virtual_center/cmd_vel` flows to every robot's `laplacian_formation_node`, which combines it with the latched `/formation/offsets` to produce that robot's local `/cmd_vel`. No per-robot dispatch from the laptop. If the leader dies, the next-priority follower promotes itself, activates against its already-cached `/formation/path`, and motion continues with no re-init.
 
 ## Repository Layout
 
@@ -8,15 +30,17 @@ Single team repository for high-level ROS 2 control and low-level OpenCR firmwar
 swerve-transport/
 ├── ros2_ws/
 │   └── src/
-│       └── swerve_formation/     # High-level Python ROS 2 package
-│           ├── swerve_formation/
-│           │   ├── laplacian_formation_node.py
-│           │   └── fake_swerve_simulator.py
-│           ├── package.xml
-│           └── setup.py
-└── opencr_firmware/
-    └── swerve_kinematics/        # Low-level OpenCR C++ firmware
+│       ├── swerve_formation/        # All node logic (Python 3)
+│       ├── swerve_bringup/          # Launch files + YAML config
+│       └── turtlebot3_conveyor_bridge/  # Legacy serial bridge / teleop
+├── opencr_firmware/
+│   └── swerve_kinematics/           # OpenCR C++ firmware (swerve IK)
+├── interface/                       # Flask frontend, map viewer, ros_pose_bridge
+├── CLAUDE.md                        # Authoritative architecture + conventions
+└── ARCHITECTURE.md                  # Companion to the three PNG diagrams
 ```
+
+`entry_points` in `swerve_formation/setup.py` are the source of truth for node names. New launch files and YAML configs must be registered in `setup.py` `data_files` (`glob('launch/*.py')`, `glob('config/*.yaml')`) or they will not install.
 
 ---
 
@@ -210,294 +234,111 @@ source install/setup.bash
 
 ---
 
-## Troubleshooting
+## Running the Two-Robot System
 
-**`ros2: command not found`**
-You forgot to source ROS 2. Run `source /opt/ros/humble/setup.bash` or check your `~/.bashrc`.
+This is the production runtime. The startup order matters — see [CLAUDE.md → Initialization sequence](CLAUDE.md) for the five phases and what each one waits for.
 
-**`Package 'swerve_formation' not found`**
-You need to source the project workspace: `source ~/projects/swerve-transport/ros2_ws/install/setup.bash`
+### Prerequisites
 
-**Nodes can't see each other's topics**
-Make sure Zenoh is being used as the RMW layer. Set this in your `~/.bashrc`:
-```bash
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp
-```
+- Ubuntu 22.04 + ROS 2 Humble on every machine, sourced in this order: ROS 2 base → TurtleBot3 ws → project ws.
+- `ros-humble-rmw-zenoh-cpp` installed on the laptop and both Pis.
+- A Zenoh client config at `~/zenoh_client.json5` on each Pi that points at the laptop's IP on TCP `:7447`. Each Pi's shell exports `RMW_ZENOH_CONFIG_FILE=~/zenoh_client.json5` (note: not `ZENOH_CONNECT` and not `ZENOH_CONFIG_OVERRIDE`).
+- `ROS_DOMAIN_ID=30` on every machine.
+- A built `.db` map (see Mapping below), copied to `/home/pi1/maps/lab.db` and `/home/pi2/maps/lab.db`.
 
-**Build fails with missing dependency**
-Run `rosdep install --from-paths src --ignore-src -r -y` from inside `ros2_ws/` to auto-install missing ROS dependencies.
-
-# Two-Robot Formation Test (Keyboard Teleop)
-
-This section covers everything needed to pull the latest code, deploy it to both robots, and run the Laplacian formation test using the twist keyboard to drive the virtual center. No camera or SLAM is required for this test — offset initialization uses odometry from the robots' starting positions.
-
----
-
-## What This Test Does
-
-The keyboard on your laptop publishes velocity commands to `/virtual_center/cmd_vel`. Both robots' `laplacian_formation_node` instances subscribe to that topic and independently compute corrected wheel commands to maintain their starting offset from each other. The formation geometry is derived from wherever you physically place the robots before launching — the `alignment_node` reads their initial EKF poses and locks in the offsets automatically.
-
----
-
-## Prerequisites
-
-Before starting, confirm you have the following on your laptop:
-
-- Ubuntu 22.04 with ROS 2 Humble installed and sourced
-- `rmw_zenoh_cpp` installed (`sudo apt install ros-humble-rmw-zenoh-cpp`)
-- `nav2_lifecycle_manager` installed (`sudo apt install ros-humble-nav2-lifecycle-manager`)
-- SSH access to both Raspberry Pis on the lab network
-- The repo cloned and the workspace built at least once
-
-The two Pis are:
-
-| Robot | Hostname / IP | ROS namespace |
-|-------|--------------|---------------|
-| tb3_0 (leader) | `pi1@<tb3_0-ip>` | `tb3_0` |
-| tb3_1 (follower) | `pi1@<tb3_1-ip>` | `tb3_1` |
-
-Replace `<tb3_0-ip>` and `<tb3_1-ip>` with the actual fixed IPs assigned to each Pi by the lab router.
-
----
-
-## Step 1: Pull and Deploy Code to Both Pis
-
-On your laptop, pull the latest changes from main first:
+### Deploy code to a Pi
 
 ```bash
-cd ~/turtlebot3_ws   # or wherever your project workspace lives
-git pull origin main
-```
-
-Then sync the source to each Pi. Run both commands from the same terminal (they are fast):
-
-```bash
-# Deploy to tb3_0
+# From the laptop, full sync (do not partial-sync — orphaned files cause silent failures)
 rsync -av --delete --exclude='__pycache__' \
-  src/ pi1@<tb3_0-ip>:~/turtlebot3_ws/src/
+  ros2_ws/src/ pi1@<pi-ip>:~/ros2_ws/src/
 
-# Deploy to tb3_1
-rsync -av --delete --exclude='__pycache__' \
-  src/ pi1@<tb3_1-ip>:~/turtlebot3_ws/src/
+# Then on the Pi
+ssh pi1@<pi-ip>
+cd ~/ros2_ws && colcon build --symlink-install && source install/setup.bash
 ```
 
-Because the workspace was built with `--symlink-install`, Python-only changes take effect immediately. You only need to rebuild on the Pi if `setup.py` or `package.xml` changed. If you are unsure, rebuild anyway:
+### Bring up the laptop side first
+
+Start the Zenoh router, the Flask frontend, and the laptop-side planning nodes:
 
 ```bash
-# On each Pi (run in separate SSH terminals)
-cd ~/turtlebot3_ws
-colcon build --symlink-install
-source install/setup.bash
-```
-
----
-
-## Step 2: Start the Zenoh Router on Your Laptop (Skip if using different middleware)
-
-Open a dedicated terminal for the router and leave it running for the entire test. The router must be up before any robot or teleop node starts.
-
-```bash
-# Terminal 1 — Zenoh router
-source /opt/ros/humble/setup.bash
-export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+# Terminal 1 — Zenoh router (must be first; leave running)
 ros2 run rmw_zenoh_cpp rmw_zenohd
+
+# Terminal 2 — laptop nodes (formation_manager, path_planner, frontend)
+ros2 launch swerve_bringup laptop.launch.py
 ```
 
-You should see log output like `Zenoh router started`. If you see an error about the port already in use, kill any stray `rmw_zenohd` processes first: `pkill rmw_zenohd`.
+If `rmw_zenohd` fails with "address in use", clear stale routers: `pkill rmw_zenohd`.
 
-Each Pi's `zenoh_client.json5` should already point to your laptop's IP. If this is a different laptop than usual, you need to update the `connect.endpoints` in that file on each Pi before continuing:
-
-```json5
-// ~/zenoh_client.json5 on each Pi
-{
-  mode: "client",
-  connect: {
-    endpoints: ["tcp/<YOUR_LAPTOP_IP>:7447"]
-  }
-}
-```
-
----
-
-## Step 3: Place the Robots
-
-Position the two robots where you want them. They should be facing the same direction (both pointing forward along the x-axis of your test area). A side-by-side arrangement works well — roughly 0.5 to 0.8 m apart laterally.
-
-Do not move them after this point until the nodes are fully up. The alignment node reads their starting EKF poses to compute the formation offsets.
-
----
-
-## Step 4: Launch on tb3_0 (Leader)
-
-SSH into tb3_0 and run:
+### Bring up each robot
 
 ```bash
-# SSH terminal for tb3_0
-ssh pi1@<tb3_0-ip>
+# On tb3_0
+ros2 launch swerve_bringup conveyor.launch.py robot_id:=tb3_0
 
-# On the Pi:
-source ~/.bashrc
-cd ~/turtlebot3_ws
-ros2 launch swerve_bringup conveyor.launch.py \
-  robot_id:=tb3_0 \
-  neighbors:=tb3_1 \
-  my_offset:=0.0,0.3 \
-  neighbor_offsets:=0.0,-0.3 \
-  usb_port:=/dev/ttyACM0 \
-  offset_init_mode:=odom
+# On tb3_1
+ros2 launch swerve_bringup conveyor.launch.py robot_id:=tb3_1
 ```
 
-Wait for this line in the output before moving on:
+This launches the per-robot stack listed in the architecture section above. Each robot independently localizes against the shared `.db` (5–30 seconds is normal — RTAB-Map needs to find a visual match before publishing `/visual_pose`).
 
-```
-[alignment_node]: Offset init from odometry complete
-```
+### Verify the system is healthy
 
-If it says `Offset init timeout — no valid EKF pose received`, the EKF has not had time to publish yet. Kill the launch, wait five seconds, and try again. This usually happens if the Zenoh router was not up yet when the node started.
-
----
-
-## Step 5: Launch on tb3_1 (Follower)
-
-In a second SSH terminal, connect to tb3_1 and run:
+From the laptop, confirm the topic graph:
 
 ```bash
-# SSH terminal for tb3_1
-ssh pi1@<tb3_1-ip>
-
-# On the Pi:
-source ~/.bashrc
-cd ~/turtlebot3_ws
-ros2 launch swerve_bringup conveyor.launch.py \
-  robot_id:=tb3_1 \
-  neighbors:=tb3_0 \
-  my_offset:=0.0,-0.3 \
-  neighbor_offsets:=0.0,0.3 \
-  usb_port:=/dev/ttyACM0 \
-  offset_init_mode:=odom
+ros2 topic hz /tb3_0/pose /tb3_1/pose          # ~20 Hz once both are localized
+ros2 topic echo /formation/offsets --once      # latched, should print on subscribe
+ros2 topic echo /formation/leader --once       # current elected leader
 ```
 
-Wait for the same alignment confirmation line.
+If `/tb3_*/pose` is silent, the robot has not yet localized — check the Pi's RTAB-Map log for "loop closure detected" / "global localization succeeded" before assuming a real fault.
 
-Note the offsets are mirrored: tb3_0 is offset +0.3 m in y, tb3_1 is offset -0.3 m. This means the virtual center sits between them. If your robots are further than ~0.6 m apart, adjust these values to match half the actual physical gap.
+### Drive the formation
 
----
+Open the Flask frontend in a browser (URL printed in the laptop launch log) and submit a goal. `path_planner_node` plans a footprint-aware path against the live `/formation/footprint`, latches `/formation/path`, and the elected leader's `path_follower_node` activates against it. Followers stay dormant but cache the path so leader handover is instant.
 
-## Step 6: Verify Topics Are Visible on the Laptop
+### Mapping (one-time, before the first run)
 
-Before touching the keyboard, confirm the full topic graph is healthy. On your laptop (new terminal):
+Drive one robot manually around the room while the laptop runs RTAB-Map in mapping mode:
 
 ```bash
-# Terminal 2 — topic verification
-source ~/.bashrc
-ros2 topic list | grep -E "odom|cmd_vel|formation|offsets"
+# On the Pi
+ros2 launch swerve_bringup rtabmap_pi_sensors.launch.py robot_id:=tb3_1
+
+# On the laptop
+ros2 launch swerve_bringup rtabmap_laptop_mapping.launch.py robot_id:=tb3_1
 ```
 
-You should see at minimum:
-
-```
-/tb3_0/odom
-/tb3_0/ekf/odom
-/tb3_0/cmd_vel
-/tb3_1/odom
-/tb3_1/ekf/odom
-/tb3_1/cmd_vel
-/virtual_center/cmd_vel
-/formation/offsets
-/formation/state
-```
-
-If `/tb3_1/ekf/odom` or `/tb3_0/ekf/odom` are missing, the EKF node on that robot is not publishing yet. Check that the lifecycle manager activated the `conveyor_base_node` on that Pi — look for the line `ConveyorBaseNode activated` in the Pi's launch output.
-
-You can also echo the formation state to confirm both robot poses are being reported:
+When done, copy the resulting `.db` to every Pi:
 
 ```bash
-ros2 topic echo /formation/state --once
+rsync ~/maps/lab.db pi1@<tb3_0-ip>:~/maps/lab.db
+rsync ~/maps/lab.db pi2@<tb3_1-ip>:~/maps/lab.db
 ```
 
-You should see two `poses` entries with distinct x/y coordinates.
+All robots **must** localize against the same `.db` — different databases produce incompatible world frames and the formation will silently corrupt.
 
 ---
 
-## Step 7: Reset Odometry on Both Robots
+## Stopping cleanly
 
-Before driving, zero out both robots' odometry so the formation controller works from a clean baseline.
-
-```bash
-# On your laptop:
-ros2 service call /tb3_0/reset_odom std_srvs/srv/Trigger
-ros2 service call /tb3_1/reset_odom std_srvs/srv/Trigger
-```
-
-Both should respond with `success: True`. If you get `Node not active`, the lifecycle manager has not finished activating `conveyor_base_node` yet — wait a few more seconds and retry.
-
----
-
-## Step 8: Start the Keyboard Teleop
-
-Open a new terminal on your laptop. The teleop node must publish to `/virtual_center/cmd_vel`, not to a robot-specific `cmd_vel`:
-
-```bash
-# Terminal 3 — teleop
-source ~/.bashrc
-ros2 run teleop_twist_keyboard teleop_twist_keyboard \
-  --ros-args -r cmd_vel:=/virtual_center/cmd_vel
-```
-
-Key bindings for holonomic control:
-
-| Key | Motion |
-|-----|--------|
-| `i` | Forward |
-| `,` | Backward |
-| `j` | Rotate left (CCW) |
-| `l` | Rotate right (CW) |
-| `J` (shift+j) | Strafe left |
-| `L` (shift+l) | Strafe right |
-| `k` | Stop |
-| `q` / `z` | Increase / decrease speed |
-
-Start with a low speed. The default is 0.10 m/s which is safe for a first run. Keep runs under 30 seconds because wheel odometry drifts without SLAM correction active.
-
----
-
-## Step 9: What to Watch For
-
-During the test, the formation is working correctly if:
-
-- Both robots move in the same direction when you press forward/back
-- The lateral gap between them stays roughly constant (within ~5 cm drift over 30 s)
-- Neither robot oscillates or spins unexpectedly
-
-A few things that indicate problems:
-
-- One robot moves and the other stands still: the Zenoh bridge is not delivering `/virtual_center/cmd_vel` to that Pi. Check the router is still running.
-- Both robots move but drift apart: the `laplacian_formation_node` is not receiving the neighbor's EKF odom. Run `ros2 topic hz /tb3_0/ekf/odom` from the laptop to check the publish rate — it should be around 10-20 Hz.
-- Oscillation or jitter: `k_gain` is too high for the current offset distance. Kill the launch on both Pis and relaunch with `k_gain:=0.8` instead of the default 1.5.
-
----
-
-## Stopping the Test
-
-Press `Ctrl+C` in the teleop terminal first. This sends a zero velocity, which triggers the OpenCR watchdog and stops both robots. Then `Ctrl+C` the launch on each Pi. The lifecycle manager will call `deactivate` on `conveyor_base_node`, which zeroes the motors through the serial link before shutting down.
-
-Do not kill the Pi launch while the robots are still moving — the watchdog timeout is 500 ms so the motors will stop on their own, but it is cleaner to let the lifecycle shutdown handle it.
+Stop in reverse startup order: kill each Pi launch first (lifecycle deactivation zeroes the motors via the serial link), then the laptop nodes, then `rmw_zenohd` last. The OpenCR's 500 ms watchdog is a safety backstop, not a replacement for clean shutdown.
 
 ---
 
 ## Troubleshooting
 
-**Teleop key presses have no effect on the robots**
-Check that `/virtual_center/cmd_vel` is publishing: `ros2 topic hz /virtual_center/cmd_vel`. If the rate is 0, the remap in the teleop launch command may be wrong. Confirm the `-r` argument is exactly `cmd_vel:=/virtual_center/cmd_vel`.
+**Pis can't see each other's topics.** `rmw_zenohd` is not running on the laptop, or `RMW_ZENOH_CONFIG_FILE` on the Pi does not point at a valid client config. Check the laptop terminal for the router log; on the Pi, `echo $RMW_ZENOH_CONFIG_FILE` and verify the file's `connect.endpoints` matches the laptop IP.
 
-**`ros2 service call /tb3_0/reset_odom` times out**
-The `conveyor_base_node` lifecycle is not in the active state. Look at the Pi output for `ConveyorBaseNode activated`. If it never appears, the lifecycle manager may have failed to configure the node — usually because the serial port `/dev/ttyACM0` is not accessible. Run `ls -la /dev/ttyACM*` on the Pi to confirm the OpenCR shows up and that the `pi1` user has read/write permission on it (it should be in the `dialout` group: `sudo usermod -aG dialout pi1`).
+**`/tb3_*/pose` never appears.** RTAB-Map has not localized yet. Confirm the `.db` is at `~/maps/lab.db` on the Pi and the camera is producing images (`ros2 topic hz /tb3_0/camera/rgb/image_raw`). Drop the robot in an area with visual variety — blank walls fail.
 
-**`colcon build` fails on the Pi with a missing package**
-Run `rosdep install --from-paths src --ignore-src -r -y` inside `~/turtlebot3_ws/` to auto-install any missing ROS dependencies, then rebuild.
+**Build fails with a missing dependency.** Run `rosdep install --from-paths src --ignore-src -r -y` inside `~/ros2_ws/` and rebuild.
 
-**The alignment node times out every time**
-This means the EKF is not producing a valid pose within 10 seconds of launch. The most common cause is that `conveyor_base_node` has not activated yet, so no raw `/odom` is flowing into `ekf_node`. Watch the launch output for `ConveyorBaseNode activated` and confirm it appears before the alignment timeout fires. Increasing the lifecycle manager's `bond_timeout` or adding a longer `TimerAction` delay before the lifecycle manager starts can also help on a slow Pi boot.
+**Serial port `/dev/ttyACM0` not accessible on a Pi.** The `pi1` user must be in the `dialout` group: `sudo usermod -aG dialout pi1`, then log out and back in.
 
-**Robots drive in opposite directions**
-The `my_offset` and `neighbor_offsets` values are likely swapped between the two launch commands. Double-check that tb3_0 has `my_offset:=0.0,0.3` and `neighbor_offsets:=0.0,-0.3`, while tb3_1 has the opposite. The rule is simple: your offset and your neighbor's offset must sum to zero.
+**`ros2: command not found`.** ROS 2 base is not sourced. Either run `source /opt/ros/humble/setup.bash` or fix `~/.bashrc`.
+
+**`Package 'swerve_formation' not found`.** Project workspace is not sourced: `source ~/ros2_ws/install/setup.bash`.
