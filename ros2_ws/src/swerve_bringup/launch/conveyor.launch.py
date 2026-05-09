@@ -88,12 +88,16 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # EKF — fuses raw /odom + SLAM pose; sole consumer of raw odometry
+        # EKF — fuses raw /odom + /imu (gyro Z, slip-immune) + SLAM pose;
+        # sole consumer of raw odometry.
         Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
+            parameters=[{
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
+            }],
             output='screen',
         ),
 

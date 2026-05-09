@@ -170,13 +170,16 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ))
 
-    # ── EKF — wheel /odom + /slam/pose → /ekf/odom ───────────────────────
+    # ── EKF — wheel /odom + /imu (gyro fusion) + /slam/pose → /ekf/odom ──
     if enable_ekf:
         actions.append(Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
+            parameters=[{
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
+            }],
             output='screen',
         ))
 
@@ -303,5 +306,10 @@ def generate_launch_description():
             'enable_ekf', default_value='true',
             description='Start ekf_node. Set false if EKF is already '
                         'running from a separate launch.'),
+        DeclareLaunchArgument(
+            'gyro_z_sign', default_value='1.0',
+            description='Sign of the IMU gyro Z reading. Set to -1.0 if a '
+                        'bench yaw test shows ekf yaw decreasing under '
+                        'physical CCW rotation.'),
         OpaqueFunction(function=launch_setup),
     ])
