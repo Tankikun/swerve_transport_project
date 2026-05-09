@@ -53,7 +53,7 @@ You'll need **5 terminals** + a browser. Open them all up front:
 | **T5** | SSH'd into the Pi | `loc_doctor.py` for live diagnostic readout (always useful) |
 | **Browser** | Laptop | Chrome/Firefox at `http://localhost:5002` |
 
-**Robot ID convention used below**: `tb3_0` running on `pi1@172.20.10.9`.
+**Robot ID convention used below**: `tb3_0` running on `pi1@172.20.10.2`.
 For pi2 with `tb3_1`, swap both names everywhere.
 
 ---
@@ -70,8 +70,8 @@ time the Pi has been rebooted:
 ```bash
 # On the laptop:
 NOW=$(date -u +"%Y-%m-%d %H:%M:%S")
-ssh pi1@172.20.10.9 "echo raspberry | sudo -S date -u -s '$NOW'"
-ssh pi1@172.20.10.9 "date"   # should now read today's date
+ssh pi1@172.20.10.2 "echo raspberry | sudo -S date -u -s '$NOW'"
+ssh pi1@172.20.10.2 "date"   # should now read today's date
 ```
 
 (Sudo password on the Pi is `raspberry` unless you've changed it.)
@@ -79,7 +79,7 @@ ssh pi1@172.20.10.9 "date"   # should now read today's date
 ### 1.2 Verify the OAK-D camera enumerates
 
 ```bash
-ssh pi1@172.20.10.9 "lsusb | grep Movidius"
+ssh pi1@172.20.10.2 "lsusb | grep Movidius"
 # Expected: Bus 001 Device NNN: ID 03e7:2485 Intel Movidius MyriadX
 ```
 
@@ -96,7 +96,7 @@ cd ~/swerve_transport_project
 git fetch origin && git checkout feature/map-to-localize && git pull
 
 # On the Pi:
-ssh pi1@172.20.10.9 "cd ~/swerve_transport_project && \
+ssh pi1@172.20.10.2 "cd ~/swerve_transport_project && \
     git fetch origin && git checkout feature/map-to-localize && git pull && \
     cd ros2_ws && colcon build --symlink-install --packages-select swerve_bringup swerve_formation"
 ```
@@ -115,7 +115,7 @@ This produces the `.db` that localization later loads.
 ### 2.1 T1 — Start mapping launch on the Pi
 
 ```bash
-ssh pi1@172.20.10.9
+ssh pi1@172.20.10.2
 # Once at the pi1@... prompt, paste this whole block:
 unset FASTRTPS_DEFAULT_PROFILES_FILE     # ← important on hotspot/non-LAN networks
 export ROS_DOMAIN_ID=30
@@ -304,7 +304,7 @@ coordinate frames don't match.
 
 ```bash
 # On the laptop:
-rsync -avh pi1@172.20.10.9:/home/pi1/maps/<DB_NAME>.db ~/maps/
+rsync -avh pi1@172.20.10.2:/home/pi1/maps/<DB_NAME>.db ~/maps/
 ```
 
 (Use the actual `<DB_NAME>` you saw in T1's "Saving database" line.)
@@ -324,7 +324,7 @@ points and what bounds it extracted.
 
 ```bash
 md5sum ~/maps/<DB_NAME>.db
-ssh pi1@172.20.10.9 "md5sum /home/pi1/maps/<DB_NAME>.db"
+ssh pi1@172.20.10.2 "md5sum /home/pi1/maps/<DB_NAME>.db"
 ```
 
 The two hashes must be identical. If they're not, the rsync didn't
@@ -392,7 +392,7 @@ every 5 sec until the next step — that's normal.
 ### 4.4 T5 — (Recommended) Start loc_doctor on the Pi
 
 ```bash
-ssh pi1@172.20.10.9
+ssh pi1@172.20.10.2
 unset FASTRTPS_DEFAULT_PROFILES_FILE
 export ROS_DOMAIN_ID=30
 source /opt/ros/humble/setup.bash
@@ -536,7 +536,7 @@ installed it into the workspace's `share/` directory.
 
 Fix:
 ```bash
-ssh pi1@172.20.10.9 "cd ~/swerve_transport_project/ros2_ws && \
+ssh pi1@172.20.10.2 "cd ~/swerve_transport_project/ros2_ws && \
     colcon build --symlink-install --packages-select swerve_bringup && \
     cat install/swerve_bringup/share/swerve_bringup/config/rtabmap_localization.yaml \
         | grep -E 'MinInliers|MaxOdomCache'"
@@ -567,7 +567,7 @@ Look in T1 for:
 Add the standard depthai udev rule on the Pi (one-time, persistent):
 
 ```bash
-ssh pi1@172.20.10.9 'echo raspberry | sudo -S bash -c "cat > /etc/udev/rules.d/80-movidius.rules <<EOF
+ssh pi1@172.20.10.2 'echo raspberry | sudo -S bash -c "cat > /etc/udev/rules.d/80-movidius.rules <<EOF
 SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"03e7\", MODE=\"0666\"
 EOF
 udevadm control --reload-rules && udevadm trigger"'
@@ -577,7 +577,7 @@ For the *current* USB plug (no replug needed), also chmod the live
 device file:
 
 ```bash
-ssh pi1@172.20.10.9 'DEV=$(lsusb | awk "/Movidius/ {print \"/dev/bus/usb/\" \$2 \"/\" substr(\$4, 1, length(\$4)-1)}"); echo raspberry | sudo -S chmod 666 "$DEV"; ls -la "$DEV"'
+ssh pi1@172.20.10.2 'DEV=$(lsusb | awk "/Movidius/ {print \"/dev/bus/usb/\" \$2 \"/\" substr(\$4, 1, length(\$4)-1)}"); echo raspberry | sudo -S chmod 666 "$DEV"; ls -la "$DEV"'
 ```
 
 Then re-launch.
