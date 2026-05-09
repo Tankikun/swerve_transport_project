@@ -24,6 +24,7 @@ import serial
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
+from sensor_msgs.msg import Imu
 from std_srvs.srv import Trigger
 import tf2_ros
 
@@ -37,6 +38,18 @@ _MOD_PY          = [ _HALF_W, -_HALF_W,  _HALF_W, -_HALF_W]
 _DXL_POS_TO_RAD  = (2.0 * math.pi) / 4096.0
 _DXL_VEL_TO_RADS = 0.229 * (2.0 * math.pi) / 60.0
 _STEER_CENTER    = 2048
+
+# ── IMU covariances (MPU-9250 on OpenCR, datasheet-typical, rounded up
+# for headroom against quantization and bias drift) ──────────────────────────
+# Gyro: noise density ~0.01 °/s/√Hz; bandwidth/quantization push the per-axis
+# variance to roughly (0.01 rad/s)². Used by ekf_node to weight gyro fusion.
+_IMU_GYRO_VAR  = 1.0e-4
+# Accel: noise density ~300 µg/√Hz at ~100 Hz BW gives ~0.1 m/s² std per axis.
+_IMU_ACCEL_VAR = 1.0e-2
+# Madgwick-filtered absolute yaw drifts unboundedly without a magnetometer
+# correction we can trust on a metal chassis, so we explicitly mark the
+# orientation field as "not provided" per ROS convention (covariance[0] = -1).
+# Consumers will ignore the orientation quaternion and fuse only the gyro.
 
 
 # NOTE — Legacy firmware-rollback safety net.
@@ -89,6 +102,7 @@ class ConveyorBaseNode(Node):
         self._ser: serial.Serial | None = None
         self._sub            = None
         self._odom_pub       = None
+        self._imu_pub        = None
         self._tf_broadcaster = None
         self._read_timer     = None
         self._watchdog_timer = None
@@ -136,6 +150,14 @@ class ConveyorBaseNode(Node):
             Twist, f'/{robot_id}/cmd_vel', self._cmd_cb, 10
         )
         self._odom_pub       = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
+        # Slip-immune yaw-rate source for ekf_node. Frame is reported in
+        # base_link rather than a separate imu_link because the OpenCR is
+        # mounted flat on the chassis (Z-up coincident) and we don't yet
+        # publish an imu_link static TF — declaring a frame_id we can't
+        # transform from would break any tf2 lookup. The only fused channel
+        # is gyro Z, which is rotation-invariant under that flat-mount
+        # assumption.
+        self._imu_pub        = self.create_publisher(Imu, f'/{robot_id}/imu', 10)
         self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         # Read serial at 50 Hz (was 10 Hz). Firmware now emits POSE at
         # 33 Hz (ODOM_DIV=1, see turtlebot3_conveyor.ino), and EKF +
@@ -172,6 +194,7 @@ class ConveyorBaseNode(Node):
         self._close_serial()
         for attr, destroy in [('_sub',            self.destroy_subscription),
                                ('_odom_pub',       self.destroy_publisher),
+                               ('_imu_pub',        self.destroy_publisher),
                                ('_read_timer',     self.destroy_timer),
                                ('_watchdog_timer', self.destroy_timer)]:
             obj = getattr(self, attr)
@@ -236,6 +259,8 @@ class ConveyorBaseNode(Node):
                     continue
                 if line.startswith('POSE '):
                     self._handle_pose(line)
+                elif line.startswith('IMU '):
+                    self._handle_imu(line)
                 elif line.startswith('ODOM '):
                     self._handle_odom_legacy(line)
                 elif line.startswith('ODOM_RESET'):
@@ -257,6 +282,52 @@ class ConveyorBaseNode(Node):
         except ValueError:
             return
         self._publish_odom(x, y, theta, vx, vy, wz)
+
+    def _handle_imu(self, line: str):
+        """Firmware emits 'IMU ax ay az gx gy gz yaw' at ~11 Hz.
+        Republishes as sensor_msgs/Imu so ekf_node can fuse the gyro-Z
+        rate, which is slip-immune (unlike the wheel-derived wz)."""
+        parts = line.split()
+        if len(parts) != 8:
+            return
+        try:
+            ax, ay, az, gx, gy, gz, yaw = (float(p) for p in parts[1:])
+        except ValueError:
+            return
+        if self._imu_pub is None:
+            return
+        try:
+            msg = Imu()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = self._base_frame_id
+
+            half = yaw / 2.0
+            msg.orientation.x = 0.0
+            msg.orientation.y = 0.0
+            msg.orientation.z = math.sin(half)
+            msg.orientation.w = math.cos(half)
+            # Madgwick yaw drifts unboundedly without magnetometer correction,
+            # so flag the orientation field as "not provided" — consumers
+            # that respect REP-145 will skip orientation fusion entirely.
+            msg.orientation_covariance[0] = -1.0
+
+            msg.angular_velocity.x = gx
+            msg.angular_velocity.y = gy
+            msg.angular_velocity.z = gz
+            msg.angular_velocity_covariance[0] = _IMU_GYRO_VAR
+            msg.angular_velocity_covariance[4] = _IMU_GYRO_VAR
+            msg.angular_velocity_covariance[8] = _IMU_GYRO_VAR
+
+            msg.linear_acceleration.x = ax
+            msg.linear_acceleration.y = ay
+            msg.linear_acceleration.z = az
+            msg.linear_acceleration_covariance[0] = _IMU_ACCEL_VAR
+            msg.linear_acceleration_covariance[4] = _IMU_ACCEL_VAR
+            msg.linear_acceleration_covariance[8] = _IMU_ACCEL_VAR
+
+            self._imu_pub.publish(msg)
+        except Exception as e:
+            self.get_logger().error(f'publish_imu failed: {e}')
 
     # NOTE — Legacy firmware-rollback safety net.
     # Only invoked when the OpenCR firmware sends pre-2024 "ODOM j:... w:..."
