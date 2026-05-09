@@ -323,6 +323,110 @@ def register_goal_callback(fn):
     goal_callbacks.append(fn)
 
 
+# ── A* path planning ────────────────────────────────────────────────────
+# Browser POSTs `{start: {x,y}, goal: {x,y}}` to /plan. We call
+# compute_plan() from astar_planner.py, write the resulting waypoints to
+# path_plan.json with a bumped seq, and return OK. The GUI polls
+# /path_plan.json (served by the catch-all static route below) and
+# renders the waypoints as dots on the floor.
+#
+# Defaults are tuned for two TurtleBot3 Conveyors in formation: each
+# robot is treated as a 0.20 m disc, separation 0.50 m → formation
+# bounding radius ≈ 0.45 m. Walls inflate by that much so wherever the
+# virtual centre can go, the whole pair fits.
+
+_plan_seq      = 0
+_plan_seq_lock = threading.Lock()
+PLAN_PATH      = "path_plan.json"
+
+PLAN_ROBOT_RADIUS       = 0.20    # meters
+PLAN_FORMATION_DISTANCE = 0.50    # meters
+
+
+@app.route("/plan", methods=["POST"])
+def plan_explicit():
+    """Compute a path from `start` to `goal` (both in world coords) and
+    write it to path_plan.json. Body:
+        { "start": {"x": float, "y": float},
+          "goal":  {"x": float, "y": float} }
+    """
+    global _plan_seq
+    if map_data is None:
+        return jsonify({"error": "no map loaded"}), 500
+
+    body = request.get_json(silent=True) or {}
+    s = body.get("start") or {}
+    g = body.get("goal")  or {}
+    if "x" not in s or "y" not in s or "x" not in g or "y" not in g:
+        return jsonify({"error": "need start.x, start.y, goal.x, goal.y"}), 400
+
+    start_xy = (float(s["x"]), float(s["y"]))
+    goal_xy  = (float(g["x"]), float(g["y"]))
+    print(f"[plan] start={start_xy} goal={goal_xy}")
+
+    # Live formation geometry from the GUI (when both robots are
+    # localized). Each entry: {name, offset_local: [x, y], color?}.
+    # offset_local is in the SYSTEM body frame, exactly what compute_plan
+    # expects. Falls back to a sensible 50 cm leader/follower default
+    # when the GUI hasn't sent anything (e.g. CLI debug callers).
+    robots_in = body.get("robots")
+    if robots_in:
+        try:
+            robots = [
+                {
+                    "name":         str(r.get("name", f"robot{i}")),
+                    "offset_local": [float(r["offset_local"][0]),
+                                     float(r["offset_local"][1])],
+                    "color":        str(r.get("color", "#aaaaaa")),
+                }
+                for i, r in enumerate(robots_in)
+            ]
+        except (KeyError, TypeError, ValueError, IndexError) as e:
+            return jsonify({"error": f"bad robots[]: {e}"}), 400
+        # Bounding circle of the formation = furthest robot from centre
+        # + per-robot footprint radius. With live offsets this tracks the
+        # actual inter-robot distance instead of a hardcoded constant.
+        max_off = max(math.hypot(r["offset_local"][0], r["offset_local"][1])
+                      for r in robots) if robots else 0.0
+        formation_radius = max_off + PLAN_ROBOT_RADIUS
+    else:
+        half = PLAN_FORMATION_DISTANCE / 2
+        robots = [
+            {"name": "leader",   "offset_local": [+half, 0.0], "color": "#00e5ff"},
+            {"name": "follower", "offset_local": [-half, 0.0], "color": "#ff9933"},
+        ]
+        formation_radius = PLAN_FORMATION_DISTANCE / 2 + PLAN_ROBOT_RADIUS
+    print(f"[plan] formation_radius={formation_radius:.3f} m  "
+          f"({len(robots)} robots: "
+          f"{', '.join(r['name'] for r in robots)})")
+
+    try:
+        from astar_planner import compute_plan
+        plan = compute_plan(map_data, start_xy, goal_xy,
+                            formation_radius=formation_radius,
+                            robots=robots)
+    except Exception as e:
+        print(f"[plan] A* failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    with _plan_seq_lock:
+        _plan_seq += 1
+        plan["seq"] = _plan_seq
+        plan["wall_clock_iso"] = datetime.now(timezone.utc).isoformat()
+
+    with open(PLAN_PATH, "w") as f:
+        json.dump(plan, f, separators=(",", ":"))
+    print(f"[plan] wrote {PLAN_PATH} seq={_plan_seq} "
+          f"({len(plan['virtual_center']['waypoints'])} VC waypoints, "
+          f"{plan['metadata']['vc_distance']:.2f} m)")
+
+    return jsonify({"status":      "ok",
+                    "seq":         plan["seq"],
+                    "waypoints":   plan['virtual_center']['waypoints'],
+                    "headings":    plan['virtual_center']['headings'],
+                    "vc_distance": plan['metadata']['vc_distance']})
+
+
 # Catch-all static-file route — lets the browser fetch additional files
 # from this folder directly (e.g. mesh .obj / .mtl / .jpg if you add a
 # textured overlay). Defined LAST so it doesn't shadow the specific

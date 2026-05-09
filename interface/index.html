@@ -1258,12 +1258,26 @@ document.getElementById("sendBtn").addEventListener("click", async () => {
   let plannedCount = 0;
   if (systemFormation) {
     try {
+      // Pass each robot's BODY-frame offset (computed in updateRobotMarkers
+      // when both robots first localized). Order matches ROBOTS so the
+      // server's `robots[i]` lines up with the GUI's. The server uses
+      // the max offset magnitude + its own per-robot radius to derive
+      // the inflation radius — so the planner stays in sync with the
+      // live inter-robot distance.
+      const robotsForPlan = ROBOTS.map(r => {
+        const local = systemFormation.offsets[r.id]?.local || { x: 0, y: 0 };
+        return {
+          name:         r.id,
+          offset_local: [local.x, local.y],
+        };
+      });
       const r = await fetch("/plan", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          start: { x: systemFormation.centre.x, y: systemFormation.centre.y },
-          goal:  { x: goal.x,                   y: goal.y },
+          start:  { x: systemFormation.centre.x, y: systemFormation.centre.y },
+          goal:   { x: goal.x,                   y: goal.y },
+          robots: robotsForPlan,
         }),
       });
       const j = await r.json().catch(() => ({}));
