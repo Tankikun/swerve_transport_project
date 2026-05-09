@@ -150,6 +150,7 @@
            font-family: var(--font-mono); font-size: 11px; padding: 10px 20px;
            border-radius: 2px; opacity: 0; transition: all 0.3s; pointer-events: none; z-index: 100; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.warning { border-color: var(--accent2); color: var(--accent2); }
 
   .loading { position: absolute; inset: 0; display: flex; align-items: center;
              justify-content: center; background: var(--bg); z-index: 50;
@@ -245,7 +246,7 @@
 const ROSBRIDGE_URL          = "ws://localhost:9090";
 const ROBOT_POSE_TOPIC       = "/tb3_0/pose";
 const GOAL_TOPIC             = "/goal_pose";
-const FORMATION_OFFSET_TOPIC = "/formation/offset";
+const FORMATION_OFFSET_TOPIC = "/formation/offsets";
 const POSE_POLL_MS           = 200;
 
 // =======================================================================
@@ -986,7 +987,7 @@ function updateRobotMarkers() {
   scene.add(combinedMarkerGroup);
 
   // Same publish path as Send Goal — direct over rosbridge to
-  // /formation/offset (geometry_msgs/PoseArray, one pose per robot,
+  // /formation/offsets (geometry_msgs/PoseArray, one pose per robot,
   // ordered parallel to ROBOTS).
   publishFormationOffset(systemFormation);
 
@@ -1181,9 +1182,45 @@ document.getElementById("orientSlider").addEventListener("input", e => {
   }
 });
 
+// Compute collisions for the CURRENTLY-SET goal, exactly the way the
+// goal envelope renders them. If any side comes back true the box has
+// red edges — same data the user is already looking at on screen.
+function goalCollisionSides(g) {
+  if (!g) return null;
+  const yawRad  = g.orientation * Math.PI / 180;
+  const goalLen = currentGoalLength();
+  return computeCollisionSides(g.x, g.y, yawRad, GOAL_WIDTH_M, goalLen);
+}
+
 document.getElementById("sendBtn").addEventListener("click", () => {
   if (!goal) return;
   const btn = document.getElementById("sendBtn");
+
+  // Refuse to publish a goal whose footprint overlaps an obstacle.
+  // Exactly the same check as the red-edge highlight, so what the user
+  // sees on screen and what the button blocks on are guaranteed to
+  // agree. Treat "grid not loaded" (sides == null) as "can't check,
+  // allow send" — same behaviour as before this guard existed.
+  const sides = goalCollisionSides(goal);
+  if (sides && (sides.front || sides.back || sides.left || sides.right)) {
+    const hits = ['front','back','left','right'].filter(s => sides[s]);
+    showToast(
+      `Goal blocked: overlaps obstacle on ${hits.join(', ')} side`
+        + (hits.length > 1 ? 's' : '')
+        + ` — move it off the red edges before sending.`,
+      'warning'
+    );
+    btn.textContent       = "Blocked";
+    btn.style.borderColor = "var(--accent2)";
+    btn.style.color       = "var(--accent2)";
+    setTimeout(() => {
+      btn.textContent       = "Send Goal";
+      btn.style.borderColor = "";
+      btn.style.color       = "";
+    }, 2500);
+    return;
+  }
+
   btn.disabled    = true;
   btn.textContent = "Sending...";
 
@@ -1230,11 +1267,17 @@ function setLocPill(slot, cls, text) {
   pill.className = "status-pill " + cls;
   document.getElementById("locStatus" + slot + "Text").textContent = text;
 }
-function showToast(msg) {
+function showToast(msg, level) {
+  // level: undefined / "info" → green default; "warning" / "error" → red.
   const t = document.getElementById("toast");
   t.textContent = msg;
+  t.classList.remove("warning");
+  if (level === "warning" || level === "error") t.classList.add("warning");
   t.classList.add("show");
-  setTimeout(() => t.classList.remove("show"), 3000);
+  setTimeout(() => {
+    t.classList.remove("show");
+    t.classList.remove("warning");
+  }, 3000);
 }
 
 // =======================================================================
@@ -1275,7 +1318,7 @@ function publishGoalToROS(g) {
 }
 
 // =======================================================================
-// /formation/offset — published while BOTH robots are localized.
+// /formation/offsets — published while BOTH robots are localized.
 //
 // One geometry_msgs/PoseArray per tick; poses[i].position.{x,y} carries
 // robot i's WORLD-frame offset from the virtual centre (i.e.
