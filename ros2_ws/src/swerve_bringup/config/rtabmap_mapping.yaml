@@ -16,6 +16,7 @@
     subscribe_rgb: true
     subscribe_odom: true
     approx_sync: true
+    approx_sync_max_interval: 0.05
     queue_size: 10
 
     # QoS for image inputs. depthai_ros_driver publishes with sensor_data
