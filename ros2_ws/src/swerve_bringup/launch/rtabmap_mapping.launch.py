@@ -238,10 +238,16 @@ def generate_launch_description():
                         'Set false to feed RTAB-Map raw /odom (legacy '
                         'pre-IMU-fusion behaviour).'),
         DeclareLaunchArgument(
-            'gyro_z_sign', default_value='-1.0',
-            description='Sign of the IMU gyro Z reading. Default -1.0 set '
-                        'by physical bench yaw test (commit 9e3209c). '
-                        'Flip to +1.0 only if the OpenCR is remounted with '
-                        'opposite Z-axis orientation.'),
+            'gyro_z_sign', default_value='+1.0',
+            description='Sign of the IMU gyro Z reading. Default +1.0 set '
+                        'by physical bench yaw test on May 10 2026 AFTER '
+                        'the conveyor_base Madgwick-derivative workaround '
+                        '(commit e542832 — earlier 9e3209c test was '
+                        'meaningless because the firmware-supplied gz was '
+                        'identically zero, so the sign had no observable '
+                        'effect). Re-verify physically when the firmware '
+                        'is patched to expose a real gyro accessor — the '
+                        'chip-direct sign may differ from the '
+                        'Madgwick-derived sign.'),
         OpaqueFunction(function=launch_setup),
     ])

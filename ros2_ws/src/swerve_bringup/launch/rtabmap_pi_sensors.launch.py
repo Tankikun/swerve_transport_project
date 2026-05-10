@@ -171,10 +171,15 @@ def generate_launch_description():
             'enable_ekf', default_value='true',
             description='Start ekf_node.'),
         DeclareLaunchArgument(
-            'gyro_z_sign', default_value='-1.0',
-            description='Sign of the IMU gyro Z reading. Set to -1.0 if a '
-                        'bench yaw test shows ekf yaw decreasing under '
-                        'physical CCW rotation — the MPU-9250 mount '
-                        'direction depends on OpenCR orientation.'),
+            'gyro_z_sign', default_value='+1.0',
+            description='Sign of the IMU gyro Z reading. Default +1.0 set '
+                        'by physical bench yaw test on May 10 2026 AFTER '
+                        'the conveyor_base Madgwick-derivative workaround '
+                        '(commit e542832 — earlier 9e3209c test was '
+                        'meaningless because the firmware-supplied gz was '
+                        'identically zero). Re-verify physically when the '
+                        'firmware is patched to expose a real gyro '
+                        'accessor — the chip-direct sign may differ from '
+                        'the Madgwick-derived sign.'),
         OpaqueFunction(function=launch_setup),
     ])
