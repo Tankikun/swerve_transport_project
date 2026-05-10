@@ -238,9 +238,10 @@ def generate_launch_description():
                         'Set false to feed RTAB-Map raw /odom (legacy '
                         'pre-IMU-fusion behaviour).'),
         DeclareLaunchArgument(
-            'gyro_z_sign', default_value='1.0',
-            description='Sign of the IMU gyro Z reading. Set to -1.0 if a '
-                        'bench yaw test shows ekf yaw decreasing under '
-                        'physical CCW rotation.'),
+            'gyro_z_sign', default_value='-1.0',
+            description='Sign of the IMU gyro Z reading. Default -1.0 set '
+                        'by physical bench yaw test (commit 9e3209c). '
+                        'Flip to +1.0 only if the OpenCR is remounted with '
+                        'opposite Z-axis orientation.'),
         OpaqueFunction(function=launch_setup),
     ])

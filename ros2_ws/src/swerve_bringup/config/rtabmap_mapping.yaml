@@ -40,8 +40,10 @@
     RGBD/LinearUpdate: "0.1"          # add keyframe every 10 cm
     RGBD/AngularUpdate: "0.2"         # or every ~11.5 degrees
     
-    # Loop closure: stricter inlier requirement during mapping
-    Vis/MinInliers: "15"              # higher than localization (15)
+    # Loop closure: PnP inlier threshold. Same value as localization
+    # (15). Default is 20; we lowered both to give more loop closures
+    # a chance to pass verification on this feature-sparse indoor map.
+    Vis/MinInliers: "15"
     Vis/EstimationType: "1"           # PnP
     Vis/RoiRatios: "0.0 0.0 0.0 0.3"
     Reg/Force3DoF: "true"             # ground plane constraint
@@ -79,6 +81,17 @@
     Optimizer/Strategy: "1"           # g2o
     Optimizer/Iterations: "20"
     Optimizer/Robust: "true"          # robust kernel for outlier resistance
+
+    # Loop-closure optimization-error gate. Default is 3.0; the failing
+    # mapping runs (May 2026, 5 separate 600 s sessions, 0 GlobalClosure
+    # accepted) had this raised to 15.0 already and still rejected every
+    # proposed loop because the per-frame `Loop/Optimization_max_error_ratio`
+    # consistently sat at 45–659 — the proposed visual loops disagreed with
+    # the wheel-odom prior by ~51° heading on average. Setting it to 50
+    # allows visual loops to override that drift while still rejecting
+    # outright bad matches (ratio > 50). Lower again once the cosine-ramp
+    # firmware is flashed and yaw drift drops back into single digits.
+    RGBD/OptimizeMaxError: "50.0"
     
     # Database settings
     Db/TargetVersion: ""              # use latest DB format

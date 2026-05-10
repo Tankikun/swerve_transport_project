@@ -164,6 +164,35 @@ class EKFNode(Node):
         out.pose.pose.position.y = float(self._mu[1])
         out.pose.pose.orientation.z = float(np.sin(self._mu[2] / 2.0))
         out.pose.pose.orientation.w = float(np.cos(self._mu[2] / 2.0))
+
+        # Pose covariance is required by RTAB-Map's optimizer to weight
+        # graph edges. With all-zero covariance, RTAB falls back to a
+        # 1e-3 default that is far too tight on this swerve platform —
+        # the optimizer then trusts wheel odom over visual loop closures
+        # and rejects every proposed loop. Project the EKF's 3×3 sigma
+        # (x, y, theta) into the 6×6 (x, y, z, roll, pitch, yaw) layout;
+        # unused dimensions get 1e9 so consumers know not to fuse them.
+        s = self._sigma
+        cov = out.pose.covariance
+        cov[0]  = float(s[0, 0]); cov[1]  = float(s[0, 1]); cov[5]  = float(s[0, 2])
+        cov[6]  = float(s[1, 0]); cov[7]  = float(s[1, 1]); cov[11] = float(s[1, 2])
+        cov[30] = float(s[2, 0]); cov[31] = float(s[2, 1]); cov[35] = float(s[2, 2])
+        cov[14] = 1e9   # z   (unused — flat-floor robot)
+        cov[21] = 1e9   # roll
+        cov[28] = 1e9   # pitch
+
+        # Twist covariance: per-step velocity uncertainty. Use the same
+        # process-noise diagonal we already track in self._Q so RTAB sees
+        # a consistent story between absolute pose growth and per-frame
+        # increments. Q[2,2] swaps between gyro / wheel each step.
+        Q = self._Q
+        tcov = out.twist.covariance
+        tcov[0]  = float(Q[0, 0])
+        tcov[7]  = float(Q[1, 1])
+        tcov[35] = float(Q[2, 2])
+        tcov[14] = 1e9
+        tcov[21] = 1e9
+        tcov[28] = 1e9
         self._pub.publish(out)
 
 
