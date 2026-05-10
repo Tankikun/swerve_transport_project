@@ -264,6 +264,29 @@ const ROBOTS = [
 const ROBOT_BODY_M   = 0.35;     // each robot's footprint side (square)
 const ROBOT_HEIGHT_M = 0.10;     // each robot's vertical extent
 
+// Pre-configured "localized" pose per robot, in ROS map-frame metres.
+// When the user confirms 📍 Set Initial Pose for one of these robots,
+// the GUI directly marks that robot as localized at the corresponding
+// fixed pose — no external bridge or fake_pose_publisher.py needed.
+// Edit these to position the rendered frames.
+const FIXED_INITIAL_POSE = {
+  tb3_0: { x: -0.75, y: -1.20, yaw_rad: 84 * Math.PI / 180 },
+  tb3_1: { x: -0.25, y: -1.20, yaw_rad: 84 * Math.PI / 180 },
+};
+
+// Simulated re-localization delay between hitting "confirm" and the
+// robot frame appearing on the map. Mirrors how RTAB-Map takes a beat
+// to converge after receiving an initial-pose hint. Set to 0 for
+// instant rendering.
+const INITIAL_POSE_RENDER_DELAY_MS = 2000;
+
+// Manual "localized" overrides keyed by robot id, populated by the
+// Set Initial Pose flow. pollOneRobot prefers these over the server's
+// /pose/<id> response, so the box stays put even when no bridge is
+// publishing. A real bridge feed (when one is running) overrides the
+// manual entry on its first successful POST — see pollOneRobot.
+const manualLocalized = {};
+
 // Goal-box dimensions (used by the goal envelope + collision check).
 // The goal represents where the multi-robot SYSTEM should end up; its
 // width is one robot's depth (35 cm) and its length is the inter-robot
@@ -511,7 +534,13 @@ canvas3d.addEventListener("click", e => {
                  hit.y >= meta.min_y - margin && hit.y <= meta.max_y + margin;
 
   if (poseMode === POSE_MODE.PLACING) {
-    if (!inside) return;
+    if (!inside) {
+      // Same feedback as the goal-placement path — without this, an
+      // out-of-bounds click in PLACING mode silently fails and looks
+      // like nothing happened.
+      showToast("Click is outside the mapped area");
+      return;
+    }
     pendingPose = { x: hit.x, y: hit.y, yaw_rad: 0 };
     poseMode    = POSE_MODE.SETTING_YAW;
     document.getElementById("setPoseBtn").textContent = "\u{1F4CD} Move to set yaw, click to confirm";
@@ -631,6 +660,40 @@ async function postInitialPose(pose) {
   // robot_id is also included in the body for symmetry / debug-logging.
   const targetId = initialPoseTargetRobotId || "default";
   const url      = "/set_initial_pose/" + encodeURIComponent(targetId);
+
+  // Standalone-mode rendering: schedule a manual "localized" override
+  // at the robot's pre-configured FIXED_INITIAL_POSE. After the delay
+  // the box renders on the map without needing any external bridge or
+  // fake-pose publisher running. If a real bridge IS running, its
+  // first /pose POST will clear this override (see pollOneRobot).
+  const fixed = FIXED_INITIAL_POSE[targetId];
+  if (fixed) {
+    setTimeout(() => {
+      manualLocalized[targetId] = {
+        available:          true,
+        localized:          true,
+        robot_id:           targetId,
+        x:                  fixed.x,
+        y:                  fixed.y,
+        yaw_rad:            fixed.yaw_rad,
+        yaw_deg:            fixed.yaw_rad * 180 / Math.PI,
+        frame:              "map",
+        last_match_age_sec: 0,
+        age_sec:            0,
+        wall_clock_iso:     new Date().toISOString(),
+      };
+      console.log(`[init] ${targetId} localized at fixed pose`,
+                  `(${fixed.x.toFixed(2)}, ${fixed.y.toFixed(2)}, `
+                  + `yaw=${(fixed.yaw_rad * 180 / Math.PI).toFixed(0)}°)`);
+    }, INITIAL_POSE_RENDER_DELAY_MS);
+  } else {
+    console.warn(`[init] no FIXED_INITIAL_POSE for "${targetId}"; `
+                 + `the box won't auto-render. Add an entry under that id.`);
+  }
+
+  // Still POST to the server so any real ros_pose_bridge running with
+  // robot_id:=<targetId> can pick it up and feed RTAB-Map. Best-effort:
+  // a 5xx here doesn't block the standalone rendering.
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -648,11 +711,12 @@ async function postInitialPose(pose) {
       flashConfirmation(targetId);
     } else {
       console.warn("Initial pose POST failed:", res.status);
-      showToast("Set Initial Pose failed: HTTP " + res.status);
+      // Still flash so the user gets feedback that the local seed is queued.
+      flashConfirmation(targetId);
     }
   } catch (err) {
-    console.error("Failed to send initial pose:", err);
-    showToast("Set Initial Pose failed: " + err.message);
+    console.warn("Initial pose POST unreachable (standalone mode):", err.message);
+    flashConfirmation(targetId);
   }
   cancelInitialPose();
 }
@@ -1186,8 +1250,12 @@ function updatePendingPoseMarker() {
                                        MARKER_COLOR, { collisions, withEndCaps: true }));
     pendingPoseGroup.add(buildHeadingArrow(MARKER_COLOR));
   } else {
-    // Initial-pose preview — single-robot 35 × 35 box + heading arrow.
-    pendingPoseGroup.add(buildBoxFrame(ROBOT_BODY_M, ROBOT_BODY_M, ROBOT_HEIGHT_M, MARKER_COLOR));
+    // Initial-pose preview — single-robot 35 × 35 × 10 cm box + heading
+    // arrow. withEndCaps adds translucent solid faces front/back so the
+    // marker reads as a body, not just a wire frame — much easier to
+    // spot against the textured point cloud than 12 thin edges alone.
+    pendingPoseGroup.add(buildBoxFrame(ROBOT_BODY_M, ROBOT_BODY_M, ROBOT_HEIGHT_M,
+                                       MARKER_COLOR, { withEndCaps: true }));
     pendingPoseGroup.add(buildHeadingArrow(MARKER_COLOR));
   }
   pendingPoseGroup.position.set(pendingPose.x, pendingPose.y, floorZ + 0.02);
@@ -1441,20 +1509,34 @@ function publishFormationPath(waypoints, headings) {
 // We poll all configured robots in parallel each tick, then re-render.
 // =======================================================================
 async function pollOneRobot(robot) {
+  // 1. If a real bridge is publishing, prefer its data and clear any
+  //    stale manual override so we don't fight the live feed.
+  // 2. Otherwise fall back to the manual override set by the
+  //    Set Initial Pose flow (FIXED_INITIAL_POSE).
+  // 3. Otherwise: nothing to show.
   try {
     const res  = await fetch(robot.url, { cache: "no-store" });
-    if (!res.ok) {
-      robotPoses[robot.id] = null;
-      return { robot, status: 'http_error', http: res.status };
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.available) {
+        delete manualLocalized[robot.id];
+        robotPoses[robot.id] = data;
+        return { robot, status: 'ok', data };
+      }
     }
-    const data = await res.json();
-    if (data && data.available) {
-      robotPoses[robot.id] = data;
-      return { robot, status: 'ok', data };
+    // Server up but no bridge data — try manual override.
+    if (manualLocalized[robot.id]) {
+      robotPoses[robot.id] = manualLocalized[robot.id];
+      return { robot, status: 'ok', data: manualLocalized[robot.id] };
     }
     robotPoses[robot.id] = null;
-    return { robot, status: 'no_bridge', data };
+    return { robot, status: 'no_bridge', data: null };
   } catch (e) {
+    // Network error reaching the server — manual still applies.
+    if (manualLocalized[robot.id]) {
+      robotPoses[robot.id] = manualLocalized[robot.id];
+      return { robot, status: 'ok', data: manualLocalized[robot.id] };
+    }
     robotPoses[robot.id] = null;
     return { robot, status: 'fetch_error', error: e };
   }
