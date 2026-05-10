@@ -29,7 +29,8 @@
     
     # Feature detector: GFTT + ORB for swerve rotation robustness
     Kp/DetectorStrategy: "6"
-    Kp/MaxFeatures: "400"
+    Kp/MaxFeatures: "600"
+    Kp/RoiRatios: "0.0 0.0 0.0 0.3"
     
     # Performance tuning for RPi4
     Mem/ImagePreDecimation: "2"
@@ -40,6 +41,7 @@
     Reg/Force3DoF: "true"
     Vis/EstimationType: "1"
     Vis/MinInliers: "15"
+    Vis/RoiRatios: "0.0 0.0 0.0 0.3"
     
     # Disable expensive features not needed for localization
     RGBD/ProximityBySpace: "false"

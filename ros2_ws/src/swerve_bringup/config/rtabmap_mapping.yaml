@@ -30,6 +30,7 @@
     # Feature detector: more features for richer map
     Kp/DetectorStrategy: "6"          # GFTT + ORB
     Kp/MaxFeatures: "800"             # higher than localization
+    Kp/RoiRatios: "0.0 0.0 0.0 0.3"
     
     # Image quality: full resolution for mapping
     Mem/ImagePreDecimation: "1"       # no decimation, laptop can handle it
@@ -42,6 +43,7 @@
     # Loop closure: stricter inlier requirement during mapping
     Vis/MinInliers: "15"              # higher than localization (15)
     Vis/EstimationType: "1"           # PnP
+    Vis/RoiRatios: "0.0 0.0 0.0 0.3"
     Reg/Force3DoF: "true"             # ground plane constraint
     
     # Loop closure detection
