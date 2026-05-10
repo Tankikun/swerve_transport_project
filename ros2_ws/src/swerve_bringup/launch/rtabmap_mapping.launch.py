@@ -95,6 +95,9 @@ def launch_setup(context, *args, **kwargs):
             'cam_x':      LaunchConfiguration('cam_x'),
             'cam_y':      LaunchConfiguration('cam_y'),
             'cam_z':      LaunchConfiguration('cam_z'),
+            'cam_roll':   LaunchConfiguration('cam_roll'),
+            'cam_pitch':  LaunchConfiguration('cam_pitch'),
+            'cam_yaw':    LaunchConfiguration('cam_yaw'),
             'rgb_size':   '640x400',
             'depth_size': '640x400',
         }.items(),
@@ -178,16 +181,28 @@ def generate_launch_description():
             description='Camera FPS.'),
         DeclareLaunchArgument(
             'cam_x', default_value='',
-            description='Camera optical frame X offset from base_link [m]. '
+            description='Camera mount X offset from base_link to oak-d-base-frame [m]. '
                         'Leave empty to use measured value from '
                         '_CAMERA_MOUNT in oak_camera.launch.py.'),
         DeclareLaunchArgument(
             'cam_y', default_value='',
-            description='Camera Y offset from base_link [m]. Leave empty '
+            description='Camera mount Y offset from base_link to oak-d-base-frame [m]. Leave empty '
                         'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'cam_z', default_value='',
-            description='Camera Z offset from base_link [m]. Leave empty '
+            description='Camera mount Z offset from base_link to oak-d-base-frame [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_roll', default_value='',
+            description='Camera mount roll from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_pitch', default_value='',
+            description='Camera mount pitch from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_yaw', default_value='',
+            description='Camera mount yaw from base_link to oak-d-base-frame [rad]. Leave empty '
                         'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'enable_base', default_value='true',

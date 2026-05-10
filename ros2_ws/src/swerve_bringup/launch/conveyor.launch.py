@@ -41,6 +41,9 @@ def launch_setup(context, *args, **kwargs):
     cam_x             = LaunchConfiguration('cam_x').perform(context)
     cam_y             = LaunchConfiguration('cam_y').perform(context)
     cam_z             = LaunchConfiguration('cam_z').perform(context)
+    cam_roll          = LaunchConfiguration('cam_roll').perform(context)
+    cam_pitch         = LaunchConfiguration('cam_pitch').perform(context)
+    cam_yaw           = LaunchConfiguration('cam_yaw').perform(context)
 
     if not my_offset:
         my_offset = [0.0, 0.0]
@@ -108,6 +111,9 @@ def launch_setup(context, *args, **kwargs):
                 'cam_x':       cam_x,
                 'cam_y':       cam_y,
                 'cam_z':       cam_z,
+                'cam_roll':    cam_roll,
+                'cam_pitch':   cam_pitch,
+                'cam_yaw':     cam_yaw,
                 'enable_base': 'false',
                 'enable_ekf':  'false',
             }.items(),
@@ -169,10 +175,22 @@ def generate_launch_description():
         DeclareLaunchArgument('fps',              default_value='15',
                               description='Camera FPS passed to oak_camera.launch.py.'),
         DeclareLaunchArgument('cam_x', default_value='',
-                              description='Leave empty to use _CAMERA_MOUNT in oak_camera.launch.py.'),
+                              description='Camera mount X offset from base_link to oak-d-base-frame [m]. '
+                                          'Leave empty to use _CAMERA_MOUNT in oak_camera.launch.py.'),
         DeclareLaunchArgument('cam_y', default_value='',
-                              description='Leave empty to use _CAMERA_MOUNT.'),
+                              description='Camera mount Y offset from base_link to oak-d-base-frame [m]. '
+                                          'Leave empty to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument('cam_z', default_value='',
-                              description='Leave empty to use _CAMERA_MOUNT.'),
+                              description='Camera mount Z offset from base_link to oak-d-base-frame [m]. '
+                                          'Leave empty to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument('cam_roll', default_value='',
+                              description='Camera mount roll from base_link to oak-d-base-frame [rad]. '
+                                          'Leave empty to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument('cam_pitch', default_value='',
+                              description='Camera mount pitch from base_link to oak-d-base-frame [rad]. '
+                                          'Leave empty to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument('cam_yaw', default_value='',
+                              description='Camera mount yaw from base_link to oak-d-base-frame [rad]. '
+                                          'Leave empty to use _CAMERA_MOUNT.'),
         OpaqueFunction(function=launch_setup),
     ])
