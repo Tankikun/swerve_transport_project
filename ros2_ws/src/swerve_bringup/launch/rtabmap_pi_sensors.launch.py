@@ -171,7 +171,7 @@ def generate_launch_description():
             'enable_ekf', default_value='true',
             description='Start ekf_node.'),
         DeclareLaunchArgument(
-            'gyro_z_sign', default_value='1.0',
+            'gyro_z_sign', default_value='-1.0',
             description='Sign of the IMU gyro Z reading. Set to -1.0 if a '
                         'bench yaw test shows ekf yaw decreasing under '
                         'physical CCW rotation — the MPU-9250 mount '
