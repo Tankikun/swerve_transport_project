@@ -119,6 +119,18 @@ class ConveyorBaseNode(Node):
         self._line_buf = ''
         self._odom_x = self._odom_y = self._odom_theta = 0.0
 
+        # Yaw-rate-from-yaw derivation state. The flashed firmware emits
+        # gx/gy/gz = 0 because its OpenCR cIMU library version does not
+        # populate `imu.gyroData[]` (Madgwick's internal gyro read works,
+        # which is why `imu.angle[2]` updates correctly, but the public
+        # accessor in this lib version is silently zero). Until the
+        # firmware is patched to use the right accessor (likely
+        # `imu.SEN.gyroRAW[]` or `imu.gyroRAW[]`), we derive gyro_z
+        # from successive Madgwick yaw outputs in `_handle_imu` so
+        # ekf_node still gets a slip-immune yaw signal.
+        self._prev_madgwick_yaw: float | None = None
+        self._prev_madgwick_yaw_t: float | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle callbacks
     # ------------------------------------------------------------------
@@ -286,7 +298,15 @@ class ConveyorBaseNode(Node):
     def _handle_imu(self, line: str):
         """Firmware emits 'IMU ax ay az gx gy gz yaw' at ~11 Hz.
         Republishes as sensor_msgs/Imu so ekf_node can fuse the gyro-Z
-        rate, which is slip-immune (unlike the wheel-derived wz)."""
+        rate, which is slip-immune (unlike the wheel-derived wz).
+
+        Library-bug workaround (May 2026): the OpenCR cIMU version on
+        the bot emits gx=gy=gz=0 because its update() does not write
+        `imu.gyroData[]`. The Madgwick yaw output (last field on the
+        line) DOES update, so we derive gyro_z from successive yaw
+        values whenever the firmware-supplied gz is exactly zero.
+        Remove this fallback once the firmware is patched.
+        """
         parts = line.split()
         if len(parts) != 8:
             return
@@ -296,6 +316,24 @@ class ConveyorBaseNode(Node):
             return
         if self._imu_pub is None:
             return
+
+        # When firmware-reported gz is identically zero (library bug —
+        # see __init__), substitute a derivative of Madgwick yaw. dt is
+        # bounded so a missed sample doesn't produce a huge spurious
+        # rate; if it falls outside [0, 0.5] s we skip this sample and
+        # keep gz = 0 (ekf_node falls back to wheel omega for that step).
+        now_t = time.time()
+        if gz == 0.0:
+            if (self._prev_madgwick_yaw is not None
+                    and self._prev_madgwick_yaw_t is not None):
+                dt = now_t - self._prev_madgwick_yaw_t
+                if 0.0 < dt < 0.5:
+                    dyaw = yaw - self._prev_madgwick_yaw
+                    while dyaw >  math.pi: dyaw -= 2.0 * math.pi
+                    while dyaw < -math.pi: dyaw += 2.0 * math.pi
+                    gz = dyaw / dt
+        self._prev_madgwick_yaw   = yaw
+        self._prev_madgwick_yaw_t = now_t
         try:
             msg = Imu()
             msg.header.stamp = self.get_clock().now().to_msg()
