@@ -16,7 +16,7 @@ A* global path planner for the leader robot, with:
 
 Map format (friend's Z-up pipeline):
   grid[y_idx][x_idx] ∈ {0=unknown, 1=ground, 2=obstacle}
-  cell -> world: x = min_x + col*res,  y = min_y + row*res
+  cell -> world: x = min_x + col*res,  y = min_y + row*resapf_
 
 Usage:
   /usr/bin/python3 astar_planner.py
@@ -165,7 +165,7 @@ def astar(blocked, start, goal):
 # so divergence is impossible and convergence is monotone for sane gains.
 
 def apf_smooth_path(path_cells, blocked, meta, formation_radius, *,
-                    target_spacing=0.05,
+                    target_spacing=0.15, 
                     smooth_w=0.50,
                     repel_w=0.05,
                     anchor_w=0.05,
