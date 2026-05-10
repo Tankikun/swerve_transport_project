@@ -64,6 +64,7 @@
       i_max_q_size: 10
       i_resolution: "400P"             # 640x400 stereo native; matches OAK-D Lite
       i_fps: 10.0                      # match RGB rate
+      i_enable_pointcloud: true
 
       
       # Postprocessing filters (improve depth quality, slight CPU cost)
