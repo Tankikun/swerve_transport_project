@@ -73,7 +73,7 @@ import time
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Pose, PoseArray, Twist
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 
@@ -184,6 +184,14 @@ class LaplacianFormationController(Node):
         self._my_pose_t: float | None = None
         self._neighbor_pose_t: dict[str, float] = {}
 
+        # SLAM localization flags. Consensus is suppressed until every
+        # participant has received at least one SLAM fix — before that the
+        # EKF poses are in separate, incompatible odom frames and any
+        # relative-pose correction would be meaningless noise.
+        self._self_slam_ready = False
+        self._neighbor_slam_ready: dict[str, bool] = {n: False for n in self.neighbors}
+        self._consensus_ever_active = False
+
         # Subscriptions
         self.create_subscription(
             Twist, '/virtual_center/cmd_vel', self._virtual_cmd_cb, 10
@@ -196,6 +204,16 @@ class LaplacianFormationController(Node):
                 Odometry,
                 f'/{neighbor}/ekf/odom',
                 lambda msg, n=neighbor: self._neighbor_cb(msg, n),
+                10,
+            )
+        self.create_subscription(
+            PoseStamped, f'/{self.robot_id}/slam/pose', self._slam_self_cb, 10
+        )
+        for neighbor in self.neighbors:
+            self.create_subscription(
+                PoseStamped,
+                f'/{neighbor}/slam/pose',
+                lambda msg, n=neighbor: self._slam_neighbor_cb(msg, n),
                 10,
             )
 
@@ -236,14 +254,34 @@ class LaplacianFormationController(Node):
         self.neighbor_poses[neighbor_id][2] = _yaw_from_quat(msg.pose.pose.orientation)
         self._neighbor_pose_t[neighbor_id] = time.time()
 
+    def _slam_self_cb(self, msg: PoseStamped):
+        if not self._self_slam_ready:
+            self._self_slam_ready = True
+            self.get_logger().info(
+                f'[LOCALIZED] {self.robot_id} SLAM pose received — '
+                f'self is map-anchored'
+            )
+
+    def _slam_neighbor_cb(self, msg: PoseStamped, neighbor_id: str):
+        if not self._neighbor_slam_ready[neighbor_id]:
+            self._neighbor_slam_ready[neighbor_id] = True
+            self.get_logger().info(
+                f'[LOCALIZED] {neighbor_id} SLAM pose received — '
+                f'neighbor is map-anchored'
+            )
+
     # ── Consensus readiness gate ──────────────────────────────────────────────
 
     def _consensus_ready(self) -> bool:
         """
         Returns True iff every pose required for the consensus correction
-        has been received and is fresh. Logs a (throttled) warning the
-        first time a neighbour's pose is found stale.
+        has been received, is fresh, AND all participants have confirmed
+        SLAM localization (i.e. their EKF is map-frame anchored, not
+        dead-reckoning in a robot-local odom frame).
 
+        - "SLAM ready": at least one /{robot_id}/slam/pose received.
+          Before this, EKF positions are in separate odom frames and
+          inter-robot relative poses are meaningless.
         - "Received": _my_pose_t / _neighbor_pose_t entry is not None.
           Distinct from value (0,0,0) which is a legitimate startup pose.
         - "Fresh":    last update is within POSE_STALE_S seconds.
@@ -252,6 +290,18 @@ class LaplacianFormationController(Node):
         the seconds before the first EKF message arrives. Only an
         already-seen-then-vanished neighbour produces the warning.
         """
+        slam_missing = (
+            ([self.robot_id] if not self._self_slam_ready else [])
+            + [n for n in self.neighbors if not self._neighbor_slam_ready[n]]
+        )
+        if slam_missing:
+            self.get_logger().warn(
+                '[consensus] waiting for SLAM localization on: '
+                + ', '.join(slam_missing),
+                throttle_duration_sec=10.0,
+            )
+            return False
+
         if self._my_pose_t is None:
             return False
         now = time.time()
@@ -329,6 +379,12 @@ class LaplacianFormationController(Node):
         # so the desired offset rotates with the formation as it turns.
         # See module docstring for why this is OFF by default.
         if self.enable_consensus and self._consensus_ready():
+            if not self._consensus_ever_active:
+                self._consensus_ever_active = True
+                self.get_logger().info(
+                    '[consensus] All robots SLAM-localized — '
+                    'pose-feedback correction is now active.'
+                )
             yaws = [float(self.my_pose[2])] + [
                 float(self.neighbor_poses[n][2]) for n in self.neighbors
             ]

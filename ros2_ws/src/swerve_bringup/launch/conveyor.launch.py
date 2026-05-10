@@ -58,7 +58,6 @@ def launch_setup(context, *args, **kwargs):
     neighbors         = _parse_neighbors(LaunchConfiguration('neighbors').perform(context))
     my_offset         = _parse_xy_list(LaunchConfiguration('my_offset').perform(context))
     neighbor_offsets  = _parse_xy_list(LaunchConfiguration('neighbor_offsets').perform(context))
-    offset_init_mode  = LaunchConfiguration('offset_init_mode').perform(context)
     db_path           = LaunchConfiguration('db_path').perform(context)
     fps               = LaunchConfiguration('fps').perform(context)
     cam_x             = LaunchConfiguration('cam_x').perform(context)
@@ -165,20 +164,6 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # Pre-run alignment — leader coordinates depth-based spacing
-        # correction using the OAK-D camera.
-        Node(
-            package='swerve_formation',
-            executable='alignment_node',
-            name='alignment_node' + suffix,
-            parameters=[{
-                'robot_id': robot_id,
-                'neighbors': neighbors,
-                'offset_init_mode': offset_init_mode,
-            }],
-            output='screen',
-        ),
-
         # Camera + RTAB-Map localization. Publishes:
         #   map → {robot_id}_odom TF (continuous correction)
         #   /{rid}/rtabmap/localization_pose → /{rid}/slam/pose (via relay)
@@ -215,7 +200,6 @@ def generate_launch_description():
         DeclareLaunchArgument('neighbors',        default_value=''),
         DeclareLaunchArgument('my_offset',        default_value='0.0,0.0'),
         DeclareLaunchArgument('neighbor_offsets', default_value='0.0,0.0'),
-        DeclareLaunchArgument('offset_init_mode', default_value='manual'),
         DeclareLaunchArgument('db_path',          default_value='~/maps/room.db',
                               description='RTAB-Map database built by rtabmap_mapping.launch.py.'),
         DeclareLaunchArgument('fps',              default_value='15',
@@ -223,7 +207,7 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_x',            default_value='0.10'),
         DeclareLaunchArgument('cam_y',            default_value='0.00'),
         DeclareLaunchArgument('cam_z',            default_value='0.15'),
-        DeclareLaunchArgument('enable_consensus', default_value='true',
+        DeclareLaunchArgument('enable_consensus', default_value='false',
                               description=('When true, laplacian_formation_node '
                                            'closes the loop on inter-robot pose '
                                            'using both /ekf/odom feeds — small '

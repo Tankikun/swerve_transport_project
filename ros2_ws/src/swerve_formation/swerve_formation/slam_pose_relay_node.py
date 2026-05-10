@@ -24,6 +24,8 @@ Frame_id is preserved as-is. RTAB-Map publishes in the `map` frame
 by default — that's what `ekf_node` already assumes.
 """
 
+import math
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
@@ -37,6 +39,9 @@ class SlamPoseRelay(Node):
         in_topic  = str(self.get_parameter('in_topic').value)
         out_topic = str(self.get_parameter('out_topic').value)
 
+        self._out_topic = out_topic
+        self._first = True
+
         self._pub = self.create_publisher(PoseStamped, out_topic, 10)
         self.create_subscription(
             PoseWithCovarianceStamped, in_topic, self._cb, 10
@@ -47,6 +52,19 @@ class SlamPoseRelay(Node):
         )
 
     def _cb(self, msg: PoseWithCovarianceStamped) -> None:
+        if self._first:
+            self._first = False
+            p = msg.pose.pose.position
+            q = msg.pose.pose.orientation
+            yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            )
+            self.get_logger().info(
+                f'[LOCALIZED] {self._out_topic}: first SLAM fix — '
+                f'map pos=({p.x:.3f}, {p.y:.3f}) '
+                f'yaw={math.degrees(yaw):.1f} deg'
+            )
         out = PoseStamped()
         out.header = msg.header
         out.pose   = msg.pose.pose

@@ -128,6 +128,7 @@ class PathFollowerNode(Node):
 
         # State
         self._is_leader  = False
+        self._slam_ready = False                 # True once first /{robot_id}/slam/pose arrives
         self._pose       = np.zeros(3)          # [x, y, theta]  from EKF
         self._waypoints: list[np.ndarray] = []  # queue of [x, y, theta]
         self._current_wp: np.ndarray | None = None
@@ -164,6 +165,9 @@ class PathFollowerNode(Node):
         )
         self.create_subscription(
             Odometry, f'/{self._robot_id}/ekf/odom', self._pose_cb, 10
+        )
+        self.create_subscription(
+            PoseStamped, f'/{self._robot_id}/slam/pose', self._slam_cb, 10
         )
         # path_planner_node publishes the dense planned path here once per
         # /goal_pose, latched. Each pose's position.{x,y} is a virtual-
@@ -202,6 +206,14 @@ class PathFollowerNode(Node):
         )
 
     # ── Subscription callbacks ────────────────────────────────────────────────
+
+    def _slam_cb(self, msg: PoseStamped):
+        if not self._slam_ready:
+            self._slam_ready = True
+            self.get_logger().info(
+                f'[LOCALIZED] {self._robot_id} SLAM pose received — '
+                f'path-follower will navigate once leader is elected.'
+            )
 
     def _leader_cb(self, msg: String):
         was_leader  = self._is_leader
@@ -371,6 +383,14 @@ class PathFollowerNode(Node):
 
     def _control_loop(self):
         if not self._is_leader or self._current_wp is None:
+            return
+
+        if not self._slam_ready:
+            self.get_logger().warn(
+                f'{self._robot_id} is leader with a path but SLAM has not '
+                f'localized yet — holding until map-anchored.',
+                throttle_duration_sec=5.0,
+            )
             return
 
         # Check if current waypoint is reached

@@ -64,6 +64,7 @@ class EKFNode(Node):
         self._Q = np.diag([0.01, 0.01, _Q_THETA_WHEEL])
         self._R = np.diag([0.05, 0.05, 0.02])    # SLAM observation noise
         self._last_t: float | None = None
+        self._slam_initialized = False
 
         # Cached gyro Z rate from the most recent IMU message and the
         # wall-clock time it arrived. None until the first IMU is seen.
@@ -161,6 +162,15 @@ class EKFNode(Node):
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         slam_theta = np.arctan2(siny, cosy)
+
+        if not self._slam_initialized:
+            self._slam_initialized = True
+            self.get_logger().info(
+                f'[LOCALIZED] First SLAM correction applied — '
+                f'map pos=({msg.pose.position.x:.3f}, {msg.pose.position.y:.3f}) '
+                f'yaw={float(np.degrees(slam_theta)):.1f} deg  '
+                f'— EKF is now map-frame anchored'
+            )
 
         z = np.array([msg.pose.position.x, msg.pose.position.y, slam_theta])
         H = np.eye(3)
