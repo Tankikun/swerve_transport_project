@@ -18,11 +18,51 @@ to look at how error accumulates over multiple loops.
 | File | Purpose |
 |---|---|
 | `mocap_test/trajectory_publisher.py` | ROS 2 node that publishes `/virtual_center/cmd_vel` along the U-loop. Open-loop, time-based. |
+| `mocap_test/launch/mocap_formation.launch.py` | Per-robot launch that brings up `laplacian_formation_node` configured for a side-by-side formation at the chosen `formation_d`. Run once on each Pi. |
 | `mocap_test/README.md` | This file. |
 
-Nothing else in the repo is modified. The script depends on the
-existing `laplacian_formation_node` (already on `main`) to translate
-the virtual-centre twist into per-robot `/{robot_id}/cmd_vel`.
+Nothing else in the repo is modified. The trajectory script depends on
+the existing `laplacian_formation_node` (already on `main`) to
+translate the virtual-centre twist into per-robot `/{robot_id}/cmd_vel`.
+
+## How the command flows
+
+The trajectory publisher emits ONE shared `Twist` topic
+(`/virtual_center/cmd_vel`). Both robots' `laplacian_formation_node`
+instances subscribe to that same topic and each computes its own
+per-robot twist using a closed-form rigid-body transform — so the
+formation maintains itself geometrically without any inter-robot
+feedback (consensus is off by default).
+
+```
+laptop                                  robot N (each Pi)
++--------------------------+            +-----------------------------+
+| trajectory_publisher.py  |            | laplacian_formation_node    |
+| publishes Twist          |            | subscribes:                 |
+| at 20 Hz                 |            |   /virtual_center/cmd_vel   |
++-------------+------------+            | publishes:                  |
+              |                         |   /tb3_N/cmd_vel            |
+              |  /virtual_center/cmd_vel|                             |
+              +============>============>                             |
+                  (single shared topic) +--------------+--------------+
+                                                       |
+                                                       v
+                                        +-----------------------------+
+                                        | conveyor_base_node          |
+                                        | (serial -> OpenCR firmware) |
+                                        +-----------------------------+
+```
+
+Per-robot rigid-body transform inside `laplacian_formation_node`:
+
+```
+v_robot_x  = vc_vx - vc_wz * my_offset_y
+v_robot_y  = vc_vy + vc_wz * my_offset_x
+v_robot_wz = vc_wz
+```
+
+Each robot is given its `my_offset` at launch (set by
+`mocap_formation.launch.py` from the single `formation_d` argument).
 
 ---
 
@@ -125,16 +165,23 @@ further (everything halves).
 ## Formation distances under test
 
 The user-defined sweep is **D = 50 cm, 70 cm, 90 cm** between the two
-robots' base_link origins. The same script drives all three — the
-distance is set in the laplacian launch parameters, not in this
-script:
+robots' base_link origins. The same trajectory script drives all
+three — only the formation launch's `formation_d` argument changes:
 
 ```bash
-# Each robot launches its formation node with my_offset / neighbor_offsets.
-# For D=0.7 with VC at the midpoint, side-by-side along body Y:
-#   tb3_0:  my_offset:=[0.0, +0.35]   neighbor_offsets:=[0.0, -0.35]
-#   tb3_1:  my_offset:=[0.0, -0.35]   neighbor_offsets:=[0.0, +0.35]
+# On EACH Pi (tb3_0 and tb3_1), in a sourced ROS 2 shell:
+ros2 launch mocap_test/launch/mocap_formation.launch.py \
+  robot_id:=tb3_0 formation_d:=0.7
+
+ros2 launch mocap_test/launch/mocap_formation.launch.py \
+  robot_id:=tb3_1 formation_d:=0.7
 ```
+
+The launch derives both robots' `my_offset` and `neighbor_offsets`
+from `formation_d` for a side-by-side formation. tb3_0 sits on the
+formation's left (+Y in formation body frame), tb3_1 on the right;
+override with `formation_position:=left|right` if you want to flip
+sides.
 
 Reasonability check (chassis is 0.50 m x 0.35 m):
 
@@ -166,14 +213,26 @@ You need 5 things up before launching the trajectory:
 1. **MoCap publishing** — rigid body for each robot, published to e.g.
    `/tb3_0/mocap/pose` and `/tb3_1/mocap/pose` (PoseStamped, 100 Hz+).
    Bridge depends on which MoCap system you use (OptiTrack, Vicon, etc.).
-2. **Per-robot stack** — Pi sensor + base launch on each robot, plus
-   `laplacian_formation_node` configured for the chosen formation D.
+2. **Per-robot stack** — Pi sensor + base launch on each robot
+   (`conveyor_base_node` for the serial bridge), plus the formation
+   launch from this branch:
+   ```bash
+   # On tb3_0:
+   ros2 launch mocap_test/launch/mocap_formation.launch.py \
+     robot_id:=tb3_0 formation_d:=0.7
+   # On tb3_1:
+   ros2 launch mocap_test/launch/mocap_formation.launch.py \
+     robot_id:=tb3_1 formation_d:=0.7
+   ```
+   Both nodes now subscribe to the SAME `/virtual_center/cmd_vel`
+   topic and each publishes its own `/{robot_id}/cmd_vel`.
 3. **Time sync** — chrony / NTP / PTP between MoCap host and robots.
    Skew >10 ms shows up as a phantom yaw error during the arc.
 4. **Bag recording** — see below.
 5. **Robot placement** — place the formation centroid at the MoCap
    origin with each robot facing world +Y (north). Ground-truth pose
-   at start should be `(x, y, theta) = (0, 0, pi/2)`.
+   at start should be `(x, y, theta) = (0, 0, pi/2)`. tb3_0 sits at
+   `(0, +D/2)` and tb3_1 at `(0, -D/2)` in the formation body frame.
 
 ### Bag the run
 
