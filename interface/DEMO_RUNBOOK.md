@@ -320,7 +320,39 @@ If you don't see that line, the bridge will use whatever the user
 clicks — and the EKF will reset to a wrong position, putting the
 real robot's path far from the GUI's path.
 
-## B.9 Browser
+## B.9 Laptop terminal 4 — path planner
+
+The path planner is a single ROS-native laptop node that owns the
+`/goal_pose → /formation/path` translation. It subscribes to the GUI's
+goal pose and both robots' EKF poses, computes the virtual centre, and
+publishes the dense planned path as a **latched** `PoseArray` so each
+robot's `path_follower_node` picks it up immediately (or on reconnect).
+
+```bash
+wsl -d ubuntu-22.04
+# env-var block from §B.3
+ros2 run swerve_formation path_planner_node --ros-args \
+    -p map_path:=$HOME/swerve_transport_project/interface/map.json
+```
+
+On startup the node logs:
+
+```
+Map loaded: HHHxWWW cells @ 0.020 m, X[…] Y[…]
+path_planner_node ready. yaw_policy='free', target_spacing=0.15 m,
+default formation_radius=0.45 m. Waiting for /goal_pose, /tb3_0/pose,
+/tb3_1/pose.
+```
+
+Once both Pis are publishing `/{rid}/pose`, the planner sits idle until
+the GUI publishes `/goal_pose`. Each Send Goal click triggers exactly
+one `/formation/path` publication.
+
+**Why on the laptop?** The map (`map.json`) only needs to live on one
+machine, and putting the planner on the laptop avoids two robots
+disagreeing about the plan. **Leave this terminal running.**
+
+## B.10 Browser
 
 `http://localhost:5002`. Now follow §3.
 
@@ -365,31 +397,42 @@ Optionally adjust orientation with the slider.
 
 ## Step 6 — Click "Send Goal"
 
-The button shows "Planning…" for a fraction of a second. You should see:
+The button publishes `/goal_pose` (PoseStamped, with the slider's yaw
+baked into the quaternion) over rosbridge. You should see:
 
-- ~50 yellow waypoint dots forming a smooth U-curve on the floor.
-- Laptop GUI server logs:
-  `[plan] wrote path_plan.json seq=N (NN VC waypoints, X.YZ m)`
+- **Laptop terminal 4 (`path_planner_node`):**
+  `goal received: (X.XX, Y.YY, yaw=NNN°)`
+  `planning: VC=(cx,cy) → goal=(gx,gy), radius=0.45 m, yaw_policy='free'`
+  `plan #N published: NN poses, vc_distance=X.YZ m`
 - **Mode A:** Terminal 2 logs `[walk] new plan loaded: NN waypoints, …`
 - **Mode B:** the leader's Pi logs
-  `Waypoint sequence loaded: 56 points.` from `navigation_node`
-  followed by `Became leader — navigation active.` (if it wasn't
+  `Received NN waypoints.` from `path_follower_node`
+  followed by `Became leader — path-follower active.` (if it wasn't
   already).
+
+The dense U-curve dots also render on the floor in the browser.
 
 ## Step 7 — Watch the cooperative walk
 
 - **Mode A:** the GUI animates both robots through the U-curve in
   ~14 s. No real motion.
 - **Mode B:** the **real motors spin up** ~50 ms after Send Goal. Both
-  robots strafe and rotate along the path keeping the rigid 29 cm
+  robots strafe and rotate along the path keeping the rigid 50 cm
   formation. The GUI's robot icons mirror their live positions in real
   time.
 
-Roughly 15 s for a 2.5 m path at 0.18 m/s.
+When the leader reaches the final waypoint xy, `path_follower_node`
+transitions from `FOLLOWING` → `ALIGNING` and rotates the formation
+in place to face the goal yaw. Once within ±5° of the slider value,
+status flips to `REACHED`.
+
+Roughly 15–20 s for a 2.5 m path at 0.18 m/s plus a few seconds to
+align at the end.
 
 ## Step 8 — Done
 
-Robots stop at the goal in formation. Object stays put.
+Robots stop at the goal **in formation, facing the slider's yaw**.
+Object stays put.
 
 - Run another goal: just click a new goal location and Send Goal again.
   No need to reset anything.
@@ -431,7 +474,7 @@ to center on next launch.
 | Initial X/Y/yaw of R1 or R2 (Mode B) | `fixed_pose:='x,y,yaw_deg'` on the bridge (§B.8) **AND** the matching `FIXED_INITIAL_POSE` constants in `interface/index.html` |
 | Object length (Mode B) | `my_offset` / `neighbor_offsets` launch args on each Pi (both robots to ±half the desired length); update §B.1 placement to match |
 | Walking speed (Mode A) | `--speed 0.25` on Terminal 2 |
-| Walking speed (Mode B) | `MAX_LINEAR` constant in `navigation_node.py` (default 0.18 — keep below the OpenCR's ~0.198 m/s firmware clamp) |
+| Walking speed (Mode B) | `MAX_LINEAR` constant in `path_follower_node.py` (default 0.18 — keep below the OpenCR's ~0.198 m/s firmware clamp) |
 | Formation drift correction strength (Mode B) | `k_gain:=0.1` on each Pi's launch (raise → tighter formation but risk oscillation, lower → looser but smoother) |
 | Disable formation drift correction (Mode B) | `enable_consensus:=false` on each Pi's launch — robots run pure feedforward, drift independently |
 | Number of waypoints in the planned path | `target_spacing` parameter in `apf_smooth_path()` in `interface/astar_planner.py` (smaller → more dots, larger → fewer) |
@@ -469,11 +512,18 @@ to center on next launch.
 ### Mode B — Robots don't move
 
 - `ros2 topic echo /virtual_center/cmd_vel --once` on the laptop should
-  show non-zero values immediately after Send Goal. If it's silent,
-  the `navigation_node` never received the path.
-  - Check `ros2 topic echo /formation/path --once` after Send Goal.
-    Should show 50+ poses. If empty, rosbridge's WebSocket→ROS
-    forwarding isn't reaching the Pi.
+  show non-zero values immediately after Send Goal. If it's silent:
+  - Check `ros2 topic echo /goal_pose --once` — should fire on every
+    Send Goal click. If empty, rosbridge isn't bridging the GUI's
+    publication; restart Terminal 2 (rosbridge_server).
+  - Check `ros2 topic echo /formation/path --once` — should show
+    50+ poses after Send Goal. If empty, `path_planner_node` (Terminal
+    4) isn't running OR it's missing one of `/tb3_0/pose`,
+    `/tb3_1/pose`, `/formation/footprint` (its log will say
+    "deferring plan").
+  - Check `ros2 topic info /formation/path` — must show
+    `Durability: TRANSIENT_LOCAL` on both publisher and subscriber.
+    If publisher is `VOLATILE` the follower won't latch.
 - `ros2 topic echo /tb3_0/cmd_vel` should show the per-robot twist
   (different x/y for each robot due to the offset). If silent, the
   `laplacian_formation_node` isn't running on that Pi.
@@ -563,39 +613,50 @@ fake_pose_publisher.py --walk
 ## Mode B (real)
 
 ```
-Browser GUI (index.html)
-  │  HTTP: POST /set_initial_pose/<id>
-  │  HTTP: poll  /pose/<id>
-  │  HTTP: POST /plan
-  │  WebSocket → /formation/path
+Browser GUI (interface/index.html)
+  │  HTTP    : POST /set_initial_pose/<id>   (Set Initial Pose click)
+  │  HTTP    : poll /pose/<id>               (live robot marker, 5 Hz)
+  │  WebSock : publish /goal_pose            (Send Goal click)
   ▼
 laptop:
-  ├─ server.py             :5002    Flask
-  ├─ rosbridge_server      :9090    WebSocket ↔ ROS
+  ├─ server.py             :5002    Flask — serves the GUI + /pose mailbox
+  ├─ rosbridge_server      :9090    WebSocket ↔ ROS bridge
+  │
   ├─ ros_pose_bridge tb3_0          fixed_pose:='0.453,-1.437,103'
-  │                                 click → /tb3_0/initialpose at FIXED
-  │                                 /tb3_0/ekf/odom → POST /pose
-  └─ ros_pose_bridge tb3_1          fixed_pose:='0.940,-1.325,103'
-                                    click → /tb3_1/initialpose at FIXED
-                                    /tb3_1/ekf/odom → POST /pose
-        ▲             │
-        │             │
-        │             ▼  /tb3_X/initialpose, /formation/path  (over ROS)
+  │                                 ► click → /tb3_0/initialpose at FIXED coord
+  │                                 ► /tb3_0/ekf/odom → POST /pose for the GUI
+  ├─ ros_pose_bridge tb3_1          fixed_pose:='0.940,-1.325,103'
+  │                                 ► click → /tb3_1/initialpose at FIXED coord
+  │                                 ► /tb3_1/ekf/odom → POST /pose for the GUI
+  │
+  └─ path_planner_node              ► reads /goal_pose, /tb3_0/pose, /tb3_1/pose,
+                                          /formation/footprint
+                                    ► virtual centre C = (P0+P1)/2
+                                    ► A* + APF (interface/astar_planner.py)
+                                    ► /formation/path (LATCHED, transient_local)
+        ▲                  │
+        │                  │
+        │                  ▼  /tb3_X/initialpose, /goal_pose, /formation/path
+        │                       (all over ROS, FastDDS, ROS_DOMAIN_ID=30)
         │
-ROS network (FastDDS, ROS_DOMAIN_ID=30)
         │
-        ▼
 each Pi (conveyor.launch.py enable_slam:=false):
-  ├─ conveyor_base_node    /tb3_X/cmd_vel ──serial→ OpenCR
-  │                        OpenCR ──serial→ /tb3_X/odom + /tb3_X/imu + TF
-  ├─ ekf_node              /odom + /imu + /initialpose → /tb3_X/ekf/odom
-  ├─ leader_election_node  /formation/leader
-  ├─ navigation_node       /formation/path → /virtual_center/cmd_vel  (leader-only)
-  ├─ laplacian_formation   feedforward: /virtual_center/cmd_vel + my_offset
-  │                        consensus  : /tb3_0/ekf/odom + /tb3_1/ekf/odom
-  │                                     (closes loop on inter-robot pose)
-  │                        → /tb3_X/cmd_vel
-  ├─ formation_size_node   formation envelope (leader-only)
+  ├─ conveyor_base_node     /tb3_X/cmd_vel ──serial→ OpenCR
+  │                         OpenCR ──serial→ /tb3_X/odom + /tb3_X/imu + TF
+  ├─ ekf_node               /odom + /imu + /initialpose
+  │                         → /tb3_X/ekf/odom (Odometry)
+  │                         → /tb3_X/pose (PoseStamped, "map" frame, fed
+  │                                        to path_planner_node above)
+  ├─ leader_election_node   /formation/leader
+  ├─ path_follower_node     /formation/path (transient_local)
+  │                         → /virtual_center/cmd_vel  (leader-only)
+  │                         FOLLOWING → ALIGNING (rotate to /goal_pose yaw)
+  │                                    → REACHED
+  ├─ laplacian_formation    feedforward: /virtual_center/cmd_vel + my_offset
+  │                         consensus  : /tb3_0/ekf/odom + /tb3_1/ekf/odom
+  │                                      (closes loop on inter-robot pose)
+  │                         → /tb3_X/cmd_vel
+  ├─ formation_size_node    /formation/footprint (Polygon, leader-only)
   └─ static_transform_publisher  map → tb3_X_odom (identity, no-SLAM stand-in)
 
 OpenCR firmware (already flashed):
@@ -603,6 +664,161 @@ OpenCR firmware (already flashed):
   Sends     "POSE  x y theta vx vy wz\n"  (33 Hz)
             "IMU   ax ay az gx gy gz yaw\n"  (~11 Hz)
 ```
+
+---
+
+# 8. Architecture: ideal vs. what we actually run
+
+The whole project is **designed for visual SLAM** — RTAB-Map watches an
+OAK-D camera, matches the live image against a pre-built map of the
+lab, and gives every robot a drift-free world position. **We can't run
+that** — for hardware / time reasons, RTAB-Map isn't ready. So we
+**fake the localization** at one specific point in the data flow. The
+rest of the pipeline (path planning, path following, formation control,
+firmware) is identical between the two designs. This section makes that
+exact difference explicit.
+
+## 8.1 The only thing that's different — where pose comes from
+
+```
+                  IDEAL (with RTAB-Map)              ACTUAL (no localization, fake it)
+                  =====================              =================================
+
+   INPUT          OAK-D camera, 15 Hz                User mouse click in the GUI, once
+
+                       │                                        │
+                       ▼                                        ▼
+                 ┌───────────┐                          ┌───────────────┐
+                 │ rtabmap   │ matches camera           │ ros_pose_bridge│
+                 │ _slam     │ image vs ~/maps/lab.db   │ fixed_pose:=   │
+                 └─────┬─────┘                          │ 'X,Y,YAW'      │
+                       │                                │ ALWAYS uses    │
+                       │ /tb3_X/slam/pose               │ these (ignores │
+                       │ ~5 Hz, continuous              │ click coords)  │
+                       │ correction                     └───────┬───────┘
+                       │                                        │
+                       │                                        │ /tb3_X/initialpose
+                       │                                        │ ONCE per click
+                       ▼                                        ▼
+                 ┌───────────┐                          ┌───────────────┐
+                 │ ekf_node  │ predicts: wheel /odom    │ ekf_node      │ predicts: wheel /odom
+                 │           │ corrects: /slam/pose     │ use_slam:=    │ corrects: /imu yaw
+                 │           │           /imu yaw       │ false         │ HARD RESET on
+                 │           │           (continuous)   │               │ /initialpose, then
+                 │           │                          │               │ DEAD-RECKON
+                 └─────┬─────┘                          └───────┬───────┘
+                       │                                        │
+                       ▼ /tb3_X/pose                            ▼ /tb3_X/pose
+        anchored to lab map permanently;       anchored only at the click moment;
+        ~1 cm drift, bounded                   wheel-odom + IMU drift accumulates
+                                                (~5–10 cm over a 15 s run)
+```
+
+**One-line summary:** in the ideal system the camera continuously
+re-anchors the EKF to the world map. In our system, the user's "Set
+Initial Pose" click anchors the EKF **once**, and from there it just
+integrates wheel odometry and gyro (which slowly drifts).
+
+The downstream consumers don't know the difference — both systems
+produce a `/tb3_X/pose` topic with the same shape.
+
+## 8.2 What's identical between the two
+
+```
+both systems:
+
+  Browser GUI ── /goal_pose ──►  path_planner_node
+                                  │
+                                  │  reads /tb3_0/pose, /tb3_1/pose,
+                                  │        /formation/footprint
+                                  │  computes virtual centre
+                                  │  C = (P0 + P1) / 2
+                                  │  A* + APF on the inflated grid
+                                  ▼
+                                /formation/path (latched, transient_local)
+                                  │
+                                  ▼
+                           path_follower_node @ leader
+                                  │
+                                  │  walks the dots, then ALIGNs to /goal_pose yaw
+                                  ▼
+                           /virtual_center/cmd_vel (Twist)
+                                  │
+                                  ▼
+                  laplacian_formation_node @ each robot
+                                  │  feedforward + Laplacian consensus
+                                  ▼
+                           /tb3_X/cmd_vel (Twist)
+                                  │
+                                  ▼
+                           conveyor_base_node @ each Pi ── serial ──► OpenCR ──► motors
+                                                                                   │
+                                                                                   ▼
+                                                                            POSE + IMU lines
+                                                                                   │
+                                                                                   ▼
+                                                                            ekf_node again …
+```
+
+Same nodes, same topics, same QoS, same logic. Just the "where does
+`/tb3_X/pose` come from" is different.
+
+## 8.3 The trade-off, made obvious
+
+| Property | Ideal (RTAB-Map) | Actual (fake) |
+|---|---|---|
+| Where the world frame comes from | Pre-built lab map | The user's click on the GUI |
+| Pose drift while moving | Bounded (~1 cm) | Unbounded (~5–10 cm per 2.5 m drive) |
+| Survives rough wheel slip / kicks | Yes — visual re-localizes | No — robot ends up where odom says |
+| Robot goes to the EXACT clicked goal | Yes | Only if physical placement matches the FIXED `fixed_pose` coords + drift is small |
+| Object-on-formation stays put | Yes (formation rigid + world-anchored) | Yes (formation rigid via Laplacian; **only the formation's absolute position drifts**) |
+| Setup time per run | 5–30 s for RTAB-Map to relocalize | One click ≈ 0 s |
+| Hardware needed | OAK-D camera, working lab.db | Nothing extra |
+
+For a short, contained demo (a 14 s run on a flat floor), "actual" is
+fine. For a long deployment or anywhere visually similar (white walls,
+the formation drifts away from the GUI's goal marker), you need the
+"ideal" path.
+
+## 8.4 What you click vs. what physically happens
+
+```
+Step                                Ideal effect                Actual effect
+────────────────────────────────────────────────────────────────────────────────
+Click 📍 Set Initial Pose / R1     ros_pose_bridge sends      bridge OVERRIDES the
+at, say, (X, Y) on the GUI map     (X, Y) to                   click with FIXED coords
+                                    /tb3_0/initialpose         from `fixed_pose:='…'`
+                                    + /initialpose             param. The GUI also
+                                    RTAB-Map seeds its visual  draws R1 at FIXED via
+                                    relocalization at (X, Y)   FIXED_INITIAL_POSE
+                                                               fallback in index.html
+
+The EKF state is now             The EKF is at (X, Y) AND     The EKF is at FIXED.
+                                  RTAB-Map agrees within      Whether the real robot
+                                  cm — drift will be          is physically there is
+                                  continuously corrected      up to YOU (you taped
+                                                              the floor at FIXED).
+
+Click goal at (Gx, Gy, yaw)       /goal_pose published        /goal_pose published
+                                  identically in both                identically in both
+
+path_planner_node reads /tb3_X/pose, computes virtual centre, plans, publishes /formation/path
+                              (identical in both systems)
+
+path_follower_node drives the formation, rotates to goal yaw, REACHED
+                              (identical in both systems)
+
+End state                         Robot is at (Gx, Gy, yaw)    Robot is at (Gx, Gy, yaw) PLUS
+                                  ±1 cm. GUI marker            the accumulated drift since
+                                  matches reality.              the click. GUI marker reflects
+                                                                EKF's belief, not physical truth.
+```
+
+The discipline our demo requires: **measure-twice physical placement
+of R1 and R2 at the FIXED coords**, then **don't bump them**, then
+keep the run short (the path you click should be < 5 m to keep
+absolute drift well under 25 cm). Inside those constraints the demo
+is robust; outside them it isn't, and you'd want SLAM back on.
 
 ---
 
