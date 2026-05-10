@@ -95,18 +95,30 @@ length.
 Five terminals total: 1 laptop GUI, 1 laptop rosbridge, 1 laptop pose-bridge,
 2 Pis (one each).
 
-## B.1 Place the robots on the floor
+## B.1 Place the robots on the floor — these positions ARE the demo
 
-Pick two real-world spots that fit inside the room map. Default values
-match what the GUI shows:
+These two coordinates are **hardcoded** in three places (the GUI's
+`FIXED_INITIAL_POSE`, the bridge's `fixed_pose` param in §B.8, and
+your physical placement on the floor). All three must match — the
+robots cannot localize, so we anchor everything to these known spots:
 
-| Robot | Floor position (m) | Yaw |
-|---|---|---|
-| R1 (`tb3_0`) | x = -0.59, y = -1.10 | 84° (CCW from +X) |
-| R2 (`tb3_1`) | x = -0.30, y = -1.10 | 84° |
+| Robot | Floor position (m) | Yaw | Side |
+|---|---|---|---|
+| R1 (`tb3_0`) | x = +0.453, y = -1.437 | 103° (CCW from +X) | left |
+| R2 (`tb3_1`) | x = +0.940, y = -1.325 | 103°               | right |
 
-Distance between them = 29 cm. Put the rigid object across both robots
-once they're powered up but before you click Send Goal — see §3 step 4.
+Distance between centres = 50 cm — that's the carried-object length.
+At yaw=103°, both robots face the same direction with R1 on the left
+side of the formation and R2 on the right.
+
+**Place the robots first, then everything else.** Use a tape measure
+or marked floor spots — drift in physical placement maps directly into
+where the path "really" ends up vs. where the GUI shows the goal. ±5 cm
+is fine; ±20 cm and the robots may end up far from the GUI's goal
+marker.
+
+Put the rigid object across both robots once their motors are idle
+(after §B.4–B.5) but before you click Send Goal — see §3 step 4.
 
 ## B.2 Power the robots, sanity-check serial
 
@@ -155,9 +167,12 @@ ros2 launch swerve_bringup conveyor.launch.py \
     robot_id:=tb3_0 \
     enable_slam:=false \
     neighbors:=tb3_1 \
-    my_offset:=0.0,0.145 \
-    neighbor_offsets:=0.0,-0.145
+    my_offset:=0.0,0.25 \
+    neighbor_offsets:=0.0,-0.25
 ```
+
+`my_offset:=0.0,0.25` says R1 sits **+0.25 m on the formation's body Y
+axis** (the left side). Half of the 50 cm object length.
 
 What `enable_slam:=false` does:
 - skips RTAB-Map and the camera entirely
@@ -179,15 +194,15 @@ ros2 launch swerve_bringup conveyor.launch.py \
     robot_id:=tb3_1 \
     enable_slam:=false \
     neighbors:=tb3_0 \
-    my_offset:=0.0,-0.145 \
-    neighbor_offsets:=0.0,0.145
+    my_offset:=0.0,-0.25 \
+    neighbor_offsets:=0.0,0.25
 ```
 
 The two robots' `my_offset` values are mirror images of each other.
-Both `0.145` numbers describe a **29 cm**-apart formation; if you want
-a different object length, set both robots' offsets to **half** the new
-length (e.g. for a 50 cm object: `0.0,0.25` on tb3_0 and `0.0,-0.25` on
-tb3_1).
+Both `0.25` numbers describe a **50 cm**-wide formation; if you want a
+different object length, set both robots' offsets to **half** the new
+length (and update the §B.1 placement coords + §B.8 `fixed_pose`
+values to match).
 
 Once the second launch is up, in **either** Pi terminal you should see
 `leader_election_node` settle on one robot:
@@ -226,8 +241,16 @@ You should see `Rosbridge WebSocket server started on port 9090`.
 
 ## B.8 Laptop terminal 3 — pose bridge (one per robot)
 
-`ros_pose_bridge.py` reads the EKF pose and POSTs it to the GUI. Run
-**one instance per robot** (two terminals total, or use `tmux`):
+`ros_pose_bridge.py` does two jobs:
+1. When the user clicks "Set Initial Pose", **publishes the FIXED
+   coords** (matching §B.1) to `/{rid}/initialpose`, anchoring the
+   EKF — and therefore navigation — at the robot's known physical
+   spot. The user's click position itself is ignored — see
+   `fixed_pose` below.
+2. **Continuously POSTs `/{rid}/ekf/odom` back to the GUI** so the
+   robot's marker on the map tracks the EKF state as the wheels turn.
+
+Run **one instance per robot** (two terminals total, or use `tmux`):
 
 ```bash
 # Terminal 3a — R1
@@ -236,7 +259,8 @@ wsl -d ubuntu-22.04
 cd ~/swerve_transport_project
 python3 interface/ros_pose_bridge.py --ros-args \
     -p robot_id:=tb3_0 \
-    -p use_ekf_topic:=true
+    -p use_ekf_topic:=true \
+    -p fixed_pose:='0.453,-1.437,103'
 
 # Terminal 3b — R2  (separate terminal)
 wsl -d ubuntu-22.04
@@ -244,13 +268,32 @@ wsl -d ubuntu-22.04
 cd ~/swerve_transport_project
 python3 interface/ros_pose_bridge.py --ros-args \
     -p robot_id:=tb3_1 \
-    -p use_ekf_topic:=true
+    -p use_ekf_topic:=true \
+    -p fixed_pose:='0.940,-1.325,103'
 ```
 
-`use_ekf_topic:=true` is the no-SLAM mode — the bridge takes the pose
-directly from `/{robot_id}/ekf/odom` instead of doing a TF lookup
-through RTAB-Map. The GUI's "Set Initial Pose" hints reset the EKF
-state and the bridge sees the new value on the next tick.
+Param meanings:
+
+- **`use_ekf_topic:=true`** — no-SLAM mode: take the GUI pose feed
+  directly from `/{robot_id}/ekf/odom` instead of looking up a TF
+  chain through RTAB-Map (which isn't running).
+- **`fixed_pose:='x,y,yaw_deg'`** — replaces the user's clicked
+  coordinates with these hardcoded values. The "Set Initial Pose"
+  click then becomes a *trigger* only: it tells the system "yes, R1
+  is now at its pre-arranged spot." Required for this no-localisation
+  flow. The values **must match §B.1** and the GUI's
+  `FIXED_INITIAL_POSE` in `interface/index.html`.
+
+On startup each bridge logs:
+
+```
+Fixed-pose override active: x=+0.453 y=-1.437 yaw=+103.0°
+(/set_initial_pose hints will be replaced with this).
+```
+
+If you don't see that line, the bridge will use whatever the user
+clicks — and the EKF will reset to a wrong position, putting the
+real robot's path far from the GUI's path.
 
 ## B.9 Browser
 
@@ -360,9 +403,11 @@ to center on next launch.
 |---|---|
 | Initial X/Y/yaw of R1 or R2 (Mode A) | `--r1-pose` / `--r2-pose` on the fake publisher |
 | **Object length** (inter-robot distance, Mode A) | same — set R1 and R2 farther apart |
-| Object length (Mode B) | `my_offset` / `neighbor_offsets` launch args on each Pi (set both robots to ±half the desired length) |
+| Initial X/Y/yaw of R1 or R2 (Mode B) | `fixed_pose:='x,y,yaw_deg'` on the bridge (§B.8) **AND** the matching `FIXED_INITIAL_POSE` constants in `interface/index.html` |
+| Object length (Mode B) | `my_offset` / `neighbor_offsets` launch args on each Pi (both robots to ±half the desired length); update §B.1 placement to match |
 | Walking speed (Mode A) | `--speed 0.25` on Terminal 2 |
 | Walking speed (Mode B) | `MAX_LINEAR` constant in `navigation_node.py` (default 0.18 — keep below the OpenCR's ~0.198 m/s firmware clamp) |
+| Number of waypoints in the planned path | `target_spacing` parameter in `apf_smooth_path()` in `interface/astar_planner.py` (smaller → more dots, larger → fewer) |
 | Re-localization delay (Mode A) | `--delay-sec 0.5` on the fake publisher |
 | Path smoother gains (advanced) | `apf_smooth_path()` defaults in `astar_planner.py` |
 
@@ -419,6 +464,20 @@ to center on next launch.
 - Verify `ros_pose_bridge` is in `use_ekf_topic:=true` mode (look at
   its startup log). In TF mode it would lag or drift since SLAM isn't
   running.
+- Verify `fixed_pose:=…` is set on each bridge instance — the startup
+  log must say `Fixed-pose override active: …`. If absent, the bridge
+  is using whatever the user clicked, which won't match the physical
+  placement.
+
+### Mode B — Robots drive, but in the wrong direction
+
+- Almost always: the physical placement (§B.1) doesn't match the
+  hardcoded `fixed_pose` values. Re-measure the robots' floor
+  positions and orientations. If they're 30° off in yaw the path
+  curves the wrong way.
+- Or `my_offset` / `neighbor_offsets` (§B.4 / §B.5) don't match the
+  formation geometry. R1 should be at body +Y (left), R2 at body -Y
+  (right) for the default placement.
 
 ### Mode B — Robot drifts away from formation
 
@@ -470,8 +529,12 @@ Browser GUI (index.html)
 laptop:
   ├─ server.py             :5002    Flask
   ├─ rosbridge_server      :9090    WebSocket ↔ ROS
-  ├─ ros_pose_bridge tb3_0          /tb3_0/ekf/odom → POST /pose
-  └─ ros_pose_bridge tb3_1          /tb3_1/ekf/odom → POST /pose
+  ├─ ros_pose_bridge tb3_0          fixed_pose:='0.453,-1.437,103'
+  │                                 click → /tb3_0/initialpose at FIXED
+  │                                 /tb3_0/ekf/odom → POST /pose
+  └─ ros_pose_bridge tb3_1          fixed_pose:='0.940,-1.325,103'
+                                    click → /tb3_1/initialpose at FIXED
+                                    /tb3_1/ekf/odom → POST /pose
         ▲             │
         │             │
         │             ▼  /tb3_X/initialpose, /formation/path  (over ROS)

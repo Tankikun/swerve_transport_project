@@ -109,12 +109,40 @@ class PoseBridge(Node):
         # When true, take the GUI pose feed straight from /{robot_id}/ekf/odom
         # instead of the TF chain. See module docstring "Pose sources".
         self.declare_parameter('use_ekf_topic',    False)
+        # Fixed-pose override. When set as a non-empty "x,y,yaw_deg" string,
+        # any /set_initial_pose hint from the GUI is treated as a *trigger*
+        # only — the bridge publishes these hardcoded values to /initialpose
+        # instead of whatever the user clicked. Mirrors the FIXED-coords
+        # behaviour of fake_pose_publisher.py and matches the GUI's
+        # FIXED_INITIAL_POSE fallback. Use this when the robots cannot
+        # localise and you've physically placed them at known positions.
+        self.declare_parameter('fixed_pose', '')   # "x,y,yaw_deg" or empty
 
         self._robot_id         = str(self.get_parameter('robot_id').value)
         self._server_url       = str(self.get_parameter('server_url').value)
         self._initial_pose_url = str(self.get_parameter('initial_pose_url').value)
         rate                   = float(self.get_parameter('rate_hz').value)
         self._use_ekf_topic    = bool(self.get_parameter('use_ekf_topic').value)
+        # Parse "x,y,yaw_deg" → (x, y, yaw_rad) | None
+        fixed_str = str(self.get_parameter('fixed_pose').value).strip()
+        self._fixed_pose: tuple[float, float, float] | None = None
+        if fixed_str:
+            try:
+                parts = [float(p.strip()) for p in fixed_str.split(',')]
+                if len(parts) != 3:
+                    raise ValueError(f'expected 3 values, got {len(parts)}')
+                self._fixed_pose = (parts[0], parts[1], math.radians(parts[2]))
+                self.get_logger().info(
+                    f'Fixed-pose override active: x={parts[0]:+.3f} '
+                    f'y={parts[1]:+.3f} yaw={parts[2]:+.1f}° '
+                    f'(/set_initial_pose hints will be replaced with this).'
+                )
+            except (ValueError, IndexError) as e:
+                self.get_logger().error(
+                    f"Invalid fixed_pose '{fixed_str}': {e}. "
+                    f"Expected format 'x,y,yaw_deg'. Falling back to "
+                    f"hint-driven initial pose."
+                )
 
         self._base_frame  = f'{self._robot_id}_base_link'
         self._tf_buffer   = tf2_ros.Buffer()
@@ -314,9 +342,16 @@ class PoseBridge(Node):
         if seq <= self._last_seen_init_seq:
             return  # already published this hint
 
-        x     = float(data.get('x',       0.0))
-        y     = float(data.get('y',       0.0))
-        yaw   = float(data.get('yaw_rad', 0.0))
+        if self._fixed_pose is not None:
+            # Hint is just a trigger — replace its coords with the fixed
+            # values configured at startup. The robots can't localise; the
+            # user has placed them at known fixed positions, so we anchor
+            # the EKF (and therefore navigation) at those exact points.
+            x, y, yaw = self._fixed_pose
+        else:
+            x   = float(data.get('x',       0.0))
+            y   = float(data.get('y',       0.0))
+            yaw = float(data.get('yaw_rad', 0.0))
         frame = str(data.get('frame', 'map'))
 
         msg = PoseWithCovarianceStamped()
