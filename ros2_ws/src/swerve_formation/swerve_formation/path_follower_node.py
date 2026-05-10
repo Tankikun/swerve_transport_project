@@ -1,42 +1,57 @@
 """
-navigation_node.py
-------------------
-Runs on every robot; ONLY the elected leader activates its control loop.
-The leader drives /virtual_center/cmd_vel; follower robots track via
-laplacian_formation_node.
+path_follower_node.py
+---------------------
+Pure waypoint follower for the formation virtual centre. Runs on every
+robot; ONLY the elected leader activates its control loop, drives
+/virtual_center/cmd_vel based on its EKF pose vs. the planner's path, and
+laplacian_formation_node on each robot translates that into per-robot
+wheel commands.
 
-Path planning: Hybrid APF (global avoidance) + velocity ramp (local smoothing).
-This is taken directly from the formation_path_planning notebook — see that
-notebook for derivations and visualisations.
+This node does NOT plan paths and does NOT do obstacle avoidance —
+that is `path_planner_node`'s responsibility. Its only job is to follow
+the latched list of dots produced by the planner, then rotate to the
+goal yaw at the end.
 
 Subscriptions
   /formation/leader          std_msgs/String   — robot_id of current leader
   /{robot_id}/ekf/odom       nav_msgs/Odometry — authoritative pose (EKF output)
-  /navigation/goal           geometry_msgs/Twist  — single goal (linear.x/y = x/y, angular.z = θ)
-  /formation/path            geometry_msgs/PoseArray — ordered waypoint sequence
-                                                       (published once per Send Goal by
-                                                        the GUI via rosbridge)
+  /formation/path            geometry_msgs/PoseArray
+                              — ordered waypoint list in map frame, LATCHED
+                                (TRANSIENT_LOCAL durability) so a follower
+                                that joins late still receives the most
+                                recent plan. Published once per Send Goal
+                                by `path_planner_node`.
   /goal_pose                 geometry_msgs/PoseStamped
-                                                — final target pose for the formation centre.
-                                                  We use ONLY the orientation: once the
-                                                  leader reaches the final waypoint xy, it
-                                                  rotates the formation in place to this
-                                                  yaw before declaring REACHED.
-  /navigation/obstacles      geometry_msgs/PoseArray — obstacle centres (x, y, radius in z)
-  /formation/footprint_radius std_msgs/Float32  — half-width of formation for obstacle inflation
+                              — final target pose for the formation centre.
+                                We use ONLY the orientation: once the
+                                leader reaches the final waypoint xy, it
+                                rotates the formation in place to this yaw
+                                before declaring REACHED.
+  /navigation/obstacles      geometry_msgs/PoseArray
+                              — obstacle centres (x, y, radius in z)
+                                (planner uses these too; follower uses them
+                                for last-line repulsion if the planner
+                                undersizes a corridor)
+  /formation/footprint       geometry_msgs/Polygon
+                              — formation footprint published by
+                                `formation_size_node`. The follower extracts
+                                a bounding-circle radius via max(distance
+                                from centroid).
 
 Publications
   /virtual_center/cmd_vel    geometry_msgs/Twist — velocity for the whole formation
-  /navigation/status         std_msgs/String     — "IDLE" | "NAVIGATING" | "ALIGNING" | "REACHED"
+  /path_follower/status      std_msgs/String     — "IDLE" | "NAVIGATING" | "ALIGNING" | "REACHED"
 """
 
 import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseArray, PoseStamped
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
+                       ReliabilityPolicy)
+from geometry_msgs.msg import Twist, PoseArray, PoseStamped, Polygon
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String, Float32
+from std_msgs.msg import String
 
 
 def _wrap(a: float) -> float:
@@ -49,7 +64,22 @@ def _rot2d(h: float) -> np.ndarray:
     return np.array([[c, -s], [s, c]])
 
 
-class NavigationNode(Node):
+def _polygon_to_radius(poly: Polygon) -> float:
+    """Convert a Polygon footprint to a bounding-circle radius.
+
+    Mirrors `polygon_to_radius()` in `path_planner_node` so the planner
+    and follower see the same number from the same `/formation/footprint`
+    publisher.
+    """
+    pts = poly.points
+    if not pts:
+        return 0.0
+    cx = sum(p.x for p in pts) / len(pts)
+    cy = sum(p.y for p in pts) / len(pts)
+    return max(math.hypot(p.x - cx, p.y - cy) for p in pts)
+
+
+class PathFollowerNode(Node):
     """
     APF + velocity-ramp navigation for the elected formation leader.
 
@@ -85,14 +115,14 @@ class NavigationNode(Node):
     GOAL_TOL = 0.05            # m
     YAW_TOL  = math.radians(5) # rad — done aligning to /goal_pose yaw at end
 
-    # ── Default formation safety margin (overridden by /formation/footprint_radius)
+    # ── Default formation safety margin (overridden by /formation/footprint)
     DEFAULT_SAFETY = 0.45   # m  (≈ robot half-width + payload margin)
 
     # ── Control loop period ───────────────────────────────────────────────────
     DT = 0.05   # s  (20 Hz)
 
     def __init__(self):
-        super().__init__('navigation_node')
+        super().__init__('path_follower_node')
         self.declare_parameter('robot_id', 'tb3_0')
         self._robot_id = self.get_parameter('robot_id').value
 
@@ -104,7 +134,7 @@ class NavigationNode(Node):
 
         # Obstacles: list of (cx, cy, radius) tuples
         self._obstacles: list[tuple[float, float, float]] = []
-        self._safety = self.DEFAULT_SAFETY   # updated by /formation/footprint_radius
+        self._safety = self.DEFAULT_SAFETY   # updated by /formation/footprint
 
         # Velocity state (for ramp smoothing)
         self._vel_actual   = np.zeros(2)   # [vx, vy] in world frame
@@ -117,6 +147,17 @@ class NavigationNode(Node):
         # before declaring REACHED.
         self._goal_pose_yaw: float | None = None
 
+        # ── QoS for /formation/path: matches path_planner_node's
+        #    transient_local publisher so a follower that subscribes after
+        #    the planner has already published still receives the latched
+        #    plan (e.g. on leader handover, follower restart).
+        latched_qos = QoSProfile(
+            depth=1,
+            history=HistoryPolicy.KEEP_LAST,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
         # ── Subscriptions ────────────────────────────────────────────────────
         self.create_subscription(
             String, '/formation/leader', self._leader_cb, 10
@@ -124,16 +165,11 @@ class NavigationNode(Node):
         self.create_subscription(
             Odometry, f'/{self._robot_id}/ekf/odom', self._pose_cb, 10
         )
+        # path_planner_node publishes the dense planned path here once per
+        # /goal_pose, latched. Each pose's position.{x,y} is a virtual-
+        # centre waypoint, orientation carries the path tangent.
         self.create_subscription(
-            Twist, '/navigation/goal', self._goal_cb, 10
-        )
-        # GUI publishes the dense APF-smoothed path here (PoseArray) once
-        # per Send Goal click. Same shape as a waypoint sequence: each
-        # pose's position.{x,y} is a virtual-centre waypoint, orientation
-        # carries the path tangent. The first waypoint is consumed as
-        # the current target and the rest queue up.
-        self.create_subscription(
-            PoseArray, '/formation/path', self._waypoints_cb, 10
+            PoseArray, '/formation/path', self._waypoints_cb, latched_qos
         )
         # The GUI also publishes /goal_pose (PoseStamped) on every Send Goal,
         # carrying the user-specified goal x/y/yaw from the orientation slider.
@@ -148,18 +184,21 @@ class NavigationNode(Node):
         self.create_subscription(
             PoseArray, '/navigation/obstacles', self._obstacles_cb, 10
         )
-        # Formation footprint from formation_size_node → inflates obstacle exclusion zones
+        # Formation footprint from formation_size_node → inflates obstacle
+        # exclusion zones. Polygon (matching path_planner_node's input);
+        # converted to a bounding-circle radius via _polygon_to_radius().
         self.create_subscription(
-            Float32, '/formation/footprint_radius', self._footprint_cb, 10
+            Polygon, '/formation/footprint', self._footprint_cb, 10
         )
 
         # ── Publishers ───────────────────────────────────────────────────────
         self._cmd_pub    = self.create_publisher(Twist, '/virtual_center/cmd_vel', 10)
-        self._status_pub = self.create_publisher(String, '/navigation/status', 10)
+        self._status_pub = self.create_publisher(String, '/path_follower/status', 10)
 
         self.create_timer(self.DT, self._control_loop)
         self.get_logger().info(
-            f'navigation_node ready ({self._robot_id}) — APF + velocity ramp'
+            f'path_follower_node ready ({self._robot_id}) — '
+            f'/formation/path follower with goal-yaw alignment'
         )
 
     # ── Subscription callbacks ────────────────────────────────────────────────
@@ -168,7 +207,7 @@ class NavigationNode(Node):
         was_leader  = self._is_leader
         self._is_leader = (msg.data == self._robot_id)
         if self._is_leader and not was_leader:
-            self.get_logger().info('Became leader — navigation active.')
+            self.get_logger().info('Became leader — path-follower active.')
             self._reset_ramp()
         elif not self._is_leader and was_leader:
             self.get_logger().info('Lost leadership — halting.')
@@ -181,15 +220,6 @@ class NavigationNode(Node):
         self._pose[2] = np.arctan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        )
-
-    def _goal_cb(self, msg: Twist):
-        """Single goal via Twist: linear.x/y = target x/y, angular.z = target θ."""
-        self._waypoints.clear()
-        self._current_wp = np.array([msg.linear.x, msg.linear.y, msg.angular.z])
-        self._reset_ramp()
-        self.get_logger().info(
-            f'New goal: x={msg.linear.x:.2f} y={msg.linear.y:.2f} θ={msg.angular.z:.2f}'
         )
 
     def _goal_pose_cb(self, msg: PoseStamped):
@@ -238,9 +268,13 @@ class NavigationNode(Node):
             for p in msg.poses
         ]
 
-    def _footprint_cb(self, msg: Float32):
-        """Formation half-width from formation_size_node — inflates obstacle zones."""
-        self._safety = max(float(msg.data), 0.1)
+    def _footprint_cb(self, msg: Polygon):
+        """Formation footprint from formation_size_node — convert Polygon
+        to a bounding-circle radius and use it to inflate obstacle zones.
+        Mirrors path_planner_node's interpretation of the same topic."""
+        r = _polygon_to_radius(msg)
+        if r > 0.0:
+            self._safety = max(r, 0.1)
 
     # ── APF planner (from formation_path_planning.ipynb) ─────────────────────
 
@@ -422,7 +456,7 @@ class NavigationNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = NavigationNode()
+    node = PathFollowerNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

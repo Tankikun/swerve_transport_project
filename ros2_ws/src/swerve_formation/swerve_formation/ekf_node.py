@@ -68,6 +68,14 @@ class EKFNode(Node):
             self._initialpose_cb, 10,
         )
         self._pub = self.create_publisher(Odometry, f'/{robot_id}/ekf/odom', 10)
+        # path_planner_node (laptop) subscribes to /{robot_id}/pose to
+        # compute the formation's virtual centre. We republish the same
+        # EKF state as a PoseStamped on every publish — frame_id 'map'
+        # because, with `enable_slam:=false`, conveyor.launch.py installs
+        # a static map → {robot_id}_odom identity TF that aliases the
+        # two frames, and the GUI's clicked goal is in 'map'.
+        self._pose_pub = self.create_publisher(
+            PoseStamped, f'/{robot_id}/pose', 10)
         self.get_logger().info(
             f'EKF ready for {robot_id} (use_slam={self._use_slam}, '
             f'imu_yaw_var={float(self._R_imu[0, 0]):.4f})'
@@ -182,8 +190,9 @@ class EKFNode(Node):
         self._publish()
 
     def _publish(self):
+        stamp = self.get_clock().now().to_msg()
         out = Odometry()
-        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.stamp = stamp
         out.header.frame_id = self._odom_frame_id
         out.child_frame_id  = self._base_frame_id
         out.pose.pose.position.x = float(self._mu[0])
@@ -191,6 +200,17 @@ class EKFNode(Node):
         out.pose.pose.orientation.z = float(np.sin(self._mu[2] / 2.0))
         out.pose.pose.orientation.w = float(np.cos(self._mu[2] / 2.0))
         self._pub.publish(out)
+        # Also republish as PoseStamped in the map frame for the laptop
+        # planner. Same x/y/yaw values; frame_id reflects the world frame
+        # the GUI uses.
+        ps = PoseStamped()
+        ps.header.stamp    = stamp
+        ps.header.frame_id = 'map'
+        ps.pose.position.x = float(self._mu[0])
+        ps.pose.position.y = float(self._mu[1])
+        ps.pose.orientation.z = float(np.sin(self._mu[2] / 2.0))
+        ps.pose.orientation.w = float(np.cos(self._mu[2] / 2.0))
+        self._pose_pub.publish(ps)
 
 
 def main(args=None):

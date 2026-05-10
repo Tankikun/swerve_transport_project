@@ -9,7 +9,8 @@ class FormationSizeNode(Node):
     """
     Leader-only node. Subscribes to /formation/state (robot poses) and the
     camera's estimated object size, computes the system bounding envelope,
-    and publishes the footprint to /navigation/footprint for the nav stack.
+    and publishes the footprint to /formation/footprint — consumed by
+    `path_planner_node` (laptop) and each robot's `path_follower_node`.
     """
 
     def __init__(self):
@@ -29,7 +30,7 @@ class FormationSizeNode(Node):
         self.create_subscription(
             Float32, f'/{self._robot_id}/camera/object_size', self._camera_cb, 10
         )
-        self._footprint_pub = self.create_publisher(Polygon, '/navigation/footprint', 10)
+        self._footprint_pub = self.create_publisher(Polygon, '/formation/footprint', 10)
         self.create_timer(0.5, self._update_footprint)
         self.get_logger().info(f'FormationSizeNode ready for {self._robot_id}')
 

@@ -130,11 +130,13 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # Navigation — only the elected leader drives /virtual_center/cmd_vel
+        # Path follower — only the elected leader drives /virtual_center/cmd_vel.
+        # Subscribes to /formation/path (latched, transient_local) from
+        # path_planner_node on the laptop; rotates to /goal_pose yaw at end.
         Node(
             package='swerve_formation',
-            executable='navigation_node',
-            name='navigation_node' + suffix,
+            executable='path_follower_node',
+            name='path_follower_node' + suffix,
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
