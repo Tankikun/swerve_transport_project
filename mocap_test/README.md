@@ -28,60 +28,62 @@ the virtual-centre twist into per-robot `/{robot_id}/cmd_vel`.
 
 ## The trajectory
 
-A closed loop traced as 5 legs. The "U" is the first 3 legs (strafe,
+A closed loop traced as 5 legs spanning a **2 m x 2 m bounding box**
+for the virtual-centre path. The "U" is the first 3 legs (strafe,
 arc, strafe); legs D and E close the bottom of the U back to the start.
 
 ```
               Y (m, world "north")
                    ^
                    |
-               1.0 +   3 <===============  2
+               2.0 +   3 <===============  2
                    |  / \                  ^
                    | /   \                 |
                    ||     |  arc CCW       |
-                   ||     |  R = 0.5 m     |  leg A
-                   ||     |  (leg B)       |  1.0 m
+                   ||     |  R = 1.0 m     |  leg A
+                   ||     |  (leg B)       |  2.0 m
                    ||     |                |
-               0.5 +v     |                |
+               1.0 +v     |                |
                    ||     |                |
                    ||leg C|                |
-                   ||1 m  |                |
+                   ||2 m  |                |
                    |v     |                |
                0.0 +  4 ================ 1   <-- START (heading 90 deg)
                    | (5)  leg E
-                   |  ^   1.0 m
+                   |  ^   2.0 m
                    |  |
                    |pivot +90 deg
                    |
                    +----+----+----+--------> X (m, world "east")
-                      -1.0 -0.5  0.0
+                      -2.0 -1.0  0.0
 ```
 
 ### Per-leg motion (body-frame, virtual centre)
 
 | Leg | From -> To | Motion | cmd_vel (default) | Duration (default) |
 |-----|------------|--------|-------------------|--------------------|
-| A   | 1 -> 2     | Strafe forward 1.0 m       | `vx=0.10, wz=0`    | 10.0 s |
-| B   | 2 -> 3     | Arc CCW 180 deg, R=0.5 m   | `vx=0.07, wz=0.15` | 20.94 s |
-| C   | 3 -> 4     | Strafe forward 1.0 m       | `vx=0.10, wz=0`    | 10.0 s |
+| A   | 1 -> 2     | Strafe forward 2.0 m       | `vx=0.10, wz=0`    | 20.0 s |
+| B   | 2 -> 3     | Arc CCW 180 deg, R=1.0 m   | `vx=0.10, wz=0.10` | 31.42 s |
+| C   | 3 -> 4     | Strafe forward 2.0 m       | `vx=0.10, wz=0`    | 20.0 s |
 | D   | 4 -> 5     | Pivot +90 deg in place     | `vx=0,    wz=0.20` | 7.85 s |
-| E   | 5 -> 1     | Strafe forward 1.0 m       | `vx=0.10, wz=0`    | 10.0 s |
+| E   | 5 -> 1     | Strafe forward 2.0 m       | `vx=0.10, wz=0`    | 20.0 s |
 
-A 2 s zero-twist pause is held at every checkpoint (between legs) so
-each transition shows up as a flat segment in MoCap and odometry traces.
+A **1 s zero-twist pause** is held at every checkpoint (between legs)
+so each transition shows up as a flat segment in MoCap and odometry
+traces.
 
-Total wall-clock time per loop: roughly **70 s** at default speed
-(including pauses), or **140 s** with `--slow`.
+Total wall-clock time per loop: roughly **104 s** at default speed
+(99 s of motion + 5 s of checkpoint pauses), or **208 s** with `--slow`.
 
 ### Checkpoint world-frame poses
 
 | # | x (m) | y (m) | yaw (deg) | Pointing |
 |---|-------|-------|-----------|----------|
 | 1 |  0.0  |  0.0  |    90     | North (start) |
-| 2 |  0.0  |  1.0  |    90     | North |
-| 3 | -1.0  |  1.0  |   270     | South |
-| 4 | -1.0  |  0.0  |   270     | South |
-| 5 | -1.0  |  0.0  |     0     | East  |
+| 2 |  0.0  |  2.0  |    90     | North |
+| 3 | -2.0  |  2.0  |   270     | South |
+| 4 | -2.0  |  0.0  |   270     | South |
+| 5 | -2.0  |  0.0  |     0     | East  |
 | 1 |  0.0  |  0.0  |     0     | East (loop closes; heading does not match start) |
 
 Note: the loop closes in *position* but not in *heading* (start is
@@ -106,11 +108,11 @@ v_robot_center = vx_vc + omega_vc * (D / 2)
 v_wheel_max    = v_robot_center + omega_vc * 0.212    # chassis half-diagonal
 ```
 
-| D     | vx_vc=0.07, omega_vc=0.15 | vs cap 0.18 m/s |
+| D     | vx_vc=0.10, omega_vc=0.10 | vs cap 0.18 m/s |
 |-------|---------------------------|-----------------|
-| 0.5 m | 0.135 m/s wheel max       | 25 % margin     |
-| 0.7 m | 0.151 m/s wheel max       | 16 % margin     |
-| 0.9 m | 0.169 m/s wheel max       |  6 % margin     |
+| 0.5 m | 0.146 m/s wheel max       | 19 % margin     |
+| 0.7 m | 0.156 m/s wheel max       | 13 % margin     |
+| 0.9 m | 0.166 m/s wheel max       |  8 % margin     |
 
 If you push the speeds higher, `laplacian_formation_node` will
 auto-scale the formation; the trajectory still traces correctly but
@@ -140,7 +142,20 @@ Reasonability check (chassis is 0.50 m x 0.35 m):
 |-------|---------------------|-------|
 | 0.50 m | 0.15 m               | Tight but safe; chassis edges 15 cm apart side-by-side. |
 | 0.70 m | 0.35 m               | Comfortable working distance. |
-| 0.90 m | 0.55 m               | Largest meaningful spacing inside a 2 m x 2 m MoCap volume. |
+| 0.90 m | 0.55 m               | Largest spacing tested. |
+
+**Physical area swept (vs. the 2 m x 2 m VC bounding box).** Each
+robot is offset D/2 from the virtual centre, so the actual area swept
+by the formation is wider than the VC path:
+
+| D     | Outer-robot footprint extent | MoCap volume needed |
+|-------|------------------------------|---------------------|
+| 0.50 m | ~2.5 m x 2.5 m              | 3 m x 3 m suggested |
+| 0.70 m | ~2.7 m x 2.7 m              | 3 m x 3 m suggested |
+| 0.90 m | ~2.9 m x 2.9 m              | 3.5 m x 3.5 m suggested |
+
+Add ~0.5 m of clearance on each side beyond the figures above to give
+the chassis room and stay clear of MoCap volume edge dropouts.
 
 ---
 
