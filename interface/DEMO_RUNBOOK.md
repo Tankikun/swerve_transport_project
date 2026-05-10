@@ -10,6 +10,11 @@ Two ways to run the demo:
 The GUI flow (steps 1–8 in §3) is **identical** in both modes. Only the
 infrastructure that runs underneath differs.
 
+> **First time on a Pi?** Jump to **§C First-time Pi setup** at the
+> bottom and finish all of C.1–C.9 on each Pi before attempting Mode B.
+> Without C.5 (FastDDS peers) and C.6 (bashrc env vars) the Pi will
+> not be discoverable from the laptop.
+
 ---
 
 ## 0. One-time setup
@@ -34,12 +39,20 @@ pip3 install flask numpy scipy requests
 sudo apt install -y ros-humble-rosbridge-server ros-humble-tf2-ros
 ```
 
-### Each Raspberry Pi (only needed for Mode B)
+### Each Raspberry Pi (Mode B only)
+
+If your Pi has **never been set up for this project**, jump to **§C
+First-time Pi setup** at the bottom of this file. Do that first, come
+back here.
+
+If the Pi was already set up in a previous session, just refresh:
 
 ```bash
 ssh pi1@192.168.1.101   # or pi2@192.168.1.102
 cd ~/swerve_transport_project
-git pull                 # picks up the new conveyor_base_node, ekf_node, navigation_node
+git fetch origin
+git checkout interface/v5-final     # only if you weren't already on it
+git pull                            # picks up new code
 cd ros2_ws
 colcon build --symlink-install
 source install/setup.bash
@@ -557,3 +570,221 @@ OpenCR firmware (already flashed):
   Sends     "POSE  x y theta vx vy wz\n"  (33 Hz)
             "IMU   ax ay az gx gy gz yaw\n"  (~11 Hz)
 ```
+
+---
+
+# C. First-time Pi setup (one-time, persists)
+
+Skip this entire section if a previous session already set up the Pi.
+Symptom that you can skip: `ros2 pkg list | grep swerve` from inside
+an SSH session prints `swerve_bringup` and `swerve_formation`.
+
+If anything below is already in place on your Pi (because of an
+earlier project), just rerun the missing steps and ignore the rest.
+
+## C.1 Prerequisites I'm assuming are done
+
+- Ubuntu 22.04 installed on the Pi (Server or Desktop, doesn't matter).
+- ROS 2 Humble installed at `/opt/ros/humble/` — check with
+  `ls /opt/ros/humble/setup.bash`. If missing, follow the official
+  install: <https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debians.html>.
+- Pi has a fixed IP on the lab network: pi1 = `192.168.1.101`, pi2 =
+  `192.168.1.102`. Test with `ping 192.168.1.114` (the laptop) and
+  `ping 192.168.1.10X` from the laptop.
+- SSH works: `ssh pi1@192.168.1.101` from the laptop, password
+  `raspberry` (or whatever you've set).
+- The OpenCR's USB cable is connected to the Pi. `ls /dev/ttyACM0`
+  on the Pi shows the device when the OpenCR is powered.
+
+## C.2 Clone the repo
+
+```bash
+ssh pi1@192.168.1.101                    # or pi2@192.168.1.102
+cd ~
+git clone https://github.com/Tankikun/swerve_transport_project.git
+cd swerve_transport_project
+git checkout interface/v5-final
+```
+
+If you'd rather use SSH (so you don't get prompted for HTTPS auth on
+push):
+
+```bash
+git remote set-url origin git@github.com:Tankikun/swerve_transport_project.git
+```
+
+## C.3 Install missing apt packages
+
+The lab network's apt mirror has been flaky in past sessions
+(HANDOFF_TO_TAN.md §3.2). If `apt update` complains about hash
+mismatches, follow the .deb workaround in that doc — but try the
+straight install first:
+
+```bash
+sudo apt update
+sudo apt install -y \
+    ros-humble-tf2-ros \
+    ros-humble-tf2-ros-py \
+    ros-humble-tf2-py \
+    python3-pip \
+    python3-serial \
+    python3-numpy \
+    python3-scipy
+```
+
+`tf2-ros-py` and `tf2-py` are needed by `conveyor_base_node`. Without
+them you'll get `ModuleNotFoundError: No module named 'tf2_ros'` at
+launch.
+
+## C.4 Install Dynamixel SDK (Python)
+
+The Pi side doesn't actually drive the motors itself (the OpenCR does
+that), so this is only needed if you want to run any of the diagnostic
+tools that talk to the bus directly:
+
+```bash
+pip3 install --user dynamixel-sdk
+```
+
+## C.5 FastDDS peers list
+
+This is **required** — without it the Pi cannot discover the laptop
+or the other Pi on a non-multicast network.
+
+Create `~/fastdds_peers.xml` on the Pi (NOT in the repo):
+
+```bash
+cat > ~/fastdds_peers.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <participant profile_name="default" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>127.0.0.1</address></udpv4></locator>
+          <locator><udpv4><address>192.168.1.101</address></udpv4></locator>
+          <locator><udpv4><address>192.168.1.102</address></udpv4></locator>
+          <locator><udpv4><address>192.168.1.114</address></udpv4></locator>
+        </initialPeersList>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
+EOF
+```
+
+The list is **identical on both Pis and the laptop** — every machine
+includes its own IP plus all peers. `127.0.0.1` is critical for
+intra-host discovery (omitting it caused subscriber-not-found bugs
+last session per HANDOFF_TO_TAN.md §2). Adjust the laptop IP
+(`192.168.1.114`) if your laptop's actual address differs — find it
+with `ip addr` on the laptop's WSL.
+
+## C.6 Bashrc — make ROS env vars permanent
+
+```bash
+cat >> ~/.bashrc << 'EOF'
+
+# === swerve_transport_project ===
+unset RMW_IMPLEMENTATION RMW_ZENOH_CONFIG_FILE
+export ROS_DOMAIN_ID=30
+export FASTRTPS_DEFAULT_PROFILES_FILE=$HOME/fastdds_peers.xml
+source /opt/ros/humble/setup.bash
+# Source the project workspace if present (created by C.7)
+[ -f ~/swerve_transport_project/ros2_ws/install/setup.bash ] && \
+    source ~/swerve_transport_project/ros2_ws/install/setup.bash
+EOF
+
+# Apply now
+source ~/.bashrc
+```
+
+After this, every new SSH session has the right env automatically.
+You no longer need to retype the §B.3 block.
+
+## C.7 Build the workspace
+
+```bash
+cd ~/swerve_transport_project/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+```
+
+`--symlink-install` means future `git pull`s with Python edits don't
+need a rebuild — they're picked up next time you launch a node.
+Setup.py changes (new entry points, new YAMLs) DO need a rebuild.
+
+## C.8 Serial port permissions
+
+The user that runs the launch needs `dialout` group access for
+`/dev/ttyACM0`. Check first:
+
+```bash
+groups
+# If "dialout" is NOT in the list:
+sudo usermod -aG dialout $USER
+sudo reboot
+# After reconnect, re-check with `groups`.
+```
+
+## C.9 Verify everything
+
+After C.8's reboot (or fresh SSH session if no reboot was needed):
+
+```bash
+# 1. ROS env
+echo $ROS_DOMAIN_ID                  # 30
+echo $FASTRTPS_DEFAULT_PROFILES_FILE # /home/piN/fastdds_peers.xml
+
+# 2. Workspace built and sourced
+ros2 pkg list | grep swerve          # swerve_bringup, swerve_formation
+
+# 3. Serial device exists and is readable
+ls -l /dev/ttyACM0                   # crw-rw---- root dialout
+groups | grep dialout                # confirms group access
+
+# 4. ROS daemon and topics work
+ros2 daemon stop && ros2 daemon start
+ros2 topic list                      # may be empty (nothing else launched)
+
+# 5. Launch dry-run — confirms our edited launch file parses
+ros2 launch swerve_bringup conveyor.launch.py --show-args | grep enable_slam
+# Should print:
+#   'enable_slam':
+#       When false, skip RTAB-Map / camera, ...
+#       (default: 'true')
+```
+
+If all five pass, the Pi is ready. Repeat C.1–C.9 for the other Pi
+(swap IP and hostname; everything else is identical).
+
+## C.10 Pi-to-Pi + laptop discovery test
+
+After both Pis are set up AND the laptop has the same env (see §B.3
+or replicate C.5–C.6 in WSL):
+
+On the laptop:
+```bash
+ros2 daemon stop && ros2 daemon start
+ros2 topic list           # empty until launches start
+```
+
+On pi1:
+```bash
+ros2 launch swerve_bringup conveyor.launch.py robot_id:=tb3_0 enable_slam:=false
+```
+
+Back on the laptop:
+```bash
+ros2 topic list           # should now show /tb3_0/odom, /tb3_0/imu, /tb3_0/cmd_vel, etc.
+ros2 topic hz /tb3_0/odom # ~33 Hz
+```
+
+If `ros2 topic list` from the laptop **doesn't** see the Pi's topics:
+- Verify FastDDS peer file lists the laptop's IP correctly.
+- Verify `ROS_DOMAIN_ID=30` matches on both.
+- Check firewall on both sides (`sudo ufw status` should be `inactive` for the lab).
+- Verify ping in both directions.
+
+Then `Ctrl-C` the launch on pi1, repeat on pi2. Once both robots
+respond independently, you're cleared to run §B end-to-end.
