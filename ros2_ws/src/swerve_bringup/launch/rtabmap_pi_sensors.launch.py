@@ -16,7 +16,7 @@ Why split:
   has ~10x the spare compute for visual SLAM.
 
 What runs on the Pi:
-  oak_camera.launch.py          — camera + base_link↔optical TF
+    oak_camera.launch.py          — camera + base_link→oak-d-base-frame mount TF + DepthAI URDF TF
   conveyor_base_node            — wheel odometry from OpenCR,
                                    publishes /{robot_id}/odom
   ekf_node                      — fuses /odom + /slam/pose,
@@ -88,8 +88,11 @@ def launch_setup(context, *args, **kwargs):
             'cam_x':      LaunchConfiguration('cam_x'),
             'cam_y':      LaunchConfiguration('cam_y'),
             'cam_z':      LaunchConfiguration('cam_z'),
-            'rgb_size':   '640x400',
-            'depth_size': '640x400',
+            'cam_roll':   LaunchConfiguration('cam_roll'),
+            'cam_pitch':  LaunchConfiguration('cam_pitch'),
+            'cam_yaw':    LaunchConfiguration('cam_yaw'),
+            'rgb_size':   '960x540',
+            'depth_size': '960x540',
         }.items(),
     ))
 
@@ -107,13 +110,18 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ))
 
-    # ── EKF — wheel /odom (+ /slam/pose later, in localization) → /ekf/odom
+    # ── EKF — wheel /odom + /imu (gyro Z fusion) (+ /slam/pose later,
+    # in localization) → /ekf/odom. Gyro fusion is the slip-immune yaw
+    # source that fixes RTAB-Map loop-closure rejection during mapping.
     if enable_ekf:
         actions.append(Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
-            parameters=[{'robot_id': robot_id}],
+            parameters=[{
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
+            }],
             output='screen',
         ))
 
@@ -132,19 +140,46 @@ def generate_launch_description():
             'fps', default_value='15',
             description='Camera FPS.'),
         DeclareLaunchArgument(
-            'cam_x', default_value='0.10',
-            description='Camera optical frame X offset from base_link [m].'),
+            'cam_x', default_value='',
+            description='Camera mount X offset from base_link to oak-d-base-frame [m]. '
+                        'Leave empty to use measured value from '
+                        '_CAMERA_MOUNT in oak_camera.launch.py.'),
         DeclareLaunchArgument(
-            'cam_y', default_value='0.00',
-            description='Camera Y offset from base_link [m].'),
+            'cam_y', default_value='',
+            description='Camera mount Y offset from base_link to oak-d-base-frame [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
-            'cam_z', default_value='0.15',
-            description='Camera Z offset from base_link [m].'),
+            'cam_z', default_value='',
+            description='Camera mount Z offset from base_link to oak-d-base-frame [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_roll', default_value='',
+            description='Camera mount roll from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_pitch', default_value='',
+            description='Camera mount pitch from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_yaw', default_value='',
+            description='Camera mount yaw from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'enable_base', default_value='true',
             description='Start conveyor_base_node.'),
         DeclareLaunchArgument(
             'enable_ekf', default_value='true',
             description='Start ekf_node.'),
+        DeclareLaunchArgument(
+            'gyro_z_sign', default_value='+1.0',
+            description='Sign of the IMU gyro Z reading. Default +1.0 set '
+                        'by physical bench yaw test on May 10 2026 AFTER '
+                        'the conveyor_base Madgwick-derivative workaround '
+                        '(commit e542832 — earlier 9e3209c test was '
+                        'meaningless because the firmware-supplied gz was '
+                        'identically zero). Re-verify physically when the '
+                        'firmware is patched to expose a real gyro '
+                        'accessor — the chip-direct sign may differ from '
+                        'the Madgwick-derived sign.'),
         OpaqueFunction(function=launch_setup),
     ])

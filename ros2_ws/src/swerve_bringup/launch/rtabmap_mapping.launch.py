@@ -10,14 +10,17 @@ Stack:
   oak_camera_node                 — depthai 3.x publisher (custom)
   static_transform_publisher      — base_link ↔ camera optical frame
   conveyor_base_node              — wheel odometry from OpenCR
-                                     publishes /{robot_id}/odom
+                                     publishes /{robot_id}/odom + /imu
+  ekf_node                        — fuses /odom (translation) + /imu
+                                     (gyro Z, slip-immune yaw rate),
+                                     publishes /{robot_id}/ekf/odom
   rtabmap (rtabmap_slam)          — RGB-D SLAM, mapping mode, builds .db
 
 Inputs to rtabmap:
   rgb           : /{robot_id}/camera/rgb/image_raw
   rgb_info      : /{robot_id}/camera/rgb/camera_info
   depth         : /{robot_id}/camera/depth/image_raw
-  odom          : /{robot_id}/odom
+  odom          : /{robot_id}/ekf/odom (IMU-fused, slip-immune yaw)
   TF chain      : odom → base_link → camera_optical (provided by
                   conveyor_base_node + the static TF below)
 
@@ -49,6 +52,7 @@ laptop-side .deb workaround documented in CAMERA_NOTES.md.
 
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -67,6 +71,7 @@ def launch_setup(context, *args, **kwargs):
     db_path      = LaunchConfiguration('db_path').perform(context)
     fps          = LaunchConfiguration('fps').perform(context)
     enable_base  = LaunchConfiguration('enable_base').perform(context).lower() in ('true', '1', 'yes')
+    enable_ekf   = LaunchConfiguration('enable_ekf').perform(context).lower() in ('true', '1', 'yes')
     suffix       = f'_{robot_id}'
 
     optical_frame = f'{robot_id}_oak_rgb_camera_optical_frame'
@@ -76,6 +81,11 @@ def launch_setup(context, *args, **kwargs):
     # Expand ~ in db_path
     db_path = os.path.expanduser(db_path)
     os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
+
+    config_path = os.path.join(
+        get_package_share_directory('swerve_bringup'), 'config', 'rtabmap_mapping.yaml'
+    )
+
     actions = []
 
     # ── Camera (oak_camera.launch.py) ────────────────────────────────────
@@ -89,6 +99,9 @@ def launch_setup(context, *args, **kwargs):
             'cam_x':      LaunchConfiguration('cam_x'),
             'cam_y':      LaunchConfiguration('cam_y'),
             'cam_z':      LaunchConfiguration('cam_z'),
+            'cam_roll':   LaunchConfiguration('cam_roll'),
+            'cam_pitch':  LaunchConfiguration('cam_pitch'),
+            'cam_yaw':    LaunchConfiguration('cam_yaw'),
             'rgb_size':   '640x400',
             'depth_size': '640x400',
         }.items(),
@@ -108,6 +121,23 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ))
 
+    # ── EKF — wheel /odom + /imu (gyro Z fusion) → /ekf/odom. Mapping
+    # used to consume raw /odom directly; switching to /ekf/odom here
+    # gives RTAB-Map a slip-immune yaw signal (the dominant carrier of
+    # odom drift on this swerve platform) which fixes loop-closure
+    # rejection caused by bad PnP priors.
+    if enable_ekf:
+        actions.append(Node(
+            package='swerve_formation',
+            executable='ekf_node',
+            name='ekf_node' + suffix,
+            parameters=[{
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
+            }],
+            output='screen',
+        ))
+
     # ── RTAB-Map SLAM (mapping mode) ─────────────────────────────────────
     # Subscribes RGB + depth + odom; outputs /rtabmap/cloud_map and the
     # database file. Will fail to launch if ros-humble-rtabmap-slam is
@@ -117,32 +147,31 @@ def launch_setup(context, *args, **kwargs):
         executable='rtabmap',
         name='rtabmap' + suffix,
         output='screen',
-        parameters=[{
-            'frame_id':            base_link,
-            'odom_frame_id':       odom_frame,
-            'map_frame_id':        'map',
-            'subscribe_depth':     True,
-            'subscribe_rgb':       True,
-            'subscribe_rgbd':      False,
-            'subscribe_scan':      False,
-            'subscribe_scan_cloud': False,
-            'approx_sync':         True,
-            'queue_size':          30,
-            'database_path':       db_path,
-            # Mapping mode (NOT localization-only)
-            'Mem/IncrementalMemory': 'True',
-            # Save database on exit
-            'Mem/InitWMWithAllNodes': 'False',
-            # Loop-closure tuning — defaults are reasonable; tighten
-            # later if false positives in feature-poor rooms.
-            'RGBD/OptimizeFromGraphEnd': 'True',
-            'RGBD/AngularUpdate':         '0.01',
-            'RGBD/LinearUpdate':          '0.01',
-        }],
+        parameters=[
+            config_path,
+            {
+                # Robot-specific overrides (cannot live in the shared YAML)
+                'frame_id':             base_link,
+                'odom_frame_id':        odom_frame,
+                'database_path':        db_path,
+                # Not in YAML; keep existing behaviour
+                'subscribe_rgbd':       False,
+                'subscribe_scan':       False,
+                'subscribe_scan_cloud': False,
+                'RGBD/OptimizeFromGraphEnd': 'True',
+            },
+        ],
         remappings=[
             ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
             ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
             ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
+            # IMU-fused odom during mapping. ekf_node fuses the gyro Z
+            # rate (slip-immune) over the wheel-derived yaw, eliminating
+            # the per-turn drift that was poisoning RTAB-Map's PnP
+            # priors at loop-closure verification. The
+            # {robot_id}_odom→base_link TF is still wheel-derived,
+            # mirroring the localization launches; small divergences
+            # during a mapping pass are tolerable.
             ('odom',              f'/{robot_id}/ekf/odom'),
             # Per-robot scoping (mirrors rtabmap_localization.launch.py).
             # Even in mapping mode, namespacing keeps logs / cloud_map /
@@ -175,17 +204,50 @@ def generate_launch_description():
             'fps', default_value='15',
             description='Camera FPS.'),
         DeclareLaunchArgument(
-            'cam_x', default_value='0.10',
-            description='Camera optical frame X offset from base_link [m].'),
+            'cam_x', default_value='',
+            description='Camera mount X offset from base_link to oak-d-base-frame [m]. '
+                        'Leave empty to use measured value from '
+                        '_CAMERA_MOUNT in oak_camera.launch.py.'),
         DeclareLaunchArgument(
-            'cam_y', default_value='0.00',
-            description='Camera Y offset from base_link [m].'),
+            'cam_y', default_value='',
+            description='Camera mount Y offset from base_link to oak-d-base-frame [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
-            'cam_z', default_value='0.15',
-            description='Camera Z offset from base_link [m].'),
+            'cam_z', default_value='',
+            description='Camera mount Z offset from base_link to oak-d-base-frame [m]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_roll', default_value='',
+            description='Camera mount roll from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_pitch', default_value='',
+            description='Camera mount pitch from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
+        DeclareLaunchArgument(
+            'cam_yaw', default_value='',
+            description='Camera mount yaw from base_link to oak-d-base-frame [rad]. Leave empty '
+                        'to use _CAMERA_MOUNT.'),
         DeclareLaunchArgument(
             'enable_base', default_value='true',
             description='Start conveyor_base_node. Set false if odometry '
                         'is being published by a separate launch already.'),
+        DeclareLaunchArgument(
+            'enable_ekf', default_value='true',
+            description='Start ekf_node so RTAB-Map sees IMU-fused odom. '
+                        'Set false to feed RTAB-Map raw /odom (legacy '
+                        'pre-IMU-fusion behaviour).'),
+        DeclareLaunchArgument(
+            'gyro_z_sign', default_value='+1.0',
+            description='Sign of the IMU gyro Z reading. Default +1.0 set '
+                        'by physical bench yaw test on May 10 2026 AFTER '
+                        'the conveyor_base Madgwick-derivative workaround '
+                        '(commit e542832 — earlier 9e3209c test was '
+                        'meaningless because the firmware-supplied gz was '
+                        'identically zero, so the sign had no observable '
+                        'effect). Re-verify physically when the firmware '
+                        'is patched to expose a real gyro accessor — the '
+                        'chip-direct sign may differ from the '
+                        'Madgwick-derived sign.'),
         OpaqueFunction(function=launch_setup),
     ])

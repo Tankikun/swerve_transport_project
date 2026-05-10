@@ -62,6 +62,7 @@ Shared-map requirement (multi-robot):
 
 import os
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -83,35 +84,41 @@ def launch_setup(context, *args, **kwargs):
               f'a pre-built database. Run rtabmap_laptop_mapping.launch.py '
               f'first.')
 
+    config = os.path.join(
+        get_package_share_directory('swerve_bringup'),
+        'config', 'rtabmap_localization.yaml')
+
     return [
         Node(
             package='rtabmap_slam',
             executable='rtabmap',
             name='rtabmap' + suffix,
             output='screen',
-            parameters=[{
-                'frame_id':            base_link,
-                'odom_frame_id':       odom_frame,
-                'map_frame_id':        'map',
-                'subscribe_depth':     True,
-                'subscribe_rgb':       True,
-                'subscribe_rgbd':      False,
-                'subscribe_scan':      False,
-                'subscribe_scan_cloud': False,
-                'approx_sync':         True,
-                'queue_size':          30,
-                'database_path':       db_path,
-                # Localization-only.
-                'Mem/IncrementalMemory':    'False',
-                'Mem/InitWMWithAllNodes':   'True',
-                'RGBD/OptimizeFromGraphEnd': 'True',
-                'RGBD/AngularUpdate':         '0.01',
-                'RGBD/LinearUpdate':          '0.01',
-            }],
+            parameters=[
+                config,
+                {
+                    # Robot-specific overrides — derived from launch args.
+                    'frame_id':      base_link,
+                    'odom_frame_id': odom_frame,
+                    'database_path': db_path,
+                    # Not in the shared YAML.
+                    'subscribe_rgbd':       False,
+                    'subscribe_scan':       False,
+                    'subscribe_scan_cloud': False,
+                    'RGBD/OptimizeFromGraphEnd': 'True',
+                    'RGBD/AngularUpdate':        '0.01',
+                    'RGBD/LinearUpdate':         '0.01',
+                },
+            ],
             remappings=[
                 ('rgb/image',         f'/{robot_id}/camera/rgb/image_raw'),
                 ('rgb/camera_info',   f'/{robot_id}/camera/rgb/camera_info'),
                 ('depth/image',       f'/{robot_id}/camera/depth/image_raw'),
+                # Fused odom — in localization mode ekf_node is the sole
+                # reader of raw /odom. rtabmap consumes ekf's output as a
+                # cleaner search prior. The static .db (Mem/IncrementalMemory
+                # false) anchors visual matches against fixed keyframes, so
+                # the ekf→rtabmap→ekf path does NOT drift.
                 ('odom',              f'/{robot_id}/ekf/odom'),
                 ('localization_pose', f'/{robot_id}/rtabmap/localization_pose'),
                 ('info',              f'/{robot_id}/rtabmap/info'),

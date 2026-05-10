@@ -1,0 +1,51 @@
+# config/rtabmap_localization.yaml
+/**:
+  ros__parameters:
+    # Mode: localization only
+    Mem/IncrementalMemory: "false"
+    Mem/InitWMWithAllNodes: "true"
+
+    # Database path AND frame_id / odom_frame_id MUST be provided by the
+    # launch configuration. They are per-robot ({robot_id}_base_link,
+    # {robot_id}_odom) and have no safe default — leaving them as
+    # "base_link" / "odom" silently breaks the multi-robot TF tree.
+    map_frame_id: "map"
+
+    # Subscriptions
+    subscribe_depth: true
+    subscribe_rgb: true
+    subscribe_odom: true
+    approx_sync: true
+    approx_sync_max_interval: 0.05
+    queue_size: 10
+
+    # QoS for image inputs. depthai_ros_driver publishes with sensor_data
+    # QoS (BEST_EFFORT). rtabmap defaults to RELIABLE on these inputs and
+    # would silently fail to subscribe, so override to BEST_EFFORT (=2).
+    # Odom stays on the default (RELIABLE) because ekf_node publishes that
+    # way. Convention: 0=SystemDefault, 1=Reliable, 2=BestEffort.
+    qos_image: 2
+    qos_camera_info: 2
+    
+    # Feature detector: GFTT + ORB for swerve rotation robustness
+    Kp/DetectorStrategy: "6"
+    Kp/MaxFeatures: "600"
+    Kp/RoiRatios: "0.0 0.0 0.0 0.3"
+    
+    # Performance tuning for RPi4
+    Mem/ImagePreDecimation: "2"
+    Mem/DepthDecimation: "2"
+    Rtabmap/DetectionRate: "5.0"
+    
+    # Geometry
+    Reg/Force3DoF: "true"
+    Vis/EstimationType: "1"
+    Vis/MinInliers: "15"
+    Vis/RoiRatios: "0.0 0.0 0.0 0.3"
+    
+    # Disable expensive features not needed for localization
+    RGBD/ProximityBySpace: "false"
+    RGBD/ProximityByTime: "false"
+    
+    # Stats publishing (useful during validation)
+    Rtabmap/PublishStats: "true"

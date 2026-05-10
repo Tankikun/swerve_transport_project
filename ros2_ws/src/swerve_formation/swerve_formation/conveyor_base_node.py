@@ -3,12 +3,10 @@ conveyor_base_node.py
 ---------------------
 Lifecycle serial bridge: /{robot_id}/cmd_vel  →  OpenCR USB-CDC
                          OpenCR POSE line     →  /{robot_id}/odom  +  TF
-                         OpenCR IMU  line     →  /{robot_id}/imu
 
 Serial protocol (115200 baud):
   Send:    "x_dot y_dot gamma_dot\n"       (m/s, m/s, rad/s)
-  Receive: "POSE x y theta vx vy wz\n"    (~33 Hz, firmware dead-reckoning)
-           "IMU  ax ay az gx gy gz yaw\n" (~10 Hz, MPU-9250 + AHRS)
+  Receive: "POSE x y theta vx vy wz\n"    (~3 Hz, firmware dead-reckoning)
 
 Lifecycle transitions:
   configure  — opens serial port, creates sub/pub/timers
@@ -25,8 +23,8 @@ import rclpy
 import serial
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import Imu
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
+from sensor_msgs.msg import Imu
 from std_srvs.srv import Trigger
 import tf2_ros
 
@@ -40,6 +38,18 @@ _MOD_PY          = [ _HALF_W, -_HALF_W,  _HALF_W, -_HALF_W]
 _DXL_POS_TO_RAD  = (2.0 * math.pi) / 4096.0
 _DXL_VEL_TO_RADS = 0.229 * (2.0 * math.pi) / 60.0
 _STEER_CENTER    = 2048
+
+# ── IMU covariances (MPU-9250 on OpenCR, datasheet-typical, rounded up
+# for headroom against quantization and bias drift) ──────────────────────────
+# Gyro: noise density ~0.01 °/s/√Hz; bandwidth/quantization push the per-axis
+# variance to roughly (0.01 rad/s)². Used by ekf_node to weight gyro fusion.
+_IMU_GYRO_VAR  = 1.0e-4
+# Accel: noise density ~300 µg/√Hz at ~100 Hz BW gives ~0.1 m/s² std per axis.
+_IMU_ACCEL_VAR = 1.0e-2
+# Madgwick-filtered absolute yaw drifts unboundedly without a magnetometer
+# correction we can trust on a metal chassis, so we explicitly mark the
+# orientation field as "not provided" per ROS convention (covariance[0] = -1).
+# Consumers will ignore the orientation quaternion and fuse only the gyro.
 
 
 # NOTE — Legacy firmware-rollback safety net.
@@ -109,6 +119,18 @@ class ConveyorBaseNode(Node):
         self._line_buf = ''
         self._odom_x = self._odom_y = self._odom_theta = 0.0
 
+        # Yaw-rate-from-yaw derivation state. The flashed firmware emits
+        # gx/gy/gz = 0 because its OpenCR cIMU library version does not
+        # populate `imu.gyroData[]` (Madgwick's internal gyro read works,
+        # which is why `imu.angle[2]` updates correctly, but the public
+        # accessor in this lib version is silently zero). Until the
+        # firmware is patched to use the right accessor (likely
+        # `imu.SEN.gyroRAW[]` or `imu.gyroRAW[]`), we derive gyro_z
+        # from successive Madgwick yaw outputs in `_handle_imu` so
+        # ekf_node still gets a slip-immune yaw signal.
+        self._prev_madgwick_yaw: float | None = None
+        self._prev_madgwick_yaw_t: float | None = None
+
     # ------------------------------------------------------------------
     # Lifecycle callbacks
     # ------------------------------------------------------------------
@@ -140,10 +162,14 @@ class ConveyorBaseNode(Node):
             Twist, f'/{robot_id}/cmd_vel', self._cmd_cb, 10
         )
         self._odom_pub       = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
-        # IMU pub: parses the firmware's "IMU …" line (10 Hz) into a proper
-        # sensor_msgs/Imu so ekf_node can fuse yaw without RTAB-Map being up.
-        # QoS depth 50 covers brief network hiccups without dropping frames.
-        self._imu_pub        = self.create_publisher(Imu, f'/{robot_id}/imu', 50)
+        # Slip-immune yaw-rate source for ekf_node. Frame is reported in
+        # base_link rather than a separate imu_link because the OpenCR is
+        # mounted flat on the chassis (Z-up coincident) and we don't yet
+        # publish an imu_link static TF — declaring a frame_id we can't
+        # transform from would break any tf2 lookup. The only fused channel
+        # is gyro Z, which is rotation-invariant under that flat-mount
+        # assumption.
+        self._imu_pub        = self.create_publisher(Imu, f'/{robot_id}/imu', 10)
         self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         # Read serial at 50 Hz (was 10 Hz). Firmware now emits POSE at
         # 33 Hz (ODOM_DIV=1, see turtlebot3_conveyor.ino), and EKF +
@@ -269,24 +295,18 @@ class ConveyorBaseNode(Node):
             return
         self._publish_odom(x, y, theta, vx, vy, wz)
 
-    # ── IMU line ──────────────────────────────────────────────────────────────
-    # Firmware emits 'IMU ax ay az gx gy gz yaw' at ~10 Hz (see
-    # turtlebot3_conveyor.ino). We pass it straight through as a
-    # sensor_msgs/Imu so ekf_node can fuse yaw via /{robot_id}/imu.
-    #
-    # Covariance values reflect the MPU-9250's typical performance after
-    # the firmware's complementary filter has converged; they aren't
-    # consumed by ekf_node (which uses a fixed R from a parameter), but
-    # downstream nodes that DO inspect covariance need them populated.
-    # orientation_covariance[0] >= 0 signals "orientation is provided"
-    # — without this, ekf_node will skip the IMU correction.
-
-    _IMU_ORIENT_VAR = 0.0025   # ~3° 1-σ on yaw
-    _IMU_GYRO_VAR  = 0.0001   # ~0.6°/s 1-σ
-    _IMU_ACCEL_VAR = 0.0025   # ~0.05 m/s² 1-σ
-
     def _handle_imu(self, line: str):
-        """Firmware: 'IMU ax ay az gx gy gz yaw' (m/s², rad/s, rad)."""
+        """Firmware emits 'IMU ax ay az gx gy gz yaw' at ~11 Hz.
+        Republishes as sensor_msgs/Imu so ekf_node can fuse the gyro-Z
+        rate, which is slip-immune (unlike the wheel-derived wz).
+
+        Library-bug workaround (May 2026): the OpenCR cIMU version on
+        the bot emits gx=gy=gz=0 because its update() does not write
+        `imu.gyroData[]`. The Madgwick yaw output (last field on the
+        line) DOES update, so we derive gyro_z from successive yaw
+        values whenever the firmware-supplied gz is exactly zero.
+        Remove this fallback once the firmware is patched.
+        """
         parts = line.split()
         if len(parts) != 8:
             return
@@ -294,44 +314,58 @@ class ConveyorBaseNode(Node):
             ax, ay, az, gx, gy, gz, yaw = (float(p) for p in parts[1:])
         except ValueError:
             return
+        if self._imu_pub is None:
+            return
 
-        msg = Imu()
-        msg.header.stamp    = self.get_clock().now().to_msg()
-        msg.header.frame_id = self._base_frame_id
+        # When firmware-reported gz is identically zero (library bug —
+        # see __init__), substitute a derivative of Madgwick yaw. dt is
+        # bounded so a missed sample doesn't produce a huge spurious
+        # rate; if it falls outside [0, 0.5] s we skip this sample and
+        # keep gz = 0 (ekf_node falls back to wheel omega for that step).
+        now_t = time.time()
+        if gz == 0.0:
+            if (self._prev_madgwick_yaw is not None
+                    and self._prev_madgwick_yaw_t is not None):
+                dt = now_t - self._prev_madgwick_yaw_t
+                if 0.0 < dt < 0.5:
+                    dyaw = yaw - self._prev_madgwick_yaw
+                    while dyaw >  math.pi: dyaw -= 2.0 * math.pi
+                    while dyaw < -math.pi: dyaw += 2.0 * math.pi
+                    gz = dyaw / dt
+        self._prev_madgwick_yaw   = yaw
+        self._prev_madgwick_yaw_t = now_t
+        try:
+            msg = Imu()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = self._base_frame_id
 
-        # Yaw → quaternion (rotation about Z, flat-floor assumption — no
-        # roll/pitch reported by the firmware's filter).
-        msg.orientation.x = 0.0
-        msg.orientation.y = 0.0
-        msg.orientation.z = math.sin(yaw / 2.0)
-        msg.orientation.w = math.cos(yaw / 2.0)
-        # Diagonal covariance: roll/pitch unknown (large) so consumers know
-        # only yaw is meaningful; yaw uses _IMU_ORIENT_VAR.
-        msg.orientation_covariance = [
-            1e6, 0.0, 0.0,
-            0.0, 1e6, 0.0,
-            0.0, 0.0, self._IMU_ORIENT_VAR,
-        ]
+            half = yaw / 2.0
+            msg.orientation.x = 0.0
+            msg.orientation.y = 0.0
+            msg.orientation.z = math.sin(half)
+            msg.orientation.w = math.cos(half)
+            # Madgwick yaw drifts unboundedly without magnetometer correction,
+            # so flag the orientation field as "not provided" — consumers
+            # that respect REP-145 will skip orientation fusion entirely.
+            msg.orientation_covariance[0] = -1.0
 
-        msg.angular_velocity.x = gx
-        msg.angular_velocity.y = gy
-        msg.angular_velocity.z = gz
-        msg.angular_velocity_covariance = [
-            self._IMU_GYRO_VAR, 0.0, 0.0,
-            0.0, self._IMU_GYRO_VAR, 0.0,
-            0.0, 0.0, self._IMU_GYRO_VAR,
-        ]
+            msg.angular_velocity.x = gx
+            msg.angular_velocity.y = gy
+            msg.angular_velocity.z = gz
+            msg.angular_velocity_covariance[0] = _IMU_GYRO_VAR
+            msg.angular_velocity_covariance[4] = _IMU_GYRO_VAR
+            msg.angular_velocity_covariance[8] = _IMU_GYRO_VAR
 
-        msg.linear_acceleration.x = ax
-        msg.linear_acceleration.y = ay
-        msg.linear_acceleration.z = az
-        msg.linear_acceleration_covariance = [
-            self._IMU_ACCEL_VAR, 0.0, 0.0,
-            0.0, self._IMU_ACCEL_VAR, 0.0,
-            0.0, 0.0, self._IMU_ACCEL_VAR,
-        ]
+            msg.linear_acceleration.x = ax
+            msg.linear_acceleration.y = ay
+            msg.linear_acceleration.z = az
+            msg.linear_acceleration_covariance[0] = _IMU_ACCEL_VAR
+            msg.linear_acceleration_covariance[4] = _IMU_ACCEL_VAR
+            msg.linear_acceleration_covariance[8] = _IMU_ACCEL_VAR
 
-        self._imu_pub.publish(msg)
+            self._imu_pub.publish(msg)
+        except Exception as e:
+            self.get_logger().error(f'publish_imu failed: {e}')
 
     # NOTE — Legacy firmware-rollback safety net.
     # Only invoked when the OpenCR firmware sends pre-2024 "ODOM j:... w:..."

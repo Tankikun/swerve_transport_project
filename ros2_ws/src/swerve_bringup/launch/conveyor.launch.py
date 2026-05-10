@@ -121,15 +121,16 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # EKF — fuses raw /odom (prediction) + /imu (yaw correction)
-        # + /slam/pose (full pose correction from RTAB-Map). SLAM is
-        # mandatory in this build; without it the filter drifts.
+        # EKF — wheel odom prediction + IMU gyro Z (slip-immune yaw rate)
+        # in the prediction step + RTAB-Map /slam/pose correction. SLAM
+        # is mandatory in this build; without it the filter drifts.
         Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
             parameters=[{
-                'robot_id': robot_id,
+                'robot_id':    robot_id,
+                'gyro_z_sign': LaunchConfiguration('gyro_z_sign'),
             }],
             output='screen',
         ),
@@ -230,5 +231,11 @@ def generate_launch_description():
                                            'residual drift over the run. Falls '
                                            'back to pure feedforward if either '
                                            'neighbour pose is missing.')),
+        DeclareLaunchArgument('gyro_z_sign', default_value='1.0',
+                              description=('Sign of the IMU gyro Z reading. '
+                                           'Set to -1.0 if a bench yaw test '
+                                           'shows ekf yaw decreasing under '
+                                           'physical CCW rotation (depends on '
+                                           'how the OpenCR is mounted).')),
         OpaqueFunction(function=launch_setup),
     ])

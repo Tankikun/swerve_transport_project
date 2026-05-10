@@ -1,0 +1,107 @@
+# config/rtabmap_mapping.yaml
+/**:
+  ros__parameters:
+    # Mode: incremental mapping (the default, but explicit is better)
+    Mem/IncrementalMemory: "true"
+    Mem/InitWMWithAllNodes: "false"
+
+    # Database path AND frame_id / odom_frame_id MUST be provided by the
+    # launch configuration. They are per-robot ({robot_id}_base_link,
+    # {robot_id}_odom) and have no safe default — leaving them as
+    # "base_link" / "odom" silently breaks the multi-robot TF tree.
+    map_frame_id: "map"
+
+    # Subscriptions
+    subscribe_depth: true
+    subscribe_rgb: true
+    subscribe_odom: true
+    approx_sync: true
+    approx_sync_max_interval: 0.05
+    queue_size: 10
+
+    # QoS for image inputs. depthai_ros_driver publishes with sensor_data
+    # QoS (BEST_EFFORT). rtabmap defaults to RELIABLE on these inputs and
+    # would silently fail to subscribe, so override to BEST_EFFORT (=2).
+    # Odom stays on the default (RELIABLE) because ekf_node / conveyor_base
+    # publish that way. Convention: 0=SystemDefault, 1=Reliable, 2=BestEffort.
+    qos_image: 2
+    qos_camera_info: 2
+    
+    # Feature detector: more features for richer map
+    Kp/DetectorStrategy: "6"          # GFTT + ORB
+    Kp/MaxFeatures: "800"             # higher than localization
+    Kp/RoiRatios: "0.0 0.0 0.0 0.3"
+    
+    # Image quality: full resolution for mapping
+    Mem/ImagePreDecimation: "1"       # no decimation, laptop can handle it
+    Mem/DepthDecimation: "1"
+    
+    # Keyframe density
+    RGBD/LinearUpdate: "0.1"          # add keyframe every 10 cm
+    RGBD/AngularUpdate: "0.2"         # or every ~11.5 degrees
+    
+    # Loop closure: PnP inlier threshold. Same value as localization
+    # (15). Default is 20; we lowered both to give more loop closures
+    # a chance to pass verification on this feature-sparse indoor map.
+    Vis/MinInliers: "15"
+    Vis/EstimationType: "1"           # PnP
+    Vis/RoiRatios: "0.0 0.0 0.0 0.3"
+    Reg/Force3DoF: "true"             # ground plane constraint
+    
+    # Loop closure detection
+    Rtabmap/LoopThr: "0.11"           # default Bayesian threshold
+    Rtabmap/DetectionRate: "2.0"      # 2 Hz — more chances per second for
+                                      # PnP verification to land. Was 1 Hz;
+                                      # doubled because in failure runs
+                                      # appearance matched (Stage 1) but
+                                      # geometric verification (Stage 2)
+                                      # rejected, and a 1-second cadence
+                                      # gave only one shot before the
+                                      # camera viewpoint moved. Cheap on
+                                      # the laptop.
+
+    # Memory management
+    Mem/STMSize: "30"                 # short-term memory size. Was 10;
+                                      # with RGBD/AngularUpdate=0.2 (~11.5°
+                                      # per keyframe), 10 nodes covered
+                                      # only ~115° of yaw history — less
+                                      # than a full in-place rotation, so
+                                      # proximity-by-time loop closure
+                                      # could not see across the back side
+                                      # of a yaw sweep from the same
+                                      # location.
+    Mem/RehearsalSimilarity: "0.6"    # suppress redundant keyframes
+    
+    # Proximity detection: enabled during mapping (default)
+    RGBD/ProximityBySpace: "true"
+    RGBD/ProximityByTime: "true"
+    RGBD/ProximityMaxGraphDepth: "50"
+    
+    # Graph optimization
+    Optimizer/Strategy: "1"           # g2o
+    Optimizer/Iterations: "20"
+    Optimizer/Robust: "true"          # robust kernel for outlier resistance
+
+    # Loop-closure optimization-error gate. RTAB default is 3.0. After
+    # the gyro-fusion fixes (e542832 + 754fa1f), the per-frame
+    # `Loop/Optimization_max_error_ratio` distribution from new2.db is
+    # bimodal: a small clean cluster at ratio 7.6–17.1 and a big cluster
+    # tightly packed at ~25.4 (residual ~28° drift), with one 402 outlier.
+    # Reprocessing the same .db at gate=30 vs gate=50 yields
+    # 147 vs 204 closures — keeps essentially the same map (p50 angular
+    # error 27° vs 28°, max 175° vs 177°) while rejecting the 402-ratio
+    # outlier and giving more headroom against future bad loops.
+    # Gate=30 is the data-justified sweet spot today; lower toward the
+    # default 3.0 once the firmware exposes a real gyro accessor and
+    # residual drift drops into single digits.
+    RGBD/OptimizeMaxError: "30.0"
+    
+    # Database settings
+    Db/TargetVersion: ""              # use latest DB format
+    
+    # Stats and debug
+    Rtabmap/PublishStats: "true"
+    Rtabmap/PublishLastSignature: "true"
+
+    # Loop closure aggressiveness
+    RGBD/LoopClosureReextractFeatures: "true"  # re-extract features for loop closure detection
