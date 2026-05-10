@@ -187,11 +187,23 @@ ros2 launch swerve_bringup conveyor.launch.py \
 `my_offset:=0.0,0.25` says R1 sits **+0.25 m on the formation's body Y
 axis** (the left side). Half of the 50 cm object length.
 
-What `enable_slam:=false` does:
-- skips RTAB-Map and the camera entirely
-- sets `ekf_node.use_slam:=false` so the EKF runs on wheel odom + IMU only
-- adds a static `map → tb3_0_odom` identity TF so the GUI's `map`-frame
-  click can be interpreted as the EKF's state directly
+What the defaults give you (**no need to type these**):
+
+- **`enable_slam:=false`** (you typed this above) — skips RTAB-Map /
+  camera; EKF runs on wheel odom + IMU only; a static `map →
+  tb3_0_odom` identity TF stands in for the SLAM-published one.
+- **`enable_consensus:=true`** (default) — laplacian_formation_node
+  uses **both** robots' `/ekf/odom` to compute the inter-robot pose
+  error and adds a small velocity correction to keep the formation
+  rigid against wheel-odom drift. With consensus off, the two robots
+  rely entirely on feedforward decoding of `/virtual_center/cmd_vel`
+  — fine for a few seconds but accumulates a few cm of drift over
+  the demo run.
+- **`k_gain:=0.1`** (default) — the consensus gain, in
+  velocity-per-metre-of-error units. 0.1 gives gentle mm/s
+  corrections for cm-scale errors. If the formation visibly wobbles
+  during the run, drop to `k_gain:=0.05`. If it drifts apart by more
+  than ~10 cm, raise to `0.2`.
 
 You should see a stream of `POSE …` and `IMU …` log lines from
 `conveyor_base_node` (mirroring the OpenCR's serial output) plus the
@@ -420,6 +432,8 @@ to center on next launch.
 | Object length (Mode B) | `my_offset` / `neighbor_offsets` launch args on each Pi (both robots to ±half the desired length); update §B.1 placement to match |
 | Walking speed (Mode A) | `--speed 0.25` on Terminal 2 |
 | Walking speed (Mode B) | `MAX_LINEAR` constant in `navigation_node.py` (default 0.18 — keep below the OpenCR's ~0.198 m/s firmware clamp) |
+| Formation drift correction strength (Mode B) | `k_gain:=0.1` on each Pi's launch (raise → tighter formation but risk oscillation, lower → looser but smoother) |
+| Disable formation drift correction (Mode B) | `enable_consensus:=false` on each Pi's launch — robots run pure feedforward, drift independently |
 | Number of waypoints in the planned path | `target_spacing` parameter in `apf_smooth_path()` in `interface/astar_planner.py` (smaller → more dots, larger → fewer) |
 | Re-localization delay (Mode A) | `--delay-sec 0.5` on the fake publisher |
 | Path smoother gains (advanced) | `apf_smooth_path()` defaults in `astar_planner.py` |
@@ -494,12 +508,28 @@ to center on next launch.
 
 ### Mode B — Robot drifts away from formation
 
-- The Laplacian consensus correction is **off** by default
-  (`enable_consensus:=false` in `laplacian_formation_node.py`). With
-  IMU + odom only, each robot's pose drifts independently — over a
-  ~14 s run this is usually <10 cm, fine for the demo. If it's worse,
-  re-flash the OpenCR after disconnecting the USB cable from the
-  Dynamixel hub side first (sometimes the SCB sees a stale handshake).
+- The Laplacian consensus correction is **on** by default in this
+  branch (`enable_consensus:=true` in `conveyor.launch.py`). It uses
+  both robots' `/ekf/odom` to compute the inter-robot pose error
+  and applies a small velocity correction to keep the formation rigid
+  against wheel-odom drift. Verify it's actually running:
+  ```bash
+  ros2 topic echo /formation/state --once   # should show 2 poses
+  ros2 param get /laplacian_formation_node_tb3_0 enable_consensus  # → true
+  ```
+  If `enable_consensus:=false` somehow leaked through (you passed it
+  on the launch line), the two robots fall back to pure feedforward
+  and accumulate independent drift.
+- If the formation **wobbles or oscillates**, the gain is too high.
+  Restart the launch on each Pi with `k_gain:=0.05`.
+- If the formation **drifts apart by >10 cm** during the run, the
+  gain is too low. Restart with `k_gain:=0.2`. Don't go above ~0.3 —
+  the consensus-correction term will dominate the feedforward and
+  the robots oscillate around each other.
+- For consensus to fire, both robots must have published a recent
+  `/{rid}/ekf/odom` within 1.0 s. If only one robot is up (you're
+  testing alone), the laplacian node falls back to feedforward
+  silently — that's expected.
 
 ### Server crashes with `Address already in use`
 
@@ -561,7 +591,10 @@ each Pi (conveyor.launch.py enable_slam:=false):
   ├─ ekf_node              /odom + /imu + /initialpose → /tb3_X/ekf/odom
   ├─ leader_election_node  /formation/leader
   ├─ navigation_node       /formation/path → /virtual_center/cmd_vel  (leader-only)
-  ├─ laplacian_formation   /virtual_center/cmd_vel + my_offset → /tb3_X/cmd_vel
+  ├─ laplacian_formation   feedforward: /virtual_center/cmd_vel + my_offset
+  │                        consensus  : /tb3_0/ekf/odom + /tb3_1/ekf/odom
+  │                                     (closes loop on inter-robot pose)
+  │                        → /tb3_X/cmd_vel
   ├─ formation_size_node   formation envelope (leader-only)
   └─ static_transform_publisher  map → tb3_X_odom (identity, no-SLAM stand-in)
 

@@ -49,6 +49,16 @@ def launch_setup(context, *args, **kwargs):
     # SLAM off, a static identity TF stands in.
     enable_slam       = (LaunchConfiguration('enable_slam').perform(context).lower()
                          in ('true', '1', 'yes', 'on'))
+    # Closed-loop formation correction. Each robot's
+    # laplacian_formation_node already subscribes to its own AND its
+    # neighbour's `/{rid}/ekf/odom`. With consensus on, the relative
+    # pose error feeds back into the per-robot twist as a small
+    # correction (k_gain · (actual_world − desired_world)), counteracting
+    # the wheel-odom drift we'd otherwise accumulate over a 14 s run.
+    # Falls back to pure feedforward when the neighbour pose is missing
+    # or stale (single-robot test, or the other Pi hasn't booted).
+    enable_consensus  = (LaunchConfiguration('enable_consensus').perform(context).lower()
+                         in ('true', '1', 'yes', 'on'))
 
     if not my_offset:
         my_offset = [0.0, 0.0]
@@ -65,7 +75,9 @@ def launch_setup(context, *args, **kwargs):
     suffix = f'_{robot_id}'
 
     nodes = [
-        # Graph Laplacian formation controller
+        # Graph Laplacian formation controller. With enable_consensus on,
+        # this node closes the loop on inter-robot relative pose using
+        # both robots' /ekf/odom (which is itself wheel odom + IMU yaw).
         Node(
             package='swerve_formation',
             executable='laplacian_formation_node',
@@ -76,6 +88,7 @@ def launch_setup(context, *args, **kwargs):
                 'neighbors': neighbors,
                 'my_offset': my_offset,
                 'neighbor_offsets': neighbor_offsets,
+                'enable_consensus': enable_consensus,
             }],
             output='screen',
         ),
@@ -194,7 +207,12 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('robot_id',         default_value='tb3_0'),
         DeclareLaunchArgument('usb_port',         default_value='/dev/ttyACM0'),
-        DeclareLaunchArgument('k_gain',           default_value='1.5'),
+        # k_gain — Laplacian consensus gain. 0.1 is the docstring-recommended
+        # safe value (cm-scale positional error → mm/s velocity correction);
+        # the previous default (1.5) was set when consensus was always off.
+        # Crank up cautiously if the formation visibly drifts apart over
+        # the demo run; back off to 0.05 if it jitters or oscillates.
+        DeclareLaunchArgument('k_gain',           default_value='0.1'),
         DeclareLaunchArgument('neighbors',        default_value=''),
         DeclareLaunchArgument('my_offset',        default_value='0.0,0.0'),
         DeclareLaunchArgument('neighbor_offsets', default_value='0.0,0.0'),
@@ -211,5 +229,13 @@ def generate_launch_description():
                                            'add a static map→odom TF, and run '
                                            'EKF on odom+IMU only. Used for the '
                                            'GUI-anchored real-robot demo.')),
+        DeclareLaunchArgument('enable_consensus', default_value='true',
+                              description=('When true, laplacian_formation_node '
+                                           'closes the loop on inter-robot pose '
+                                           'using both /ekf/odom feeds — small '
+                                           'velocity corrections counteract '
+                                           'wheel-odom drift over the run. '
+                                           'Falls back to pure feedforward if '
+                                           'either neighbour pose is missing.')),
         OpaqueFunction(function=launch_setup),
     ])
