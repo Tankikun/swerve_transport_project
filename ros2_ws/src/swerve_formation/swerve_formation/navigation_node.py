@@ -16,18 +16,25 @@ Subscriptions
   /formation/path            geometry_msgs/PoseArray — ordered waypoint sequence
                                                        (published once per Send Goal by
                                                         the GUI via rosbridge)
+  /goal_pose                 geometry_msgs/PoseStamped
+                                                — final target pose for the formation centre.
+                                                  We use ONLY the orientation: once the
+                                                  leader reaches the final waypoint xy, it
+                                                  rotates the formation in place to this
+                                                  yaw before declaring REACHED.
   /navigation/obstacles      geometry_msgs/PoseArray — obstacle centres (x, y, radius in z)
   /formation/footprint_radius std_msgs/Float32  — half-width of formation for obstacle inflation
 
 Publications
   /virtual_center/cmd_vel    geometry_msgs/Twist — velocity for the whole formation
-  /navigation/status         std_msgs/String     — "IDLE" | "NAVIGATING" | "REACHED"
+  /navigation/status         std_msgs/String     — "IDLE" | "NAVIGATING" | "ALIGNING" | "REACHED"
 """
 
+import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseArray
+from geometry_msgs.msg import Twist, PoseArray, PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String, Float32
 
@@ -75,7 +82,8 @@ class NavigationNode(Node):
     K_HEADING = 3.0    # gain for aligning heading with velocity direction
 
     # ── Goal tolerance ────────────────────────────────────────────────────────
-    GOAL_TOL = 0.05    # m
+    GOAL_TOL = 0.05            # m
+    YAW_TOL  = math.radians(5) # rad — done aligning to /goal_pose yaw at end
 
     # ── Default formation safety margin (overridden by /formation/footprint_radius)
     DEFAULT_SAFETY = 0.45   # m  (≈ robot half-width + payload margin)
@@ -102,6 +110,13 @@ class NavigationNode(Node):
         self._vel_actual   = np.zeros(2)   # [vx, vy] in world frame
         self._omega_actual = 0.0
 
+        # Final-yaw target read from /goal_pose. None = no goal yaw received
+        # → skip the alignment phase and stop with whatever heading we
+        # finished motion at (legacy behaviour). When set, the leader
+        # rotates the formation in place to this yaw at the final waypoint
+        # before declaring REACHED.
+        self._goal_pose_yaw: float | None = None
+
         # ── Subscriptions ────────────────────────────────────────────────────
         self.create_subscription(
             String, '/formation/leader', self._leader_cb, 10
@@ -119,6 +134,15 @@ class NavigationNode(Node):
         # the current target and the rest queue up.
         self.create_subscription(
             PoseArray, '/formation/path', self._waypoints_cb, 10
+        )
+        # The GUI also publishes /goal_pose (PoseStamped) on every Send Goal,
+        # carrying the user-specified goal x/y/yaw from the orientation slider.
+        # We use only the orientation: the path waypoints already determine
+        # the route, but the path planner doesn't necessarily put the user's
+        # final yaw on the last waypoint. This subscription captures it so the
+        # leader can rotate in place to that yaw at goal arrival.
+        self.create_subscription(
+            PoseStamped, '/goal_pose', self._goal_pose_cb, 10
         )
         # Obstacles from SLAM / manual: pose.position.x/y = centre, pose.position.z = radius
         self.create_subscription(
@@ -167,6 +191,28 @@ class NavigationNode(Node):
         self.get_logger().info(
             f'New goal: x={msg.linear.x:.2f} y={msg.linear.y:.2f} θ={msg.angular.z:.2f}'
         )
+
+    def _goal_pose_cb(self, msg: PoseStamped):
+        """Cache the final yaw the formation should face on arrival.
+
+        We deliberately ignore msg.pose.position — /formation/path already
+        carries the route, and trying to inject a single goal here would
+        race with that publisher. Only the orientation matters: at the end
+        of the path's final waypoint, the leader rotates in place to this
+        yaw before declaring REACHED.
+        """
+        q = msg.pose.orientation
+        new_yaw = float(np.arctan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        ))
+        if (self._goal_pose_yaw is None
+                or abs(_wrap(new_yaw - self._goal_pose_yaw)) > math.radians(1.0)):
+            self.get_logger().info(
+                f'Goal yaw set: {math.degrees(new_yaw):+.0f}° '
+                f'(formation will rotate to this once xy is reached).'
+            )
+        self._goal_pose_yaw = new_yaw
 
     def _waypoints_cb(self, msg: PoseArray):
         """Ordered waypoint sequence — each pose: position x/y = target, yaw = θ."""
@@ -303,7 +349,38 @@ class NavigationNode(Node):
                 )
                 self._reset_ramp()
             else:
-                self.get_logger().info('Final goal reached — stopping.')
+                # Translation done. If a /goal_pose yaw was provided, rotate
+                # the formation in place to face it before stopping. Without
+                # one, fall through to the legacy stop-immediately path.
+                if self._goal_pose_yaw is not None:
+                    yaw_err = _wrap(self._goal_pose_yaw - self._pose[2])
+                    if abs(yaw_err) > self.YAW_TOL:
+                        # Pure rotation: zero linear, P-controller on yaw.
+                        # The published Twist's angular.z drives /virtual_center/cmd_vel;
+                        # laplacian translates into per-robot orbital motion around
+                        # the virtual centre.
+                        omega_des = float(np.clip(
+                            self.K_HEADING * yaw_err,
+                            -self.MAX_ANGULAR, self.MAX_ANGULAR,
+                        ))
+                        self._apply_ramp(np.zeros(2), omega_des)
+                        cmd = Twist()
+                        cmd.linear.x  = 0.0
+                        cmd.linear.y  = 0.0
+                        cmd.angular.z = float(np.clip(
+                            self._omega_actual,
+                            -self.MAX_ANGULAR, self.MAX_ANGULAR,
+                        ))
+                        self._cmd_pub.publish(cmd)
+                        self._publish_status('ALIGNING')
+                        return
+                self.get_logger().info(
+                    'Final goal reached'
+                    + (f' and aligned to goal yaw '
+                       f'{math.degrees(self._goal_pose_yaw):+.0f}°'
+                       if self._goal_pose_yaw is not None else '')
+                    + ' — stopping.'
+                )
                 self._current_wp = None
                 self._publish_stop()
                 self._publish_status('REACHED')
