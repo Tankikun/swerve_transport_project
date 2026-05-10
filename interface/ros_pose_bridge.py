@@ -3,28 +3,38 @@ ros_pose_bridge.py — Stream the robot's live pose from ROS 2 to the Flask GUI.
 
 The interface/ web UI shows a small "is localization working RIGHT NOW" badge
 plus a moving icon on the 2D and 3D maps. This standalone rclpy node feeds
-both — it looks up the canonical map -> base_link transform at 10 Hz and
+both — at 10 Hz it picks a pose source (TF or EKF topic, see below) and
 POSTs the result to server.py's /pose endpoint.
 
 It ALSO carries the GUI's "Set Initial Pose" hint downstream: each tick it
 polls server.py's `/set_initial_pose` (GET); when the seq increments past
 `last_seen_seq`, the bridge publishes one `PoseWithCovarianceStamped` to
-`/initialpose` for RTAB-Map to seed its current estimate. This is the
-exact same topic AMCL / RViz "2D Pose Estimate" use, so RTAB-Map converges
-in 1-2 sec instead of doing a slow global re-localization search.
+`/initialpose` for RTAB-Map AND `/{robot_id}/initialpose` for ekf_node.
 
-How it works
+Pose sources
 ------------
-- TF lookup, NOT a topic subscription.
-  RTAB-Map publishes the `map -> {robot_id}_odom -> {robot_id}_base_link`
-  chain. The end of that chain is the only honest answer to "where is the
-  robot in the map frame?" — it interpolates between visual matches via
-  the odometry, so the 2D/3D marker glides instead of jumping at 1 Hz.
-- The actual /slam/pose topic is also subscribed to, but ONLY to track
-  when the LAST visual match occurred. That timestamp drives the GUI's
-  green/orange badge: "fresh visual match" vs "dead-reckoning past 5 s".
-- POST is best-effort. If Flask isn't up the node logs (throttled) and
-  keeps polling — no rclpy crash.
+Two modes, switched by the `use_ekf_topic` parameter:
+
+* `use_ekf_topic:=false`  (default — SLAM-anchored runs)
+  TF lookup `map -> {robot_id}_base_link`. RTAB-Map publishes
+  `map -> {robot_id}_odom`, and `conveyor_base_node` publishes
+  `{robot_id}_odom -> {robot_id}_base_link`. The end of that chain is
+  the canonical answer when SLAM is the world-frame anchor.
+
+* `use_ekf_topic:=true`   (no-SLAM / GUI-anchored runs)
+  Subscribe to `/{robot_id}/ekf/odom` directly and republish its values
+  as if they were `map`-frame coordinates. The EKF state is set by the
+  GUI's "Set Initial Pose" hints (via `/{robot_id}/initialpose`) and
+  evolves with wheel odom + IMU. Use this when the
+  `enable_slam:=false` bringup is in effect — the static
+  `map → {robot_id}_odom = identity` TF added by that bringup makes
+  the abstract "EKF frame" equal to the GUI's map frame numerically.
+
+In either mode the `/slam/pose` subscription remains, used only to
+stamp `last_match_age_sec` for the GUI's badge.
+
+POST is best-effort. If Flask isn't up the node logs (throttled) and
+keeps polling — no rclpy crash.
 
 Topics / TF
 -----------
@@ -70,6 +80,7 @@ turn the status pill red.
 import math
 import queue
 import threading
+import time
 from datetime import datetime, timezone
 
 import rclpy
@@ -78,6 +89,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 import tf2_ros
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry
 
 
 def quat_to_yaw(q):
@@ -94,11 +106,15 @@ class PoseBridge(Node):
         self.declare_parameter('server_url',       'http://localhost:5002/pose')
         self.declare_parameter('initial_pose_url', 'http://localhost:5002/set_initial_pose')
         self.declare_parameter('rate_hz',          10.0)
+        # When true, take the GUI pose feed straight from /{robot_id}/ekf/odom
+        # instead of the TF chain. See module docstring "Pose sources".
+        self.declare_parameter('use_ekf_topic',    False)
 
         self._robot_id         = str(self.get_parameter('robot_id').value)
         self._server_url       = str(self.get_parameter('server_url').value)
         self._initial_pose_url = str(self.get_parameter('initial_pose_url').value)
         rate                   = float(self.get_parameter('rate_hz').value)
+        self._use_ekf_topic    = bool(self.get_parameter('use_ekf_topic').value)
 
         self._base_frame  = f'{self._robot_id}_base_link'
         self._tf_buffer   = tf2_ros.Buffer()
@@ -111,12 +127,25 @@ class PoseBridge(Node):
             self._slam_cb, 10)
         self._last_slam_pose_t = None  # ROS clock seconds, or None
 
-        # Initial-pose republisher. The rtabmap node in our launch runs at the
-        # GLOBAL namespace and subscribes to the un-remapped `/initialpose`
-        # (same as RViz's "2D Pose Estimate"), so we publish there — NOT to
-        # `/{robot_id}/initialpose`.
+        # Cached EKF pose for use_ekf_topic mode. Filled by _ekf_cb each
+        # time a new /ekf/odom message arrives; the tick reads the latest.
+        self._ekf_pose: tuple[float, float, float] | None = None  # (x, y, yaw)
+        self._ekf_pose_t: float | None = None
+        if self._use_ekf_topic:
+            self._ekf_sub = self.create_subscription(
+                Odometry, f'/{self._robot_id}/ekf/odom',
+                self._ekf_cb, 10)
+
+        # Initial-pose republisher. RTAB-Map subscribes to the un-remapped
+        # global `/initialpose` (same as RViz's "2D Pose Estimate"). The
+        # per-robot ekf_node subscribes to `/{robot_id}/initialpose` so it
+        # can hard-reset when SLAM is unavailable. Publish to BOTH so the
+        # IMU-only fallback path stays in sync with the visual one.
         self._init_pub = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10)
+        self._init_pub_robot = self.create_publisher(
+            PoseWithCovarianceStamped,
+            f'/{self._robot_id}/initialpose', 10)
         self._last_seen_init_seq = 0   # only act on strictly higher seqs
         # On bridge restart we DON'T want to act on a hint queued before we
         # came up — the user may already have driven away from there or
@@ -149,6 +178,14 @@ class PoseBridge(Node):
         # arrived. Stamp it on the ROS clock.
         self._last_slam_pose_t = self.get_clock().now().nanoseconds * 1e-9
 
+    def _ekf_cb(self, msg: Odometry):
+        """Cache the latest /ekf/odom pose for `use_ekf_topic` mode."""
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
+        yaw = quat_to_yaw(msg.pose.pose.orientation)
+        self._ekf_pose = (x, y, yaw)
+        self._ekf_pose_t = time.time()
+
     def _tick(self):
         now_ros = self.get_clock().now().nanoseconds * 1e-9
         last_match_age = (now_ros - self._last_slam_pose_t
@@ -166,26 +203,47 @@ class PoseBridge(Node):
             'wall_clock_iso':     datetime.now(timezone.utc).isoformat(),
         }
 
-        try:
-            t = self._tf_buffer.lookup_transform(
-                'map', self._base_frame, rclpy.time.Time(),
-                timeout=Duration(seconds=0.5))
-            yaw = quat_to_yaw(t.transform.rotation)
-            body.update({
-                'localized': True,
-                'x':         float(t.transform.translation.x),
-                'y':         float(t.transform.translation.y),
-                'yaw_rad':   float(yaw),
-                'yaw_deg':   float(math.degrees(yaw)),
-            })
-        except (tf2_ros.LookupException,
-                tf2_ros.ExtrapolationException,
-                tf2_ros.ConnectivityException):
-            if (now_ros - self._last_warn_t) > 5.0:
+        if self._use_ekf_topic:
+            # Pose source: /{robot_id}/ekf/odom topic. Use cached value if
+            # < 1 s old (EKF runs at ~33 Hz so this is always fresh once
+            # the stack is up).
+            wall_now = time.time()
+            if (self._ekf_pose is not None and self._ekf_pose_t is not None
+                    and (wall_now - self._ekf_pose_t) < 1.0):
+                x, y, yaw = self._ekf_pose
+                body.update({
+                    'localized': True,
+                    'x':         x,
+                    'y':         y,
+                    'yaw_rad':   float(yaw),
+                    'yaw_deg':   float(math.degrees(yaw)),
+                })
+            elif (now_ros - self._last_warn_t) > 5.0:
                 self.get_logger().warn(
-                    f'TF map -> {self._base_frame} not available; '
-                    f'robot not localized yet')
+                    f'/{self._robot_id}/ekf/odom not received yet; '
+                    f'robot not localized')
                 self._last_warn_t = now_ros
+        else:
+            try:
+                t = self._tf_buffer.lookup_transform(
+                    'map', self._base_frame, rclpy.time.Time(),
+                    timeout=Duration(seconds=0.5))
+                yaw = quat_to_yaw(t.transform.rotation)
+                body.update({
+                    'localized': True,
+                    'x':         float(t.transform.translation.x),
+                    'y':         float(t.transform.translation.y),
+                    'yaw_rad':   float(yaw),
+                    'yaw_deg':   float(math.degrees(yaw)),
+                })
+            except (tf2_ros.LookupException,
+                    tf2_ros.ExtrapolationException,
+                    tf2_ros.ConnectivityException):
+                if (now_ros - self._last_warn_t) > 5.0:
+                    self.get_logger().warn(
+                        f'TF map -> {self._base_frame} not available; '
+                        f'robot not localized yet')
+                    self._last_warn_t = now_ros
 
         # Hand the POST body to the worker thread and return immediately.
         # If the queue is full (Flask is slow / dead), drop the oldest pose
@@ -283,6 +341,7 @@ class PoseBridge(Node):
         msg.pose.covariance = cov
 
         self._init_pub.publish(msg)
+        self._init_pub_robot.publish(msg)
         self._last_seen_init_seq = seq
         self.get_logger().info(
             f'Published initial pose: x={x:.2f} y={y:.2f} '

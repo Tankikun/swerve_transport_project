@@ -13,7 +13,9 @@ Subscriptions
   /formation/leader          std_msgs/String   — robot_id of current leader
   /{robot_id}/ekf/odom       nav_msgs/Odometry — authoritative pose (EKF output)
   /navigation/goal           geometry_msgs/Twist  — single goal (linear.x/y = x/y, angular.z = θ)
-  /navigation/waypoints      geometry_msgs/PoseArray — ordered waypoint sequence
+  /formation/path            geometry_msgs/PoseArray — ordered waypoint sequence
+                                                       (published once per Send Goal by
+                                                        the GUI via rosbridge)
   /navigation/obstacles      geometry_msgs/PoseArray — obstacle centres (x, y, radius in z)
   /formation/footprint_radius std_msgs/Float32  — half-width of formation for obstacle inflation
 
@@ -110,8 +112,13 @@ class NavigationNode(Node):
         self.create_subscription(
             Twist, '/navigation/goal', self._goal_cb, 10
         )
+        # GUI publishes the dense APF-smoothed path here (PoseArray) once
+        # per Send Goal click. Same shape as a waypoint sequence: each
+        # pose's position.{x,y} is a virtual-centre waypoint, orientation
+        # carries the path tangent. The first waypoint is consumed as
+        # the current target and the rest queue up.
         self.create_subscription(
-            PoseArray, '/navigation/waypoints', self._waypoints_cb, 10
+            PoseArray, '/formation/path', self._waypoints_cb, 10
         )
         # Obstacles from SLAM / manual: pose.position.x/y = centre, pose.position.z = radius
         self.create_subscription(
@@ -234,9 +241,13 @@ class NavigationNode(Node):
         if f_mag < 1e-6:
             return np.zeros(2), 0.0
 
-        # Speed: scale by force magnitude up to MAX_LINEAR, slow near goal
+        # Speed: scale by force magnitude up to MAX_LINEAR. Only slow down
+        # on the FINAL waypoint — for dense paths from /formation/path,
+        # every intermediate waypoint sits inside SLOW_RADIUS, and applying
+        # the slowdown at every one would cap the formation at ~0.02 m/s
+        # (instead of MAX_LINEAR=0.18) for the entire path.
         speed = min(self.MAX_LINEAR, f_mag)
-        if d_goal < self.SLOW_RADIUS:
+        if not self._waypoints and d_goal < self.SLOW_RADIUS:
             speed *= d_goal / self.SLOW_RADIUS
 
         v_des = (speed / f_mag) * f_total   # world-frame velocity

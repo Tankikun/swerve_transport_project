@@ -6,8 +6,12 @@ A* global path planner for the leader robot, with:
   1. Robot-footprint inflation of the occupancy grid
      (so the planner knows the conveyor is ~30 × 30 cm, not a point)
   2. 8-connected A* with Euclidean heuristic on the inflated grid
-  3. Path simplification via line-of-sight (Bresenham) — drops collinear
-     waypoints so APF gets short straight runs instead of 1-cell zigzags
+  3. APF (artificial potential field) gradient-descent smoothing —
+     resamples the A* result to uniform spacing, then iteratively
+     pulls each interior waypoint toward its neighbors (smoothing)
+     and away from obstacles via the distance-transform gradient.
+     The endpoints stay pinned. The result is a dense, U-shaped curve
+     instead of the V the line-of-sight simplifier used to produce.
   4. Two-robot visualization: leader + follower at formation offset
 
 Map format (friend's Z-up pipeline):
@@ -138,49 +142,161 @@ def astar(blocked, start, goal):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Path simplification via line-of-sight (Bresenham)
+# APF gradient-descent smoothing
 # ────────────────────────────────────────────────────────────────────────────
+#
+# The A* result hugs the inflated obstacle boundary in 1-cell zigzags.
+# The old line-of-sight simplifier collapsed it into 2–3 sharp waypoints
+# (a V), which is hard for the formation controller to track and looks
+# bad in the GUI. Here we instead:
+#
+#   1. resample the A* path to uniform spacing in world frame
+#   2. precompute distance-to-nearest-obstacle via EDT
+#   3. iterate per interior waypoint w_i:
+#        smoothing = α · (½(w_{i-1} + w_{i+1}) − w_i)         // pull to midpoint
+#        repulsion = β · (clearance − d) · ∇d̂   if d < clearance, capped
+#        anchor    = γ · (a_i − w_i)                          // hold homotopy
+#      then a hard reject if the step would land in a blocked cell.
+#   4. stop when max per-step displacement < ε
+#
+# Endpoints (start, goal) stay pinned. The anchor term keeps the result
+# in the same homotopy class as A* so the smoother can't tunnel through
+# a wall. Per-iteration displacement is bounded ≤ smooth + ½·res + anchor,
+# so divergence is impossible and convergence is monotone for sane gains.
 
-def bresenham(c0, r0, c1, r1):
-    dc = abs(c1 - c0); dr = abs(r1 - r0)
-    sc = 1 if c0 < c1 else -1
-    sr = 1 if r0 < r1 else -1
-    err = dc - dr
-    c, r = c0, r0
-    while True:
-        yield c, r
-        if c == c1 and r == r1:
-            return
-        e2 = 2 * err
-        if e2 > -dr:
-            err -= dr; c += sc
-        if e2 < dc:
-            err += dc; r += sr
+def apf_smooth_path(path_cells, blocked, meta, formation_radius, *,
+                    target_spacing=0.05,
+                    smooth_w=0.50,
+                    repel_w=0.05,
+                    anchor_w=0.05,
+                    max_iters=200,
+                    conv_eps=5e-4):
+    """Smooth an A*-found path with APF-style relaxation.
 
+    `path_cells`: list of (col, row) from astar(). `blocked`: bool grid
+    used to compute the obstacle distance field. `formation_radius` is
+    the inflation radius (m) — repulsion targets a clearance of 0.75·R
+    inside that buffer so the smoothed path drifts a little toward the
+    middle of the corridor instead of riding the boundary.
 
-def line_of_sight(blocked, c0, r0, c1, r1):
-    for c, r in bresenham(c0, r0, c1, r1):
-        if blocked[r, c]:
-            return False
-    return True
+    Returns a list of [x, y] in world metres, ~`target_spacing` apart.
+    """
+    res = float(meta['resolution'])
+    if not path_cells:
+        return []
 
+    pts = np.array([cell_to_world(c, r, meta) for c, r in path_cells],
+                   dtype=float)
+    if len(pts) < 2:
+        return [list(p) for p in pts]
 
-def simplify(path, blocked):
-    if not path or len(path) <= 2:
-        return list(path)
-    out = [path[0]]
-    i = 0
-    while i < len(path) - 1:
-        j = len(path) - 1
-        while j > i + 1:
-            c0, r0 = path[i]; c1, r1 = path[j]
-            if line_of_sight(blocked, c0, r0, c1, r1):
-                break
-            j -= 1
-        out.append(path[j])
-        i = j
-    print(f"[simplify] {len(path)} cells -> {len(out)} waypoints")
-    return out
+    # ── 1. Resample to uniform spacing along arclength ────────────────
+    seg_lens = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    cum      = np.concatenate([[0.0], np.cumsum(seg_lens)])
+    total    = float(cum[-1])
+    if total < target_spacing * 1.5:
+        return [list(pts[0]), list(pts[-1])]
+
+    n_samples = max(3, int(round(total / target_spacing)) + 1)
+    s_new     = np.linspace(0.0, total, n_samples)
+    new_pts          = np.zeros((n_samples, 2))
+    new_pts[:, 0]    = np.interp(s_new, cum, pts[:, 0])
+    new_pts[:, 1]    = np.interp(s_new, cum, pts[:, 1])
+    anchors          = new_pts.copy()
+
+    # ── 2. Distance-to-nearest-obstacle in metres ─────────────────────
+    # distance_transform_edt(input) gives every non-zero pixel its
+    # distance to the nearest zero pixel. Pass `~blocked` so every FREE
+    # cell gets its distance to the nearest BLOCKED cell. Inside any
+    # blocked cell d == 0.
+    dt   = ndimage.distance_transform_edt(~blocked).astype(float) * res
+    H, W = blocked.shape
+
+    def sample_dt(x, y):
+        cx = (x - meta['min_x']) / res - 0.5
+        cy = (y - meta['min_y']) / res - 0.5
+        c0 = max(0, min(W - 2, int(math.floor(cx))))
+        r0 = max(0, min(H - 2, int(math.floor(cy))))
+        fx = max(0.0, min(1.0, cx - c0))
+        fy = max(0.0, min(1.0, cy - r0))
+        v00 = dt[r0,     c0]
+        v10 = dt[r0,     c0 + 1]
+        v01 = dt[r0 + 1, c0]
+        v11 = dt[r0 + 1, c0 + 1]
+        return ((1 - fx) * (1 - fy) * v00 + fx * (1 - fy) * v10 +
+                (1 - fx) * fy       * v01 + fx * fy       * v11)
+
+    eps_h = res * 0.5
+
+    def grad_dt(x, y):
+        gx = (sample_dt(x + eps_h, y) - sample_dt(x - eps_h, y)) / (2 * eps_h)
+        gy = (sample_dt(x, y + eps_h) - sample_dt(x, y - eps_h)) / (2 * eps_h)
+        return gx, gy
+
+    def cell_blocked(x, y):
+        col = int((x - meta['min_x']) / res)
+        row = int((y - meta['min_y']) / res)
+        if 0 <= col < W and 0 <= row < H:
+            return bool(blocked[row, col])
+        return True   # off-grid is "blocked" — never step out of the map
+
+    # Stay this far from any obstacle. A* already guarantees the input
+    # cells satisfy d ≥ formation_radius (because the grid was inflated
+    # by formation_radius), so the smoother only has to keep them there.
+    clearance = 0.75 * float(formation_radius)
+    max_repel_step = res                # hard cap, ≤ 1 cell per iteration
+
+    # ── 3. Iterative relaxation ───────────────────────────────────────
+    pts = new_pts.copy()
+    last_disp = float('inf')
+    for it in range(max_iters):
+        prev = pts.copy()
+        # Endpoints (i=0 and i=-1) stay pinned.
+        for i in range(1, len(pts) - 1):
+            x, y   = pts[i]
+            xp, yp = pts[i - 1]
+            xn, yn = pts[i + 1]
+
+            sx = smooth_w * ((xp + xn) * 0.5 - x)
+            sy = smooth_w * ((yp + yn) * 0.5 - y)
+
+            d = sample_dt(x, y)
+            if d < clearance:
+                gx, gy = grad_dt(x, y)
+                gn = math.hypot(gx, gy)
+                if gn > 1e-9:
+                    violation = clearance - max(d, 0.0)
+                    mag = min(repel_w * violation, max_repel_step)
+                    rx = mag * gx / gn
+                    ry = mag * gy / gn
+                else:
+                    rx = ry = 0.0
+            else:
+                rx = ry = 0.0
+
+            ax = anchor_w * (anchors[i, 0] - x)
+            ay = anchor_w * (anchors[i, 1] - y)
+
+            x_new = x + sx + rx + ax
+            y_new = y + sy + ry + ay
+            # Hard reject: never step into a blocked cell.
+            if cell_blocked(x_new, y_new):
+                continue
+            pts[i, 0] = x_new
+            pts[i, 1] = y_new
+
+        last_disp = float(np.max(np.linalg.norm(pts - prev, axis=1)))
+        if last_disp < conv_eps:
+            print(f"[apf-smooth] converged after {it + 1} iters "
+                  f"(max_disp={last_disp * 1000:.2f} mm)")
+            break
+    else:
+        print(f"[apf-smooth] hit max_iters={max_iters} "
+              f"(max_disp={last_disp * 1000:.2f} mm)")
+
+    print(f"[apf-smooth] {len(path_cells)} A* cells -> "
+          f"{len(pts)} smoothed waypoints (~{target_spacing*100:.0f} cm spacing)")
+    return [list(p) for p in pts]
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -256,13 +372,12 @@ def compute_plan(map_data: dict, start: tuple, goal: tuple,
     path = astar(blocked, (sc, sr), (gc, gr))
     if path is None:
         raise RuntimeError("no path found")
-    simplified = simplify(path, blocked)
 
     def cells_to_worldlist(cells):
         return [list(cell_to_world(c, r, meta)) for c, r in cells]
 
-    waypoints_w = cells_to_worldlist(simplified)
     raw_w       = cells_to_worldlist(path)
+    waypoints_w = apf_smooth_path(path, blocked, meta, formation_radius)
 
     headings = []
     for i in range(len(waypoints_w)):

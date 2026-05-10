@@ -3,10 +3,12 @@ conveyor_base_node.py
 ---------------------
 Lifecycle serial bridge: /{robot_id}/cmd_vel  →  OpenCR USB-CDC
                          OpenCR POSE line     →  /{robot_id}/odom  +  TF
+                         OpenCR IMU  line     →  /{robot_id}/imu
 
 Serial protocol (115200 baud):
   Send:    "x_dot y_dot gamma_dot\n"       (m/s, m/s, rad/s)
-  Receive: "POSE x y theta vx vy wz\n"    (~3 Hz, firmware dead-reckoning)
+  Receive: "POSE x y theta vx vy wz\n"    (~33 Hz, firmware dead-reckoning)
+           "IMU  ax ay az gx gy gz yaw\n" (~10 Hz, MPU-9250 + AHRS)
 
 Lifecycle transitions:
   configure  — opens serial port, creates sub/pub/timers
@@ -23,6 +25,7 @@ import rclpy
 import serial
 from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu
 from rclpy.lifecycle import Node, State, TransitionCallbackReturn
 from std_srvs.srv import Trigger
 import tf2_ros
@@ -89,6 +92,7 @@ class ConveyorBaseNode(Node):
         self._ser: serial.Serial | None = None
         self._sub            = None
         self._odom_pub       = None
+        self._imu_pub        = None
         self._tf_broadcaster = None
         self._read_timer     = None
         self._watchdog_timer = None
@@ -136,6 +140,10 @@ class ConveyorBaseNode(Node):
             Twist, f'/{robot_id}/cmd_vel', self._cmd_cb, 10
         )
         self._odom_pub       = self.create_publisher(Odometry, f'/{robot_id}/odom', 10)
+        # IMU pub: parses the firmware's "IMU …" line (10 Hz) into a proper
+        # sensor_msgs/Imu so ekf_node can fuse yaw without RTAB-Map being up.
+        # QoS depth 50 covers brief network hiccups without dropping frames.
+        self._imu_pub        = self.create_publisher(Imu, f'/{robot_id}/imu', 50)
         self._tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         # Read serial at 50 Hz (was 10 Hz). Firmware now emits POSE at
         # 33 Hz (ODOM_DIV=1, see turtlebot3_conveyor.ino), and EKF +
@@ -172,6 +180,7 @@ class ConveyorBaseNode(Node):
         self._close_serial()
         for attr, destroy in [('_sub',            self.destroy_subscription),
                                ('_odom_pub',       self.destroy_publisher),
+                               ('_imu_pub',        self.destroy_publisher),
                                ('_read_timer',     self.destroy_timer),
                                ('_watchdog_timer', self.destroy_timer)]:
             obj = getattr(self, attr)
@@ -236,6 +245,8 @@ class ConveyorBaseNode(Node):
                     continue
                 if line.startswith('POSE '):
                     self._handle_pose(line)
+                elif line.startswith('IMU '):
+                    self._handle_imu(line)
                 elif line.startswith('ODOM '):
                     self._handle_odom_legacy(line)
                 elif line.startswith('ODOM_RESET'):
@@ -257,6 +268,70 @@ class ConveyorBaseNode(Node):
         except ValueError:
             return
         self._publish_odom(x, y, theta, vx, vy, wz)
+
+    # ── IMU line ──────────────────────────────────────────────────────────────
+    # Firmware emits 'IMU ax ay az gx gy gz yaw' at ~10 Hz (see
+    # turtlebot3_conveyor.ino). We pass it straight through as a
+    # sensor_msgs/Imu so ekf_node can fuse yaw via /{robot_id}/imu.
+    #
+    # Covariance values reflect the MPU-9250's typical performance after
+    # the firmware's complementary filter has converged; they aren't
+    # consumed by ekf_node (which uses a fixed R from a parameter), but
+    # downstream nodes that DO inspect covariance need them populated.
+    # orientation_covariance[0] >= 0 signals "orientation is provided"
+    # — without this, ekf_node will skip the IMU correction.
+
+    _IMU_ORIENT_VAR = 0.0025   # ~3° 1-σ on yaw
+    _IMU_GYRO_VAR  = 0.0001   # ~0.6°/s 1-σ
+    _IMU_ACCEL_VAR = 0.0025   # ~0.05 m/s² 1-σ
+
+    def _handle_imu(self, line: str):
+        """Firmware: 'IMU ax ay az gx gy gz yaw' (m/s², rad/s, rad)."""
+        parts = line.split()
+        if len(parts) != 8:
+            return
+        try:
+            ax, ay, az, gx, gy, gz, yaw = (float(p) for p in parts[1:])
+        except ValueError:
+            return
+
+        msg = Imu()
+        msg.header.stamp    = self.get_clock().now().to_msg()
+        msg.header.frame_id = self._base_frame_id
+
+        # Yaw → quaternion (rotation about Z, flat-floor assumption — no
+        # roll/pitch reported by the firmware's filter).
+        msg.orientation.x = 0.0
+        msg.orientation.y = 0.0
+        msg.orientation.z = math.sin(yaw / 2.0)
+        msg.orientation.w = math.cos(yaw / 2.0)
+        # Diagonal covariance: roll/pitch unknown (large) so consumers know
+        # only yaw is meaningful; yaw uses _IMU_ORIENT_VAR.
+        msg.orientation_covariance = [
+            1e6, 0.0, 0.0,
+            0.0, 1e6, 0.0,
+            0.0, 0.0, self._IMU_ORIENT_VAR,
+        ]
+
+        msg.angular_velocity.x = gx
+        msg.angular_velocity.y = gy
+        msg.angular_velocity.z = gz
+        msg.angular_velocity_covariance = [
+            self._IMU_GYRO_VAR, 0.0, 0.0,
+            0.0, self._IMU_GYRO_VAR, 0.0,
+            0.0, 0.0, self._IMU_GYRO_VAR,
+        ]
+
+        msg.linear_acceleration.x = ax
+        msg.linear_acceleration.y = ay
+        msg.linear_acceleration.z = az
+        msg.linear_acceleration_covariance = [
+            self._IMU_ACCEL_VAR, 0.0, 0.0,
+            0.0, self._IMU_ACCEL_VAR, 0.0,
+            0.0, 0.0, self._IMU_ACCEL_VAR,
+        ]
+
+        self._imu_pub.publish(msg)
 
     # NOTE — Legacy firmware-rollback safety net.
     # Only invoked when the OpenCR firmware sends pre-2024 "ODOM j:... w:..."
