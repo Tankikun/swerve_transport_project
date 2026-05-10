@@ -264,28 +264,13 @@ const ROBOTS = [
 const ROBOT_BODY_M   = 0.35;     // each robot's footprint side (square)
 const ROBOT_HEIGHT_M = 0.10;     // each robot's vertical extent
 
-// Pre-configured "localized" pose per robot, in ROS map-frame metres.
-// When the user confirms 📍 Set Initial Pose for one of these robots,
-// the GUI directly marks that robot as localized at the corresponding
-// fixed pose — no external bridge or fake_pose_publisher.py needed.
-// Edit these to position the rendered frames.
-const FIXED_INITIAL_POSE = {
-  tb3_0: { x:  0.453, y: -1.437, yaw_rad: 103 * Math.PI / 180 },  // left
-  tb3_1: { x:  0.940, y: -1.325, yaw_rad: 103 * Math.PI / 180 },  // right
-};
-
-// Simulated re-localization delay between hitting "confirm" and the
-// robot frame appearing on the map. Mirrors how RTAB-Map takes a beat
-// to converge after receiving an initial-pose hint. Set to 0 for
-// instant rendering.
-const INITIAL_POSE_RENDER_DELAY_MS = 2000;
-
-// Manual "localized" overrides keyed by robot id, populated by the
-// Set Initial Pose flow. pollOneRobot prefers these over the server's
-// /pose/<id> response, so the box stays put even when no bridge is
-// publishing. A real bridge feed (when one is running) overrides the
-// manual entry on its first successful POST — see pollOneRobot.
-const manualLocalized = {};
+// (v6) Robot poses come from RTAB-Map → ekf_node → ros_pose_bridge →
+// /pose/<robot_id>. There is no FIXED_INITIAL_POSE fallback in this
+// build — until SLAM relocalizes (5–30 s after launch), the robot
+// pills stay LOST. The "Set Initial Pose" click sends the click
+// coordinates as a HINT to RTAB-Map (via the bridge's /initialpose
+// publish) to speed up the visual relocalization scan; the GUI does
+// NOT preview the robot at that location.
 
 // Goal-box dimensions (used by the goal envelope + collision check).
 // The goal represents where the multi-robot SYSTEM should end up; its
@@ -661,39 +646,10 @@ async function postInitialPose(pose) {
   const targetId = initialPoseTargetRobotId || "default";
   const url      = "/set_initial_pose/" + encodeURIComponent(targetId);
 
-  // Standalone-mode rendering: schedule a manual "localized" override
-  // at the robot's pre-configured FIXED_INITIAL_POSE. After the delay
-  // the box renders on the map without needing any external bridge or
-  // fake-pose publisher running. If a real bridge IS running, its
-  // first /pose POST will clear this override (see pollOneRobot).
-  const fixed = FIXED_INITIAL_POSE[targetId];
-  if (fixed) {
-    setTimeout(() => {
-      manualLocalized[targetId] = {
-        available:          true,
-        localized:          true,
-        robot_id:           targetId,
-        x:                  fixed.x,
-        y:                  fixed.y,
-        yaw_rad:            fixed.yaw_rad,
-        yaw_deg:            fixed.yaw_rad * 180 / Math.PI,
-        frame:              "map",
-        last_match_age_sec: 0,
-        age_sec:            0,
-        wall_clock_iso:     new Date().toISOString(),
-      };
-      console.log(`[init] ${targetId} localized at fixed pose`,
-                  `(${fixed.x.toFixed(2)}, ${fixed.y.toFixed(2)}, `
-                  + `yaw=${(fixed.yaw_rad * 180 / Math.PI).toFixed(0)}°)`);
-    }, INITIAL_POSE_RENDER_DELAY_MS);
-  } else {
-    console.warn(`[init] no FIXED_INITIAL_POSE for "${targetId}"; `
-                 + `the box won't auto-render. Add an entry under that id.`);
-  }
-
-  // Still POST to the server so any real ros_pose_bridge running with
-  // robot_id:=<targetId> can pick it up and feed RTAB-Map. Best-effort:
-  // a 5xx here doesn't block the standalone rendering.
+  // (v6) The click is a HINT for RTAB-Map's relocalization scan only.
+  // The robot icon will appear once SLAM has actually matched against
+  // the lab.db map (5–30 s) and the bridge starts POSTing /pose.
+  // No local fixed-pose preview here.
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -1509,34 +1465,23 @@ function publishFormationPath(waypoints, headings) {
 // We poll all configured robots in parallel each tick, then re-render.
 // =======================================================================
 async function pollOneRobot(robot) {
-  // 1. If a real bridge is publishing, prefer its data and clear any
-  //    stale manual override so we don't fight the live feed.
-  // 2. Otherwise fall back to the manual override set by the
-  //    Set Initial Pose flow (FIXED_INITIAL_POSE).
-  // 3. Otherwise: nothing to show.
+  // (v6) Single source: ros_pose_bridge → /pose/<robot_id>. If the
+  // bridge isn't running OR RTAB-Map hasn't relocalized yet, the
+  // server returns available:false and the marker stays hidden.
   try {
     const res  = await fetch(robot.url, { cache: "no-store" });
     if (res.ok) {
       const data = await res.json();
       if (data && data.available) {
-        delete manualLocalized[robot.id];
         robotPoses[robot.id] = data;
         return { robot, status: 'ok', data };
       }
     }
-    // Server up but no bridge data — try manual override.
-    if (manualLocalized[robot.id]) {
-      robotPoses[robot.id] = manualLocalized[robot.id];
-      return { robot, status: 'ok', data: manualLocalized[robot.id] };
-    }
+    // (v6) No fallback: until the bridge posts a SLAM-anchored pose,
+    // the robot stays LOST in the GUI.
     robotPoses[robot.id] = null;
     return { robot, status: 'no_bridge', data: null };
   } catch (e) {
-    // Network error reaching the server — manual still applies.
-    if (manualLocalized[robot.id]) {
-      robotPoses[robot.id] = manualLocalized[robot.id];
-      return { robot, status: 'ok', data: manualLocalized[robot.id] };
-    }
     robotPoses[robot.id] = null;
     return { robot, status: 'fetch_error', error: e };
   }

@@ -1,3 +1,26 @@
+"""
+conveyor.launch.py — per-Pi bringup for the SLAM-anchored demo.
+
+Spawns the full robot stack on a single Pi:
+
+  conveyor_base_node       serial bridge to OpenCR
+  ekf_node                 fuses /odom + /imu + /slam/pose
+  laplacian_formation_node feedforward + Laplacian consensus correction
+  leader_election_node     bully election on /formation/heartbeat
+  path_follower_node       leader-only; consumes /formation/path
+  formation_size_node      leader-only; publishes /formation/footprint
+  alignment_node           leader-only; depth-based pre-run spacing
+  rtabmap_localization     RTAB-Map in localization-only mode
+                           against the pre-built lab.db; publishes
+                           map → {robot_id}_odom and feeds /slam/pose
+                           through slam_pose_relay_node.
+
+This branch (`interface/v6-fuckyea`) requires localization to work.
+The no-SLAM fallback that lived on `interface/v5-final` (static
+map→odom TF, fixed_pose bridge override, FIXED_INITIAL_POSE GUI
+fallback) is intentionally absent here.
+"""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -41,20 +64,12 @@ def launch_setup(context, *args, **kwargs):
     cam_x             = LaunchConfiguration('cam_x').perform(context)
     cam_y             = LaunchConfiguration('cam_y').perform(context)
     cam_z             = LaunchConfiguration('cam_z').perform(context)
-    # `enable_slam:=false` skips the RTAB-Map / camera include and
-    # disables the EKF's visual correction. Used for the GUI demo path
-    # where localisation comes from wheel odometry + IMU only and the
-    # operator seeds initial pose by clicking on the map. We still need
-    # a `map → {robot_id}_odom` TF for ros_pose_bridge to look up; with
-    # SLAM off, a static identity TF stands in.
-    enable_slam       = (LaunchConfiguration('enable_slam').perform(context).lower()
-                         in ('true', '1', 'yes', 'on'))
     # Closed-loop formation correction. Each robot's
     # laplacian_formation_node already subscribes to its own AND its
     # neighbour's `/{rid}/ekf/odom`. With consensus on, the relative
     # pose error feeds back into the per-robot twist as a small
     # correction (k_gain · (actual_world − desired_world)), counteracting
-    # the wheel-odom drift we'd otherwise accumulate over a 14 s run.
+    # any residual drift between the two robots' SLAM-anchored EKFs.
     # Falls back to pure feedforward when the neighbour pose is missing
     # or stale (single-robot test, or the other Pi hasn't booted).
     enable_consensus  = (LaunchConfiguration('enable_consensus').perform(context).lower()
@@ -74,10 +89,10 @@ def launch_setup(context, *args, **kwargs):
     # list shows duplicates with a name-collision warning).
     suffix = f'_{robot_id}'
 
-    nodes = [
+    return [
         # Graph Laplacian formation controller. With enable_consensus on,
         # this node closes the loop on inter-robot relative pose using
-        # both robots' /ekf/odom (which is itself wheel odom + IMU yaw).
+        # both robots' /ekf/odom (which is wheel odom + IMU + SLAM).
         Node(
             package='swerve_formation',
             executable='laplacian_formation_node',
@@ -106,17 +121,15 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # EKF — fuses raw /odom + IMU (always) + SLAM pose (if enable_slam).
-        # When `enable_slam:=false` the EKF ignores any stale /slam/pose
-        # messages and stays on odom + IMU, anchored only by /initialpose
-        # hints from the GUI.
+        # EKF — fuses raw /odom (prediction) + /imu (yaw correction)
+        # + /slam/pose (full pose correction from RTAB-Map). SLAM is
+        # mandatory in this build; without it the filter drifts.
         Node(
             package='swerve_formation',
             executable='ekf_node',
             name='ekf_node' + suffix,
             parameters=[{
                 'robot_id': robot_id,
-                'use_slam': enable_slam,
             }],
             output='screen',
         ),
@@ -141,7 +154,8 @@ def launch_setup(context, *args, **kwargs):
             output='screen',
         ),
 
-        # Formation size (leader-only) — computes bounding envelope
+        # Formation size (leader-only) — publishes /formation/footprint Polygon
+        # consumed by both path_planner_node and path_follower_node.
         Node(
             package='swerve_formation',
             executable='formation_size_node',
@@ -149,11 +163,26 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{'robot_id': robot_id}],
             output='screen',
         ),
-    ]
 
-    if enable_slam:
-        # Camera + RTAB-Map localization (base and EKF already started above)
-        nodes.append(IncludeLaunchDescription(
+        # Pre-run alignment — leader coordinates depth-based spacing
+        # correction using the OAK-D camera.
+        Node(
+            package='swerve_formation',
+            executable='alignment_node',
+            name='alignment_node' + suffix,
+            parameters=[{
+                'robot_id': robot_id,
+                'neighbors': neighbors,
+                'offset_init_mode': offset_init_mode,
+            }],
+            output='screen',
+        ),
+
+        # Camera + RTAB-Map localization. Publishes:
+        #   map → {robot_id}_odom TF (continuous correction)
+        #   /{rid}/rtabmap/localization_pose → /{rid}/slam/pose (via relay)
+        # The /slam/pose feed is what makes ekf_node world-frame anchored.
+        IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([
                 FindPackageShare('swerve_bringup'), 'launch',
                 'rtabmap_localization.launch.py',
@@ -169,40 +198,8 @@ def launch_setup(context, *args, **kwargs):
                 'enable_base': 'false',
                 'enable_ekf':  'false',
             }.items(),
-        ))
-        # Pre-run alignment — leader coordinates depth-based spacing
-        # correction. Needs the OAK-D, so it only runs with SLAM on.
-        nodes.append(Node(
-            package='swerve_formation',
-            executable='alignment_node',
-            name='alignment_node' + suffix,
-            parameters=[{
-                'robot_id': robot_id,
-                'neighbors': neighbors,
-                'offset_init_mode': offset_init_mode,
-            }],
-            output='screen',
-        ))
-    else:
-        # Stand-in for RTAB-Map's `map → {robot_id}_odom` so ros_pose_bridge's
-        # TF lookup completes. Identity offset works because the GUI's
-        # "Set Initial Pose" tool sends map-frame coords directly to
-        # /{robot_id}/initialpose, and the EKF treats those values as
-        # its own (odom-frame) state. Map and odom are aliased.
-        nodes.append(Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='static_map_to_odom' + suffix,
-            arguments=[
-                '--frame-id', 'map',
-                '--child-frame-id', f'{robot_id}_odom',
-                '--x', '0', '--y', '0', '--z', '0',
-                '--yaw', '0', '--pitch', '0', '--roll', '0',
-            ],
-            output='screen',
-        ))
-
-    return nodes
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -210,8 +207,7 @@ def generate_launch_description():
         DeclareLaunchArgument('robot_id',         default_value='tb3_0'),
         DeclareLaunchArgument('usb_port',         default_value='/dev/ttyACM0'),
         # k_gain — Laplacian consensus gain. 0.1 is the docstring-recommended
-        # safe value (cm-scale positional error → mm/s velocity correction);
-        # the previous default (1.5) was set when consensus was always off.
+        # safe value (cm-scale positional error → mm/s velocity correction).
         # Crank up cautiously if the formation visibly drifts apart over
         # the demo run; back off to 0.05 if it jitters or oscillates.
         DeclareLaunchArgument('k_gain',           default_value='0.1'),
@@ -226,18 +222,13 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_x',            default_value='0.10'),
         DeclareLaunchArgument('cam_y',            default_value='0.00'),
         DeclareLaunchArgument('cam_z',            default_value='0.15'),
-        DeclareLaunchArgument('enable_slam',      default_value='true',
-                              description=('When false, skip RTAB-Map / camera, '
-                                           'add a static map→odom TF, and run '
-                                           'EKF on odom+IMU only. Used for the '
-                                           'GUI-anchored real-robot demo.')),
         DeclareLaunchArgument('enable_consensus', default_value='true',
                               description=('When true, laplacian_formation_node '
                                            'closes the loop on inter-robot pose '
                                            'using both /ekf/odom feeds — small '
                                            'velocity corrections counteract '
-                                           'wheel-odom drift over the run. '
-                                           'Falls back to pure feedforward if '
-                                           'either neighbour pose is missing.')),
+                                           'residual drift over the run. Falls '
+                                           'back to pure feedforward if either '
+                                           'neighbour pose is missing.')),
         OpaqueFunction(function=launch_setup),
     ])

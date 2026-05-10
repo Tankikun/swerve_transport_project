@@ -13,17 +13,21 @@ class EKFNode(Node):
       1. IMU yaw    — `/{robot_id}/imu`         (1-D θ observation)
       2. SLAM pose  — `/{robot_id}/slam/pose`   (full 3-D x,y,θ)
 
-    The IMU is the primary correction now that visual localisation
-    (RTAB-Map) is no longer guaranteed for the demo. SLAM, when present,
-    refines x,y too and is kept as an opt-in fallback. State: [x, y, θ].
+    State: [x, y, θ]. Only this node reads raw /{robot_id}/odom.
+    Publishes authoritative pose on /{robot_id}/ekf/odom and a
+    PoseStamped twin on /{robot_id}/pose for path_planner_node.
 
-    Only this node reads raw /{robot_id}/odom.
-    Publishes authoritative pose on /{robot_id}/ekf/odom.
+    SLAM correction is **mandatory** in this build — the visual pose
+    from RTAB-Map (relayed by `slam_pose_relay_node`) is what gives the
+    filter a world-frame anchor. Without it the state would just
+    integrate wheel odom + IMU yaw and drift. The branch that supported
+    a no-SLAM mode is on `interface/v5-final`; this branch
+    (`interface/v6-fuckyea`) commits to localization being available.
 
     `/{robot_id}/initialpose` (PoseWithCovarianceStamped) hard-resets
-    the state and covariance — the GUI's "Set Initial Pose" tool fans
-    out to this topic so the EKF picks up the user-clicked pose even
-    when no SLAM correction is ever produced.
+    the state and covariance. The GUI's "Set Initial Pose" tool fans
+    this out so the operator can hint RTAB-Map's relocalization scan
+    when the visual match would otherwise take 5–30 s.
     """
 
     def __init__(self):
@@ -34,10 +38,6 @@ class EKFNode(Node):
         # ~1° once warm; SLAM yaw is matched-keyframe-quality.
         self.declare_parameter('imu_yaw_var', 0.005)
         self.declare_parameter('slam_var', [0.05, 0.05, 0.02])
-        # When true, /slam/pose corrections are ignored. Set this for
-        # demos where RTAB-Map will not be running and we don't want
-        # spurious old-cached SLAM messages to perturb the filter.
-        self.declare_parameter('use_slam', True)
         robot_id = self.get_parameter('robot_id').value
         # Per-robot TF frame ids — must match what conveyor_base_node and the
         # static_transform_publisher in oak_camera.launch.py use, otherwise
@@ -51,11 +51,12 @@ class EKFNode(Node):
         slam_var = list(self.get_parameter('slam_var').value)
         self._R_slam = np.diag(slam_var)         # SLAM observation noise
         self._R_imu = np.array([[float(self.get_parameter('imu_yaw_var').value)]])
-        self._use_slam = bool(self.get_parameter('use_slam').value)
         self._last_t: float | None = None
 
         # IMU yaw is reported in the IMU's own (boot-time) frame; align
-        # it to the EKF's world frame on the first valid sample.
+        # it to the EKF's world frame on the first valid sample (and on
+        # every SLAM correction, so a re-anchored visual fix overrides
+        # any drift in the IMU's onboard filter).
         self._imu_yaw_offset: float | None = None
 
         # Only this node reads raw /odom
@@ -71,13 +72,12 @@ class EKFNode(Node):
         # path_planner_node (laptop) subscribes to /{robot_id}/pose to
         # compute the formation's virtual centre. We republish the same
         # EKF state as a PoseStamped on every publish — frame_id 'map'
-        # because, with `enable_slam:=false`, conveyor.launch.py installs
-        # a static map → {robot_id}_odom identity TF that aliases the
-        # two frames, and the GUI's clicked goal is in 'map'.
+        # because RTAB-Map publishes `map → {robot_id}_odom` and the GUI
+        # operates in the `map` frame.
         self._pose_pub = self.create_publisher(
             PoseStamped, f'/{robot_id}/pose', 10)
         self.get_logger().info(
-            f'EKF ready for {robot_id} (use_slam={self._use_slam}, '
+            f'EKF ready for {robot_id} (SLAM-anchored, '
             f'imu_yaw_var={float(self._R_imu[0, 0]):.4f})'
         )
 
@@ -143,11 +143,9 @@ class EKFNode(Node):
         self._publish()
 
     # ------------------------------------------------------------------
-    # Correction step: SLAM pose update (optional)
+    # Correction step: SLAM pose update (mandatory in v6 — visual anchor)
     # ------------------------------------------------------------------
     def _slam_cb(self, msg: PoseStamped):
-        if not self._use_slam:
-            return
         q = msg.pose.orientation
         siny = 2.0 * (q.w * q.z + q.x * q.y)
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
